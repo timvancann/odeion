@@ -27,11 +27,6 @@ impl Region {
     fn is(&self, start: Duration, end: Duration) -> bool {
         self.start.abs_diff(start) <= SAME && self.end.abs_diff(end) <= SAME
     }
-
-    /// The loop that plays this region.
-    pub fn looped(&self) -> Loop {
-        Loop { start: Some(self.start), end: Some(self.end), off: false }
-    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

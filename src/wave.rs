@@ -160,6 +160,23 @@ pub fn read(path: &Path) -> Result<Wave, String> {
     Ok(Wave { rate, points })
 }
 
+/// The waveform of a stem set as heard summed, from each stem's: combined point by point
+/// (the loudest peak; mean squares add, as uncorrelated parts do). One wave is itself.
+pub fn mix(parts: &[Wave]) -> Wave {
+    let mut parts = parts.iter();
+    let Some(mut mix) = parts.next().cloned() else { return Wave::default() };
+    for wave in parts {
+        if wave.points.len() > mix.points.len() {
+            mix.points.resize(wave.points.len(), Point::default());
+        }
+        for (m, p) in mix.points.iter_mut().zip(&wave.points) {
+            m.peak = m.peak.max(p.peak);
+            m.square += p.square;
+        }
+    }
+    mix
+}
+
 /// Points `first` up to `last` (or the end) of one song.
 fn stretch(path: &Path, rate: u32, first: usize, last: Option<usize>) -> Result<Vec<Point>, String> {
     let mut format = open(path)?;
@@ -306,6 +323,16 @@ mod tests {
         assert_eq!(fit(s(8.0), s(7.5)), s(7.5 * 1.3));
         assert_eq!(frame(s(2.0)), s(2.0 * 1.3));
         assert_eq!(frame(s(0.1)), s(0.5));
+    }
+
+    #[test]
+    fn stems_mix_into_one_wave() {
+        let one = Wave { rate: 100, points: vec![Point { peak: 0.5, square: 0.1 }; 3] };
+        let two = Wave { rate: 100, points: vec![Point { peak: 0.8, square: 0.2 }; 4] };
+        let m = mix(&[one, two]);
+        assert_eq!(m.points.len(), 4);
+        assert_eq!(m.points[0], Point { peak: 0.8, square: 0.3 });
+        assert_eq!(m.points[3], Point { peak: 0.8, square: 0.2 });
     }
 
     #[test]

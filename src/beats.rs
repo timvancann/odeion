@@ -130,13 +130,36 @@ pub fn cached(path: &Path, size: u64, modified: u64, dir: &Path) -> Result<Beats
     Ok(beats)
 }
 
+/// The beats of a stem set, found in the stems summed.
+pub fn read_mix(files: &[std::path::PathBuf]) -> Result<Beats, String> {
+    let (mix, rate) = mono_mix(files)?;
+    Ok(Beats { times: detect(&mix, rate) })
+}
+
+/// Stems decoded to mono and summed, as heard together.
+pub(crate) fn mono_mix(files: &[std::path::PathBuf]) -> Result<(Vec<f32>, u32), String> {
+    let mut mix: Vec<f32> = Vec::new();
+    let mut rate = 0;
+    for f in files {
+        let (x, r) = mono(f)?;
+        rate = r;
+        if mix.len() < x.len() {
+            mix.resize(x.len(), 0.0);
+        }
+        for (m, v) in mix.iter_mut().zip(x) {
+            *m += v;
+        }
+    }
+    Ok((mix, rate))
+}
+
 /// Finds the beats in a song.
 pub fn read(path: &Path) -> Result<Beats, String> {
     let (mono, rate) = mono(path)?;
     Ok(Beats { times: detect(&mono, rate) })
 }
 
-fn mono(path: &Path) -> Result<(Vec<f32>, u32), String> {
+pub(crate) fn mono(path: &Path) -> Result<(Vec<f32>, u32), String> {
     let mut format = crate::wave::open(path)?;
     let track = format.default_track().ok_or("no audio track")?.clone();
     let rate = track.codec_params.sample_rate.ok_or("unknown sample rate")?;
@@ -164,10 +187,16 @@ fn mono(path: &Path) -> Result<(Vec<f32>, u32), String> {
 }
 
 /// The beat times in mono audio at `rate`.
-pub fn detect(mono: &[f32], rate: u32) -> Vec<Duration> {
+/// Onset strength every 10 ms (and that step in samples), normalised.
+pub(crate) fn strength(mono: &[f32], rate: u32) -> (Vec<f32>, usize) {
     let hop = ((rate as f64 / 100.0).round() as usize).max(1); // 10 ms
     let fps = rate as f64 / hop as f64;
-    let strength = normalise(&onsets(mono, hop), (fps * 0.25) as usize);
+    (normalise(&onsets(mono, hop), (fps * 0.25) as usize), hop)
+}
+
+pub fn detect(mono: &[f32], rate: u32) -> Vec<Duration> {
+    let (strength, hop) = strength(mono, rate);
+    let fps = rate as f64 / hop as f64;
     if strength.len() < 2 * (fps as usize) {
         return Vec::new();
     }
@@ -190,7 +219,7 @@ pub fn detect(mono: &[f32], rate: u32) -> Vec<Duration> {
 }
 
 /// How sharply the level rises into each block (about a millisecond) of the song.
-fn rises(mono: &[f32], block: usize) -> Vec<f32> {
+pub(crate) fn rises(mono: &[f32], block: usize) -> Vec<f32> {
     let level: Vec<f32> = mono
         .chunks(block)
         .map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32 + 1e-9).ln())

@@ -88,7 +88,7 @@ pub fn per_root(roots: &[PathBuf], tracks: &[Track]) -> Vec<usize> {
     counts
 }
 
-fn is_audio(path: &Path) -> bool {
+pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| AUDIO.contains(&e.to_ascii_lowercase().as_str()))

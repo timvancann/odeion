@@ -32,6 +32,12 @@ and draws:
   them. Found in the background when a song starts, about 0.3 s, and cached in
   `beats/` in the data folder (re-found when the file or `DETECTOR` changes). Old rock drifts, so
   the grid is the detected beats, never "BPM times n".
+- `variations.rs`: other recordings of a song (a backing track, a stem set), stored in
+  `variations.json`. Built in the background when files are dropped or picked: a much
+  shorter file (a count-in) is left out, stems are named by what sets their file names
+  apart, and the set is aligned to the song by its onsets (10 ms to find, 1 ms rises to
+  place). One that doesn't clearly match gets a timeline of its own. Tim's backing track
+  aligned at +1.907 s, his Moises stems at +0.047 s (encoder delay).
 - `regions.rs`: loops saved under a name per song (`regions.json` in the data folder):
   order, renaming the same stretch, next and previous, removal.
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
@@ -107,6 +113,15 @@ key to both or the test fails.
   played from (or saved as) a region stays bound to it: edge changes are saved into the
   region, until the loop slides away (`< >`), is cleared, or another region or song plays. The
   practice view shows them as named blocks above the overview; a click plays one.
+- **Variations**: drop files or a folder on a song (or the practice view), or `V` to
+  pick; `v` cycles the song and its variations, keeping the position where they line
+  up, `X` removes the playing one. Linked files leave the song list; songs with
+  variations show `+N`. Each recording has regions of its own (keyed by its first
+  file) and remembers its own loop: switching puts this one's away and brings the
+  next one's back. Tim's choice, over sharing them across aligned recordings.
+  Everything plays through one `audio::Mix`, a single file being a mix of one, so a
+  stem set's `1`–`9` mute and `⌥1`–`⌥9` solo are instant; the practice view adds a
+  lane per stem. A metronome stem starts muted.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), the
   theme picker, which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
   Esc restores), and vim keys on or off.
@@ -131,7 +146,9 @@ cuts off whatever he is practising. Build, then tell him to restart. Playing aud
 makes noise in his room, so verify decoding without an output device (rodio's
 `Decoder` plus `try_seek` in a throwaway test) and leave listening to him. To see the
 UI, screenshot the window with `screencapture -l<window id>`; driving keys would steal
-his keyboard focus.
+his keyboard focus. So does merely opening a second riff window: whatever Tim is typing
+elsewhere then lands in it as riff keys (a stray `1` muted a stem, a `v` switched
+recordings). Only open one when he isn't typing, or ask first.
 
 Before committing: `cargo test && cargo build --release`, no warnings. Work on `main`;
 commit signing is off for this repo.

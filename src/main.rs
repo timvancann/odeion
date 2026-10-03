@@ -9,6 +9,7 @@ mod scan;
 mod state;
 mod theme;
 mod ui;
+mod variations;
 mod view;
 mod wave;
 

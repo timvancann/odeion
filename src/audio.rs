@@ -4,9 +4,9 @@ use rodio::source::SeekError;
 use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source};
 use std::fs::File;
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
@@ -146,7 +146,71 @@ fn shifted(at: Duration, by: f64) -> Duration {
     Duration::from_secs_f64((at.as_secs_f64() + by).max(0.0))
 }
 
-type Song = Decoder<BufReader<File>>;
+type Song = Mix<Decoder<BufReader<File>>>;
+
+/// Several recordings played as one, sample by sample: a stem set summed, each at its
+/// own gain, read live so muting a stem is instant. A single file is a mix of one.
+pub(crate) struct Mix<S> {
+    stems: Vec<S>,
+    gains: Arc<Vec<AtomicU32>>,
+}
+
+impl<S: Source> Mix<S> {
+    fn new(stems: Vec<S>, gains: Arc<Vec<AtomicU32>>) -> Result<Self, String> {
+        let first = stems.first().ok_or("nothing to play")?;
+        let (channels, rate) = (first.channels(), first.sample_rate());
+        if stems.iter().any(|s| s.channels() != channels || s.sample_rate() != rate) {
+            return Err("the stems differ in channels or sample rate".into());
+        }
+        Ok(Mix { stems, gains })
+    }
+}
+
+impl<S: Source> Iterator for Mix<S> {
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<rodio::Sample> {
+        let mut sum = 0.0;
+        let mut any = false;
+        for (stem, gain) in self.stems.iter_mut().zip(self.gains.iter()) {
+            // A stem that ends early is silence from there on.
+            if let Some(v) = stem.next() {
+                sum += v * f32::from_bits(gain.load(Ordering::Relaxed));
+                any = true;
+            }
+        }
+        any.then_some(sum)
+    }
+}
+
+impl<S: Source> Source for Mix<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        self.stems[0].channels()
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        self.stems[0].sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.stems.iter().filter_map(|s| s.total_duration()).max()
+    }
+
+    fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
+        for stem in &mut self.stems {
+            stem.try_seek(at)?;
+        }
+        Ok(())
+    }
+}
+
+fn gains(of: &[f32]) -> Arc<Vec<AtomicU32>> {
+    Arc::new(of.iter().map(|g| AtomicU32::new(g.to_bits())).collect())
+}
 
 /// What the audio thread and the window share: the loop to keep, in frames (`NONE` for
 /// no loop), and how far the song has played.
@@ -243,7 +307,12 @@ pub struct Audio {
     sink: Option<MixerDeviceSink>,
     player: Option<Player>,
     loading: Option<Receiver<Result<Song, String>>>,
-    pub path: Option<PathBuf>,
+    /// What plays: one file, or the stems of a set.
+    pub files: Vec<PathBuf>,
+    /// Each file's gain, read live by the audio thread.
+    gains: Arc<Vec<AtomicU32>>,
+    /// Stay paused once the files open (a switch made while paused).
+    start_paused: bool,
     pub duration: Option<Duration>,
     pub looping: Loop,
     pub error: Option<String>,
@@ -270,29 +339,56 @@ impl Audio {
             start_at: None,
             shared: Arc::default(),
             rate: 44_100,
-            path: None,
+            files: Vec::new(),
+            gains: gains(&[]),
+            start_paused: false,
             duration: None,
             looping: Loop::default(),
         }
     }
 
-    /// Starts a song. Opening happens on a thread: a file still syncing can take a while.
-    pub fn play(&mut self, path: &Path) {
+    /// Starts a song: one file, or a stem set summed at `gains_now`. Opening happens on
+    /// a thread: a file still syncing can take a while.
+    pub fn play(&mut self, files: &[PathBuf], gains_now: &[f32]) {
         self.player = None;
         self.duration = None;
         self.error = None;
         self.looping = Loop::default();
-        self.path = Some(path.to_path_buf());
+        self.start_paused = false;
+        self.files = files.to_vec();
+        self.gains = gains(gains_now);
         let (tx, rx) = channel();
-        let path = path.to_path_buf();
+        let (files, gains) = (files.to_vec(), self.gains.clone());
         std::thread::spawn(move || {
-            let song = File::open(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|f| Decoder::try_from(f).map_err(|e| e.to_string()));
-            let _ = tx.send(song);
+            let stems = files
+                .iter()
+                .map(|path| {
+                    File::open(path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|f| Decoder::try_from(f).map_err(|e| e.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let _ = tx.send(stems.and_then(|stems| Mix::new(stems, gains)));
         });
         self.loading = Some(rx);
         self.start_at = None;
+    }
+
+    /// Switches to other files (a variation) at `at`, with `looping`, playing or paused
+    /// as before.
+    pub fn switch(&mut self, files: &[PathBuf], gains_now: &[f32], at: Duration, looping: Loop) {
+        let paused = !self.playing();
+        self.play(files, gains_now);
+        self.looping = looping;
+        self.start_at = Some(at);
+        self.start_paused = paused;
+    }
+
+    /// The stems' gains, from now on.
+    pub fn set_gains(&self, now: &[f32]) {
+        for (gain, g) in self.gains.iter().zip(now) {
+            gain.store(g.to_bits(), Ordering::Relaxed);
+        }
     }
 
     /// Called often: picks up a song that finished opening and keeps the loop.
@@ -312,6 +408,9 @@ impl Audio {
                     player.append(Looped::new(song, self.shared.clone()));
                     if let Some(at) = self.start_at.take() {
                         let _ = player.try_seek(at);
+                    }
+                    if std::mem::take(&mut self.start_paused) {
+                        player.pause();
                     }
                     self.player = Some(player);
                 }
@@ -364,9 +463,11 @@ impl Audio {
     pub fn toggle(&mut self) {
         match &self.player {
             Some(p) if p.empty() => {
-                if let Some(path) = self.path.clone() {
+                if !self.files.is_empty() {
                     let looping = self.looping;
-                    self.play(&path);
+                    let now: Vec<f32> =
+                        self.gains.iter().map(|g| f32::from_bits(g.load(Ordering::Relaxed))).collect();
+                    self.play(&self.files.clone(), &now);
                     self.looping = looping;
                 }
             }
@@ -607,7 +708,9 @@ mod tests {
             sink: None,
             player: None,
             loading: None,
-            path: None,
+            files: Vec::new(),
+            gains: gains(&[]),
+            start_paused: false,
             duration: None,
             looping: looped(0, 16),
             error: None,
@@ -621,6 +724,25 @@ mod tests {
         audio.seek(s(120));
         assert_eq!(audio.shared.start.load(Ordering::Relaxed), 120_000);
         assert_eq!(audio.shared.end.load(Ordering::Relaxed), 140_000);
+    }
+
+    #[test]
+    fn stems_are_summed_at_their_gains_live() {
+        let g = gains(&[1.0, 0.5]);
+        let mut mix = Mix::new(
+            vec![Counting { at: 0, frames: 10 }, Counting { at: 0, frames: 4 }],
+            g.clone(),
+        )
+        .unwrap();
+        // Frame 2 (both channels): 2 + 0.5 * 2.
+        let first: Vec<rodio::Sample> = mix.by_ref().take(6).collect();
+        assert_eq!(first[4], 3.0);
+        // Muted from here on; the second stem ends after frame 3 anyway.
+        g[1].store(0.0f32.to_bits(), Ordering::Relaxed);
+        assert_eq!(mix.next(), Some(3.0));
+        let rest: Vec<rodio::Sample> = mix.collect();
+        assert_eq!(rest.len(), 2 * 10 - 7);
+        assert_eq!(rest.last(), Some(&9.0));
     }
 
     #[test]

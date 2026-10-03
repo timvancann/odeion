@@ -58,6 +58,16 @@ pub enum Action {
     Region(bool),
     /// Delete the region the loop is.
     RemoveRegion,
+    /// The playing song's next recording: the song, then each variation.
+    Variation,
+    /// Pick files to add as a variation of the playing song.
+    AddVariation,
+    /// Remove the playing variation.
+    RemoveVariation,
+    /// Mute or unmute stem n (from 0) of a stem set.
+    Mute(usize),
+    /// Solo stem n, or end the solo.
+    Solo(usize),
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift
@@ -68,6 +78,7 @@ pub struct Press<'a> {
     pub cmd: bool,
     pub ctrl: bool,
     pub shift: bool,
+    pub alt: bool,
 }
 
 /// Keys that work everywhere, searching or not: ⌘ and ⌃ shortcuts, arrows, paging.
@@ -111,6 +122,10 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
     if p.key == "p" && p.shift && !p.ctrl {
         return Some(Practice);
     }
+    // Stems by number: 1 to 9 mute, ⌥ solos. Shift would collide with ( and ^.
+    if let Some(n) = p.key.parse::<usize>().ok().filter(|n| (1..=9).contains(n) && !p.ctrl) {
+        return Some(if p.alt { Solo(n - 1) } else { Mute(n - 1) });
+    }
     if !p.ctrl {
         match (p.key, p.shift) {
             ("b", false) => return Some(Grid),
@@ -118,6 +133,9 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
             ("n", false) => return Some(Region(true)),
             ("n", true) => return Some(Region(false)),
             ("x", false) => return Some(RemoveRegion),
+            ("v", false) => return Some(Variation),
+            ("v", true) => return Some(AddVariation),
+            ("x", true) => return Some(RemoveVariation),
             _ => {}
         }
     }
@@ -211,6 +229,11 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("P", "", "the waveform, on or off"),
             ("- =", "", "zoom out or in"),
             ("b", "", "beat grid: loops and steps follow the beats"),
+            ("v", "", "next recording: the song, its variations"),
+            ("V", "", "add a variation (or drop files on a song)"),
+            ("X", "", "remove the playing variation"),
+            ("1 2 3", "", "mute stem 1, 2, 3 (up to 9)"),
+            ("⌥1 ⌥2", "", "solo stem 1, 2 (again to end it)"),
         ],
     ),
     (
@@ -256,6 +279,10 @@ mod tests {
             Some(rest) => (true, rest),
             None => (false, rest),
         };
+        let (alt, rest) = match rest.strip_prefix('⌥') {
+            Some(rest) => (true, rest),
+            None => (false, rest),
+        };
         let named = match rest {
             "←" => "left",
             "→" => "right",
@@ -275,7 +302,7 @@ mod tests {
         } else {
             named
         };
-        vec![Press { key, cmd, ctrl, shift: upper && !ctrl && !cmd }]
+        vec![Press { key, cmd, ctrl, shift: upper && !ctrl && !cmd, alt }]
     }
 
     fn resolve(cap: &str, vim: bool) -> Option<Action> {

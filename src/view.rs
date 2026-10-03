@@ -8,6 +8,7 @@ use crate::library::{self, Track};
 use crate::media::Media;
 use crate::playlist::Playlist;
 use crate::regions::{Region, Regions};
+use crate::variations::{self, Variation, Variations};
 use crate::scan;
 use crate::state::{self, Favorites, Settings};
 use crate::theme::{self, Theme};
@@ -15,7 +16,7 @@ use crate::ui::{self, *};
 use crate::wave::{self, Wave};
 use gpui::{
     Bounds, Context, Div, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ObjectFit,
+    ExternalPaths, ObjectFit,
     PathPromptOptions, Pixels, ScrollStrategy, Stateful, UniformListScrollHandle, Window, canvas,
     div, fill, img, point, prelude::*, px, relative, rgb, size, uniform_list,
 };
@@ -136,7 +137,12 @@ pub struct Riff {
     practice: bool,
     /// The playing song's waveform, once read; read for every song, shown or not.
     wave: Option<(PathBuf, Rc<Wave>)>,
-    reading: Option<(PathBuf, Receiver<Result<Wave, String>>)>,
+    reading: Option<(PathBuf, Receiver<Result<Vec<Wave>, String>>)>,
+    /// Each stem's waveform, when a stem set plays.
+    stem_waves: Vec<Rc<Wave>>,
+    /// Which stems are muted, and the one soloed.
+    muted: Vec<bool>,
+    solo: Option<usize>,
     /// The playing song's beats, found in the background like the waveform.
     beats: Option<(PathBuf, Rc<Beats>)>,
     finding: Option<(PathBuf, Receiver<Result<Beats, String>>)>,
@@ -146,6 +152,14 @@ pub struct Riff {
     regions: Regions,
     /// The name being typed for the loop as a region (`r`).
     naming: Option<String>,
+    /// Other recordings per song, and which of the playing song's is on: 0 the song
+    /// itself, n its n-th variation.
+    variations: Variations,
+    variation: usize,
+    /// Each recording's loop while another plays, so switching back brings it back.
+    loops: HashMap<PathBuf, crate::audio::Loop>,
+    /// Files being made a variation of a song, in the background.
+    adding: Option<(PathBuf, Receiver<Result<Variation, String>>)>,
     /// The region the loop came from: changes to the loop's edges are saved into it, until
     /// the loop slides away, is cleared, or another region or song plays.
     bound: Option<Region>,
@@ -182,6 +196,10 @@ fn cache_file() -> PathBuf {
 
 fn favorites_file() -> PathBuf {
     state::data_dir().join("favorites.json")
+}
+
+fn variations_file() -> PathBuf {
+    state::data_dir().join("variations.json")
 }
 
 fn regions_file() -> PathBuf {
@@ -254,12 +272,19 @@ impl Riff {
             practice: false,
             wave: None,
             reading: None,
+            stem_waves: Vec::new(),
+            muted: Vec::new(),
+            solo: None,
             beats: None,
             finding: None,
             grid: false,
             regions: Regions::load(&regions_file()),
             naming: None,
             bound: None,
+            variations: Variations::load(&variations_file()),
+            variation: 0,
+            loops: HashMap::new(),
+            adding: None,
             wave_error: None,
             span: SPAN,
             smooth: Default::default(),
@@ -457,10 +482,46 @@ impl Riff {
             && let Ok(result) = rx.try_recv()
         {
             match result {
-                Ok(w) => self.wave = Some((path.clone(), Rc::new(w))),
+                Ok(parts) => {
+                    self.wave = Some((path.clone(), Rc::new(wave::mix(&parts))));
+                    if parts.len() > 1 {
+                        self.stem_waves = parts.into_iter().map(Rc::new).collect();
+                    }
+                }
                 Err(e) => self.wave_error = Some(e),
             }
             self.reading = None;
+            changed = true;
+        }
+        if let Some((song, rx)) = &self.adding
+            && let Some(result) = match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("the reader stopped without an answer".into()))
+                }
+            }
+        {
+            let song = song.clone();
+            self.adding = None;
+            match result {
+                Ok(v) => {
+                    let how = match v.offset {
+                        Some(o) if o.abs() < 0.002 => "lined up with the song".to_string(),
+                        Some(o) => format!("lined up, {:+.3} s from the song", o),
+                        None => "on its own timeline".to_string(),
+                    };
+                    let what = if v.files.len() > 1 { format!("{} stems", v.files.len()) } else { v.label.clone() };
+                    // Said first, so a failure to store replaces it rather than hides.
+                    self.message = Some((format!("added {what}, {how}; v switches"), false));
+                    self.variations.add(&song, v);
+                    self.store_variations();
+                    let keep = self.selected_path();
+                    self.rebuild_rows();
+                    self.reindex(keep);
+                }
+                Err(e) => self.message = Some((format!("couldn't add that: {e}"), true)),
+            }
             changed = true;
         }
         if let Some((path, rx)) = &self.finding
@@ -599,11 +660,16 @@ impl Riff {
                 self.rows.extend(favorites.into_iter().map(Row::Track));
                 self.rows.push(Row::Header("Library".into()));
             }
-            self.rows.extend((0..self.tracks.len()).map(Row::Track));
+            self.rows.extend(
+                (0..self.tracks.len())
+                    .filter(|&i| !self.variations.is_variation(&self.tracks[i].path))
+                    .map(Row::Track),
+            );
         } else {
             self.rows.extend(
                 library::search(&self.tracks, &self.query)
                     .into_iter()
+                    .filter(|&i| !self.variations.is_variation(&self.tracks[i].path))
                     .map(Row::Track),
             );
         }
@@ -643,16 +709,14 @@ impl Riff {
 
     fn play(&mut self, track: Track) {
         self.bound = None;
-        self.audio.play(&track.path);
+        self.variation = 0;
+        self.muted.clear();
+        self.solo = None;
+        self.audio.play(std::slice::from_ref(&track.path), &[1.0]);
         if self.wave.as_ref().is_none_or(|(p, _)| *p != track.path) {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let path = track.path.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(wave::read(&path));
-            });
-            self.reading = Some((track.path.clone(), rx));
-            self.wave = None;
-            self.wave_error = None;
+            self.read_wave(vec![track.path.clone()]);
+        }
+        if self.beats.as_ref().is_none_or(|(p, _)| *p != track.path) {
             let (tx, rx) = std::sync::mpsc::channel();
             let (path, size, modified) = (track.path.clone(), track.size, track.modified);
             std::thread::spawn(move || {
@@ -664,6 +728,171 @@ impl Riff {
         }
         self.now = Some(track);
         self.message = None;
+    }
+
+    /// Reads the waveform of what plays (stems summed), keyed by its first file.
+    fn read_wave(&mut self, files: Vec<PathBuf>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let key = files[0].clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(files.iter().map(|f| wave::read(f)).collect());
+        });
+        self.reading = Some((key, rx));
+        self.wave = None;
+        self.wave_error = None;
+        self.stem_waves.clear();
+    }
+
+    /// Each stem's gain: the soloed one alone, otherwise all but the muted.
+    fn gains(&self) -> Vec<f32> {
+        (0..self.muted.len())
+            .map(|i| match self.solo {
+                Some(s) => (s == i) as u8 as f32,
+                None => (!self.muted[i]) as u8 as f32,
+            })
+            .collect()
+    }
+
+    /// The playing variation, if one is on rather than the song itself.
+    fn current_variation(&self) -> Option<&Variation> {
+        let now = self.now.as_ref()?;
+        self.variations.of(&now.path).get(self.variation.checked_sub(1)?)
+    }
+
+    /// Seconds from the song's timeline to what plays: 0 for the song, a variation's
+    /// offset, or none for a variation on a timeline of its own.
+    fn offset(&self) -> Option<f64> {
+        match self.current_variation() {
+            None => Some(0.0),
+            Some(v) => v.offset,
+        }
+    }
+
+    /// The next recording of the playing song: the song, then each variation. Position
+    /// and loop carry over between recordings that line up; one on its own timeline
+    /// starts from its beginning.
+    fn next_variation(&mut self) {
+        let Some(now) = self.now.clone() else { return };
+        let list = self.variations.of(&now.path).to_vec();
+        if list.is_empty() {
+            self.message = Some(("no variations: drop files on the song, or V to pick".into(), false));
+            return;
+        }
+        let target = (self.variation + 1) % (list.len() + 1);
+        let into = if target == 0 { Some(0.0) } else { list[target - 1].offset };
+        // Each recording keeps its own loop: this one's is put away, the next one's
+        // comes back. The position carries over where the two line up.
+        if let Some(leaving) = self.recording() {
+            self.loops.insert(leaving, self.audio.looping);
+        }
+        let at = match (self.offset(), into) {
+            (Some(from), Some(to)) => {
+                Duration::from_secs_f64((self.audio.position().as_secs_f64() + to - from).max(0.0))
+            }
+            _ => Duration::ZERO,
+        };
+        let (files, gains, label) = match target {
+            0 => (vec![now.path.clone()], vec![1.0], "the song".to_string()),
+            n => {
+                let v = &list[n - 1];
+                (v.files.clone(), variations::default_gains(v), v.label.clone())
+            }
+        };
+        self.bound = None;
+        self.variation = target;
+        let looping = self.recording().and_then(|r| self.loops.get(&r).copied()).unwrap_or_default();
+        // A stem muted from the start (the metronome) shows as muted; one recording has
+        // no stems to mute.
+        self.muted = if files.len() > 1 { gains.iter().map(|g| *g == 0.0).collect() } else { Vec::new() };
+        self.solo = None;
+        self.audio.switch(&files, &gains, at, looping);
+        if looping.active() {
+            self.frame_loop();
+        }
+        if self.wave.as_ref().is_none_or(|(p, _)| *p != files[0]) {
+            self.read_wave(files.clone());
+        }
+        if into.is_some() {
+            self.song_beats();
+        }
+        if into.is_none() && self.beats.as_ref().is_none_or(|(p, _)| *p != files[0]) {
+            // On its own timeline the song's beats don't apply; find this one's.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let key = files[0].clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(beats::read_mix(&files));
+            });
+            self.finding = Some((key, rx));
+        }
+        let timeline = if into.is_none() { ", its own timeline" } else { "" };
+        self.message = Some((format!("playing {label}{timeline}"), false));
+    }
+
+    /// The song's own beats again, after a recording with a timeline of its own had them
+    /// replaced (from the cache, so at once).
+    fn song_beats(&mut self) {
+        let Some(now) = self.now.clone() else { return };
+        if self.beats.as_ref().is_some_and(|(p, _)| *p == now.path) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (path, size, modified) = (now.path.clone(), now.size, now.modified);
+        std::thread::spawn(move || {
+            let dir = state::data_dir().join("beats");
+            let _ = tx.send(beats::cached(&path, size, modified, &dir));
+        });
+        self.finding = Some((now.path, rx));
+    }
+
+    /// Makes dropped or picked files a variation of `song`, in the background: reading
+    /// and aligning takes a moment.
+    fn add_variation(&mut self, song: PathBuf, dropped: Vec<PathBuf>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = song.clone();
+        let names: Vec<String> = dropped
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        std::thread::spawn(move || {
+            // A panic becomes an error to show, not a reader that silently never answers.
+            let built = std::panic::catch_unwind(|| variations::build(&path, &dropped))
+                .unwrap_or_else(|panic| {
+                    let why = panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "it crashed".into());
+                    Err(format!("reading failed: {why}"))
+                });
+            let _ = tx.send(built);
+        });
+        self.adding = Some((song, rx));
+        self.message = Some((format!("reading {}…", names.join(", ")), false));
+    }
+
+    fn pick_variation(&mut self, cx: &mut Context<Self>) {
+        let Some(song) = self.now.as_ref().map(|n| n.path.clone()) else { return };
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add as variation".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(files))) = picked.await {
+                let _ = this.update(cx, |riff, cx| {
+                    riff.add_variation(song, files);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn store_variations(&mut self) {
+        if let Err(e) = self.variations.store(&variations_file()) {
+            self.message = Some((format!("couldn't save variations: {e}"), true));
+        }
     }
 
     /// Plays the selected song. The rest of its list follows: the album, the favourites,
@@ -785,6 +1014,7 @@ impl Riff {
             cmd: k.modifiers.platform,
             ctrl: k.modifiers.control,
             shift: k.modifiers.shift,
+            alt: k.modifiers.alt,
         };
         let global = keys::anywhere(press);
         // The sheets swallow every key but their own toggles and ⌘Q.
@@ -877,6 +1107,11 @@ impl Riff {
         } else {
             keys::normal(press, self.settings.vim, &mut self.pending)
         };
+        if action == Some(Action::AddVariation) {
+            self.pick_variation(cx);
+            cx.notify();
+            return;
+        }
         if let Some(action) = action {
             self.perform(action);
             self.follow_region(action);
@@ -987,22 +1222,59 @@ impl Riff {
             }
             Action::Grid => self.grid = !self.grid,
             Action::SaveRegion => {
-                if let Some(now) = self.now.as_ref().filter(|_| self.audio.looping.active()) {
-                    let known = self.regions.matching(&now.path, self.audio.looping);
+                let Some(recording) = self.recording() else { return };
+                if self.audio.looping.active() {
+                    let known = self.regions.matching(&recording, self.audio.looping);
                     self.naming = Some(known.map(|r| r.name.clone()).unwrap_or_default());
                 }
             }
             Action::Region(forward) => {
-                let Some(now) = self.now.as_ref() else { return };
+                let Some(recording) = self.recording() else { return };
                 let looping = self.audio.looping;
                 let from = looping.start.filter(|_| looping.active()).unwrap_or(self.audio.position());
-                if let Some(region) = self.regions.step(&now.path, from, forward).cloned() {
+                if let Some(region) = self.regions.step(&recording, from, forward).cloned() {
                     self.play_region(&region);
                 }
             }
+            Action::Variation => self.next_variation(),
+            Action::Mute(n) if n < self.muted.len() => {
+                self.muted[n] = !self.muted[n];
+                self.audio.set_gains(&self.gains());
+            }
+            Action::Solo(n) if n < self.muted.len() => {
+                self.solo = if self.solo == Some(n) { None } else { Some(n) };
+                self.audio.set_gains(&self.gains());
+            }
+            Action::Mute(_) | Action::Solo(_) => {}
+            // Needs the context for the file dialog, so it is handled in `key`.
+            Action::AddVariation => {}
+            Action::RemoveVariation => {
+                let Some(now) = self.now.clone() else { return };
+                let Some(i) = self.variation.checked_sub(1) else {
+                    self.message = Some(("the song itself can't be removed; v to a variation".into(), false));
+                    return;
+                };
+                if let Some(gone) = self.variations.remove(&now.path, i) {
+                    // Back to the song itself, from the variation that's gone, with its loop
+                    // and beats.
+                    self.variation = 0;
+                    self.muted.clear();
+                    self.solo = None;
+                    self.bound = None;
+                    let looping = self.loops.get(&now.path).copied().unwrap_or_default();
+                    self.audio.switch(std::slice::from_ref(&now.path), &[1.0], Duration::ZERO, looping);
+                    self.read_wave(vec![now.path.clone()]);
+                    self.song_beats();
+                    self.message = Some((format!("removed {}", gone.label), false));
+                    self.store_variations();
+                    let keep = self.selected_path();
+                    self.rebuild_rows();
+                    self.reindex(keep);
+                }
+            }
             Action::RemoveRegion => {
-                let Some(now) = self.now.as_ref() else { return };
-                if let Some(name) = self.regions.remove(&now.path, self.audio.looping) {
+                let Some(recording) = self.recording() else { return };
+                if let Some(name) = self.regions.remove(&recording, self.audio.looping) {
                     self.bound = None;
                     // Said first, so a failure to store replaces it rather than hides.
                     self.message = Some((format!("removed {name}"), false));
@@ -1037,7 +1309,7 @@ impl Riff {
     fn name_region(&mut self, typed: bool) {
         let Some(name) = self.naming.take() else { return };
         let looping = self.audio.looping;
-        let (Some(now), Some(end)) = (self.now.as_ref(), looping.end) else { return };
+        let (Some(recording), Some(end)) = (self.recording(), looping.end) else { return };
         let start = looping.start.unwrap_or_default();
         let name = Some(name.trim().to_string())
             .filter(|n| typed && !n.is_empty())
@@ -1045,7 +1317,7 @@ impl Riff {
         self.message = Some((format!("saved {name}"), false));
         let region = Region { name, start, end };
         self.bound = Some(region.clone());
-        self.regions.save(&now.path.clone(), region);
+        self.regions.save(&recording, region);
         self.store_regions();
     }
 
@@ -1063,33 +1335,61 @@ impl Riff {
             return;
         }
         let looping = self.audio.looping;
-        let (Some(bound), Some(now), Some(end)) = (&self.bound, &self.now, looping.end) else {
+        let (Some(bound), Some(recording), Some(end)) = (self.bound.clone(), self.recording(), looping.end)
+        else {
             return;
         };
         let start = looping.start.unwrap_or_default();
         if (bound.start, bound.end) == (start, end) {
             return;
         }
-        let song = now.path.clone();
-        self.bound = self.regions.reshape(&song, &bound.clone(), start, end);
+        self.bound = self.regions.reshape(&recording, &bound, start, end);
         self.store_regions();
     }
 
     /// A region as the loop, framed and playing from its start.
     fn play_region(&mut self, region: &Region) {
         self.bound = Some(region.clone());
-        self.audio.looping = region.looped();
+        self.audio.looping =
+            crate::audio::Loop { start: Some(region.start), end: Some(region.end), off: false };
         self.frame_loop();
         self.audition(Edge::Start);
     }
 
-    /// The playing song's beats while the grid is on and they are known.
-    fn grid(&self) -> Option<Rc<Beats>> {
+    /// The recording that plays, as regions and loops know it: the song's file, or a
+    /// variation's first. Each recording has regions and a loop of its own.
+    fn recording(&self) -> Option<PathBuf> {
+        match self.current_variation() {
+            Some(v) => v.files.first().cloned(),
+            None => self.now.as_ref().map(|n| n.path.clone()),
+        }
+    }
+
+    /// The beats of what plays: the song's, moved by a variation's offset, or a
+    /// variation's own when it has its own timeline.
+    fn beats_now(&self) -> Option<Rc<Beats>> {
         let now = self.now.as_ref()?;
-        self.beats
-            .as_ref()
-            .filter(|(p, _)| self.grid && *p == now.path)
-            .map(|(_, b)| b.clone())
+        let key = match self.offset() {
+            Some(_) => &now.path,
+            None => self.audio.files.first()?,
+        };
+        let beats = self.beats.as_ref().filter(|(p, _)| p == key).map(|(_, b)| b.clone())?;
+        match self.offset() {
+            Some(o) if o != 0.0 => Some(Rc::new(Beats {
+                times: beats
+                    .times
+                    .iter()
+                    .map(|t| Duration::from_secs_f64(t.as_secs_f64() + o))
+                    .filter(|t| !t.is_zero())
+                    .collect(),
+            })),
+            _ => Some(beats),
+        }
+    }
+
+    /// The beats of what plays while the grid is on.
+    fn grid(&self) -> Option<Rc<Beats>> {
+        self.beats_now().filter(|_| self.grid)
     }
 
     /// A moment on the grid: the nearest beat while it is on, otherwise itself.
@@ -1212,6 +1512,7 @@ impl Riff {
                 let favorite = self.favorites.contains(&track.path);
                 // The album view's header already names the album.
                 let album = (self.album.is_none()).then(|| track.album.clone());
+                let variations = self.variations.of(&track.path).len();
                 div()
                     .id(("row", ix))
                     .w_full()
@@ -1230,6 +1531,15 @@ impl Riff {
                         riff.play_selected();
                         cx.notify();
                     }))
+                    // Files dropped on a song become a variation of it.
+                    .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(tint(t().loops, 0x30)))
+                    .on_drop({
+                        let song = track.path.clone();
+                        cx.listener(move |riff, dropped: &ExternalPaths, _, cx| {
+                            riff.add_variation(song.clone(), dropped.paths().to_vec());
+                            cx.notify();
+                        })
+                    })
                     // In the album view the header shows the cover; rows show the number.
                     .child(match album {
                         Some(_) => cover(track.cover.clone(), 44.),
@@ -1254,9 +1564,23 @@ impl Riff {
                             .line_height(relative(1.3))
                             .child(
                                 div()
-                                    .truncate()
-                                    .text_color(rgb(if selected || playing { t().accent } else { t().text }))
-                                    .child(track.title.clone()),
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_color(rgb(if selected || playing { t().accent } else { t().text }))
+                                            .child(track.title.clone()),
+                                    )
+                                    // How many other recordings the song has.
+                                    .children((variations > 0).then(|| {
+                                        div()
+                                            .flex_none()
+                                            .font_family(MONO)
+                                            .text_xs()
+                                            .text_color(rgb(t().dim))
+                                            .child(format!("+{variations}"))
+                                    })),
                             )
                             .child(
                                 div()
@@ -1691,7 +2015,7 @@ impl Riff {
         let wave = self
             .wave
             .as_ref()
-            .filter(|(p, _)| self.now.as_ref().is_some_and(|n| n.path == *p))
+            .filter(|(p, _)| self.audio.files.first() == Some(p))
             .map(|(_, w)| w.clone());
         let song = self.audio.duration.or(wave.as_ref().map(|w| w.length()));
         let detail_dragged = self
@@ -1714,6 +2038,7 @@ impl Riff {
             (None, None, None) => Some("play a song to see its waveform".to_string()),
         };
         let lane = self.region_lane(song.unwrap_or(self.span), cx);
+        let lanes = self.stem_lanes(song.unwrap_or(self.span), at, cx);
         let strip = |id: &'static str, strip: &Strip, view: Painting| {
             let down = strip.clone();
             div()
@@ -1740,12 +2065,18 @@ impl Riff {
             beats: None,
             grid: self.grid,
         };
-        let beats = self
-            .beats
-            .as_ref()
-            .filter(|(p, _)| self.now.as_ref().is_some_and(|n| n.path == *p))
-            .map(|(_, b)| b.clone());
+        let beats = self.beats_now();
         let mut about = format!("Practice, {:.1} s shown", (to - from).as_secs_f64());
+        // Which recording plays, when the song has others.
+        let others = self.now.as_ref().map_or(0, |n| self.variations.of(&n.path).len());
+        if others > 0 {
+            let which = match self.current_variation() {
+                None => "the song".to_string(),
+                Some(v) if v.offset.is_none() => format!("{} (own timeline)", v.label),
+                Some(v) => v.label.clone(),
+            };
+            about = format!("{which}, {} of {}, v next. {about}", self.variation + 1, others + 1);
+        }
         if let Some(bpm) = beats.as_ref().and_then(|b| b.tempo_at(at)) {
             about.push_str(&format!(", about {bpm:.0} BPM here"));
         }
@@ -1753,8 +2084,17 @@ impl Riff {
             about.push_str(if beats.is_some() { ", grid on" } else { ", grid on (finding beats…)" });
         }
         div()
+            .id("practice")
             .flex_1()
             .min_h_0()
+            // Files dropped here become a variation of the playing song.
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(tint(t.loops, 0x18)))
+            .on_drop(cx.listener(|riff, dropped: &ExternalPaths, _, cx| {
+                if let Some(song) = riff.now.as_ref().map(|n| n.path.clone()) {
+                    riff.add_variation(song, dropped.paths().to_vec());
+                }
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .gap_2()
@@ -1786,18 +2126,106 @@ impl Riff {
                             .child(s)
                     })),
             )
+            .children(lanes)
+    }
+
+    /// A stem set's stems, a lane each: number and name (a click mutes, ⌥-click solos)
+    /// and the stem's waveform over the whole song, so a part can be found anywhere in it
+    /// (the overview above already boxes the detail's stretch). A click in a lane moves the playhead there, like
+    /// the overview. Dimmed when the stem isn't heard.
+    fn stem_lanes(&self, song: Duration, at: Duration, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let t = t();
+        let variation = self.current_variation()?;
+        if self.stem_waves.len() < 2 || self.stem_waves.len() != variation.stems.len() {
+            return None;
+        }
+        let gains = self.gains();
+        let lanes = variation.stems.iter().zip(&self.stem_waves).enumerate().map(|(i, (name, wave))| {
+            let heard = gains.get(i).is_some_and(|g| *g > 0.0);
+            let state = match (self.solo == Some(i), self.muted.get(i) == Some(&true)) {
+                (true, _) => "solo",
+                (false, true) => "muted",
+                _ => "",
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(30.))
+                .child(
+                    div()
+                        .id(("stem", i))
+                        .w(px(150.))
+                        .flex_none()
+                        .flex()
+                        .gap_2()
+                        .px_2()
+                        .h_full()
+                        .items_center()
+                        .rounded_md()
+                        .bg(rgb(t.surface))
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(rgb(if heard { t.text } else { t.dim }))
+                        .child(div().font_family(MONO).text_color(rgb(t.dim)).child((i + 1).to_string()))
+                        .child(div().flex_1().truncate().child(name.clone()))
+                        .child(div().font_family(MONO).text_color(rgb(t.accent)).child(state))
+                        .on_click(cx.listener(move |riff, event: &gpui::ClickEvent, _, cx| {
+                            let action = if event.modifiers().alt { Action::Solo(i) } else { Action::Mute(i) };
+                            riff.perform(action);
+                            cx.notify();
+                        })),
+                )
+                .child({
+                    let strip = Strip::default();
+                    let down = strip.clone();
+                    div()
+                        .id(("stem-wave", i))
+                        .flex_1()
+                        .h_full()
+                        .relative()
+                        .rounded_md()
+                        .overflow_hidden()
+                        .bg(rgb(t.surface))
+                        .cursor_pointer()
+                        .opacity(if heard { 1.0 } else { 0.35 })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |riff, e, _, cx| riff.strip_down(&down, e, cx)),
+                        )
+                        .child(
+                            paint_wave(
+                                strip,
+                                Painting {
+                                    wave: Some(wave.clone()),
+                                    from: Duration::ZERO,
+                                    to: song,
+                                    at,
+                                    looping: self.audio.looping,
+                                    boxed: None,
+                                    contour: false,
+                                    beats: None,
+                                    grid: false,
+                                },
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                })
+        });
+        Some(div().flex().flex_col().gap_1().children(lanes).into_any_element())
     }
 
     /// The playing song's regions as named blocks along the song, the loop's own
     /// highlighted. A click plays one. Nothing when the song has none.
     fn region_lane(&self, song: Duration, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let t = t();
-        let now = self.now.as_ref()?;
-        let list = self.regions.of(&now.path).to_vec();
+        let recording = self.recording()?;
+        let list = self.regions.of(&recording).to_vec();
         if list.is_empty() {
             return None;
         }
-        let current = self.regions.matching(&now.path, self.audio.looping).cloned();
+        let current = self.regions.matching(&recording, self.audio.looping).cloned();
         let length = song.as_secs_f64().max(1e-3);
         Some(div().relative().h(px(22.)).children(list.into_iter().enumerate().map(|(i, region)| {
             let lit = current.as_ref() == Some(&region);
@@ -2111,21 +2539,43 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
                     size(px(wd), px(ht)),
                 )
             };
+            // GPUI draws plain quads without antialiasing, so an edge between device
+            // pixels snaps to one, and a slowly moving edge (the overview's box and
+            // playhead, about a pixel every quarter second) steps visibly. A pixel an
+            // edge only partly covers is drawn at partial strength instead: it glides.
+            let device = window.scale_factor();
+            let soft = |window: &mut Window, a: f32, b: f32, y: f32, ht: f32, color: gpui::Rgba| {
+                let (a, b) = (a * device, b * device);
+                let mut paint = |from: f32, to: f32, cover: f32| {
+                    if to > from && cover > 0. {
+                        let partial = gpui::Rgba { a: color.a * cover, ..color };
+                        window.paint_quad(fill(rect(from / device, y, (to - from) / device, ht), partial));
+                    }
+                };
+                let (left, right) = (a.floor(), b.floor());
+                if left == right {
+                    paint(left, left + 1., b - a);
+                } else {
+                    paint(left, left + 1., left + 1. - a);
+                    paint(left + 1., right, 1.);
+                    paint(right, right + 1., b - right);
+                }
+            };
             // A loop switched off keeps its place, faded.
             let (region, edge) = if p.looping.off { (0x10, 0x70) } else { (0x26, 0xff) };
             if let Some(end) = p.looping.end {
                 let (a, b) = (x_of(p.looping.start.unwrap_or_default()), x_of(end));
-                window.paint_quad(fill(rect(a, 0., b - a, h), tint(t.loops, region)));
+                soft(window, a, b, 0., h, tint(t.loops, region));
             }
             // The stretch the detail shows: outlined, so it reads at a glance.
             if let Some((from, to)) = p.boxed {
                 let (a, b) = (x_of(from), x_of(to).max(x_of(from) + 2.));
-                window.paint_quad(fill(rect(a, 0., b - a, h), tint(t.accent, 0x24)));
+                soft(window, a, b, 0., h, tint(t.accent, 0x24));
                 for x in [a, b - 2.] {
-                    window.paint_quad(fill(rect(x, 0., 2., h), tint(t.accent, 0xff)));
+                    soft(window, x, x + 2., 0., h, tint(t.accent, 0xff));
                 }
                 for y in [0., h - 2.] {
-                    window.paint_quad(fill(rect(a, y, b - a, 2.), tint(t.accent, 0xff)));
+                    soft(window, a, b, y, 2., tint(t.accent, 0xff));
                 }
             }
             // Beats as small chevrons pointing in from the top and bottom edges: a full
@@ -2162,7 +2612,6 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
                 };
                 let mid = h / 2.;
                 // Whole device pixels, so a column never smears across two.
-                let device = window.scale_factor();
                 let snap = |x: f32| (x * device).round() / device;
                 let played = x_of(p.at);
                 for (i, c) in columns.iter().enumerate() {
@@ -2178,9 +2627,9 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
             }
             // Each edge as soon as it is set, a start on its own too.
             for at in [p.looping.start, p.looping.end].into_iter().flatten() {
-                window.paint_quad(fill(rect(x_of(at) - 1., 0., 2., h), tint(t.loops, edge)));
+                soft(window, x_of(at) - 1., x_of(at) + 1., 0., h, tint(t.loops, edge));
             }
-            window.paint_quad(fill(rect(x_of(p.at), 0., 1., h), tint(t.text, 0xff)));
+            soft(window, x_of(p.at), x_of(p.at) + 1., 0., h, tint(t.text, 0xff));
         },
     )
 }
