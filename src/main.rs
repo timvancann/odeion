@@ -4,6 +4,7 @@ mod keys;
 mod library;
 mod media;
 mod playlist;
+mod regions;
 mod scan;
 mod state;
 mod theme;

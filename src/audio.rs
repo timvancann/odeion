@@ -397,6 +397,9 @@ impl Audio {
     }
 
     pub fn seek(&self, to: Duration) {
+        // The audio thread gets the loop first: with the old one it would jump right back
+        // to the old loop's start (playing a region landed in the previous one).
+        self.keep_loop();
         let to = match self.duration {
             Some(d) => to.min(d.saturating_sub(Duration::from_millis(250))),
             None => to,
@@ -595,6 +598,29 @@ mod tests {
         // Seeking from outside keeps the position honest too.
         song.try_seek(Duration::from_millis(500)).unwrap();
         assert_eq!(shared.played.load(Ordering::Relaxed), 500);
+    }
+
+    #[test]
+    fn a_seek_hands_the_new_loop_over_first() {
+        // No output device: the loop handover happens all the same.
+        let mut audio = Audio {
+            sink: None,
+            player: None,
+            loading: None,
+            path: None,
+            duration: None,
+            looping: looped(0, 16),
+            error: None,
+            start_at: None,
+            shared: Arc::default(),
+            rate: 1000,
+        };
+        audio.seek(s(1));
+        assert_eq!(audio.shared.end.load(Ordering::Relaxed), 16_000);
+        audio.looping = looped(120, 140);
+        audio.seek(s(120));
+        assert_eq!(audio.shared.start.load(Ordering::Relaxed), 120_000);
+        assert_eq!(audio.shared.end.load(Ordering::Relaxed), 140_000);
     }
 
     #[test]

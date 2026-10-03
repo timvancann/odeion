@@ -29,8 +29,11 @@ and draws:
   column per pixel, and which stretch the detail view shows.
 - `beats.rs`: where the beats fall (SuperFlux onsets, Ellis tempo and tracker at
   tightness 300, each beat moved onto its attack to within ~1 ms) and the grid rules on
-  them. Found in the background when a song starts, about 0.3 s. Old rock drifts, so
+  them. Found in the background when a song starts, about 0.3 s, and cached in
+  `beats/` in the data folder (re-found when the file or `DETECTOR` changes). Old rock drifts, so
   the grid is the detected beats, never "BPM times n".
+- `regions.rs`: loops saved under a name per song (`regions.json` in the data folder):
+  order, renaming the same stretch, next and previous, removal.
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
   app that last reported a song, not as key presses, so this is the only way in.
 - `state.rs`: paths, settings, favourites, opening a song in Transcribe!.
@@ -98,6 +101,12 @@ key to both or the test fails.
   move an edge a whole beat, `< >` and `_ +` work in beats, `h l` / `← →` step by
   beats (back restarts the beat you're in first), dragging snaps (⌥ drags freely).
   Off, everything is as before; songs without a steady beat should stay off.
+- **Regions**: `r` saves the loop as a region and asks a name (Enter saves, Esc keeps
+  a name saying where it is; on a loop that is already a region it renames), `n` `N`
+  play the next and previous region as the loop, `x` deletes the loop's region. A loop
+  played from (or saved as) a region stays bound to it: edge changes are saved into the
+  region, until the loop slides away (`< >`), is cleared, or another region or song plays. The
+  practice view shows them as named blocks above the overview; a click plays one.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), the
   theme picker, which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
   Esc restores), and vim keys on or off.

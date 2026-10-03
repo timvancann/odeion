@@ -12,6 +12,8 @@
 //! 76% and 8%, and 1000 lost songs that drift.
 
 use rustfft::{FftPlanner, num_complex::Complex};
+use serde::{Deserialize, Serialize};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
@@ -84,6 +86,48 @@ impl Beats {
     fn index(&self, at: Duration) -> Option<usize> {
         (0..self.times.len()).min_by_key(|&i| self.times[i].abs_diff(at))
     }
+}
+
+/// The detector's version. Raise it when detection changes, and every song's beats are
+/// found again rather than read from the cache.
+const DETECTOR: u32 = 1;
+
+/// A song's beats as cached: valid while the file and the detector are unchanged.
+#[derive(Serialize, Deserialize)]
+struct Cached {
+    size: u64,
+    modified: u64,
+    detector: u32,
+    /// Beat times in microseconds.
+    beats: Vec<u64>,
+}
+
+/// A song's beats from the cache in `dir`, or found and cached when the song (by its
+/// size and modification time) or the detector changed since.
+pub fn cached(path: &Path, size: u64, modified: u64, dir: &Path) -> Result<Beats, String> {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let file = dir.join(format!("{:016x}.json", hasher.finish()));
+    let hit = std::fs::read(&file)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Cached>(&b).ok())
+        .filter(|c| c.size == size && c.modified == modified && c.detector == DETECTOR);
+    if let Some(c) = hit {
+        return Ok(Beats { times: c.beats.into_iter().map(Duration::from_micros).collect() });
+    }
+    let beats = read(path)?;
+    let entry = Cached {
+        size,
+        modified,
+        detector: DETECTOR,
+        beats: beats.times.iter().map(|t| t.as_micros() as u64).collect(),
+    };
+    // A cache that can't be written only costs time on the next play.
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(json) = serde_json::to_vec(&entry) {
+        let _ = std::fs::write(&file, json);
+    }
+    Ok(beats)
 }
 
 /// Finds the beats in a song.
@@ -310,6 +354,23 @@ mod tests {
         let b = Beats { times: beats };
         assert!((b.tempo_at(s(3.0)).unwrap() - 101.0).abs() < 4.0);
         assert!((b.tempo_at(s(28.0)).unwrap() - 119.0).abs() < 4.0);
+    }
+
+    #[test]
+    fn beats_come_from_the_cache_until_the_song_changes() {
+        let dir = std::env::temp_dir().join(format!("riff-beats-{}", std::process::id()));
+        let song = dir.join("song.wav");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Not audio at all: only a cache hit can produce beats for it.
+        std::fs::write(&song, b"not audio").unwrap();
+        let mut hasher = DefaultHasher::new();
+        song.hash(&mut hasher);
+        let entry = Cached { size: 9, modified: 5, detector: DETECTOR, beats: vec![500_000, 1_000_000] };
+        std::fs::write(dir.join(format!("{:016x}.json", hasher.finish())), serde_json::to_vec(&entry).unwrap()).unwrap();
+        assert_eq!(cached(&song, 9, 5, &dir).unwrap(), grid(&[0.5, 1.0]));
+        // Changed since: found again, which fails for a file that isn't audio.
+        assert!(cached(&song, 9, 6, &dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

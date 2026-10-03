@@ -52,6 +52,12 @@ pub enum Action {
     Zoom(f64),
     /// The beat grid on or off: loop edges and steps follow the beats.
     Grid,
+    /// Save the loop as a named region (or rename the region it is).
+    SaveRegion,
+    /// The next (true) or previous region, as the loop.
+    Region(bool),
+    /// Delete the region the loop is.
+    RemoveRegion,
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift
@@ -105,8 +111,15 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
     if p.key == "p" && p.shift && !p.ctrl {
         return Some(Practice);
     }
-    if p.key == "b" && !p.shift && !p.ctrl {
-        return Some(Grid);
+    if !p.ctrl {
+        match (p.key, p.shift) {
+            ("b", false) => return Some(Grid),
+            ("r", false) => return Some(SaveRegion),
+            ("n", false) => return Some(Region(true)),
+            ("n", true) => return Some(Region(false)),
+            ("x", false) => return Some(RemoveRegion),
+            _ => {}
+        }
     }
     let always = match p.key {
         "enter" => Some(Play),
@@ -187,6 +200,9 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("( )", "", "narrow at the start or end"),
             ("< >", "", "slide back or on by its length"),
             ("_ +", "", "halve or double it"),
+            ("r", "", "save it as a region, named"),
+            ("n N", "", "next or previous region"),
+            ("x", "", "delete its region"),
         ],
     ),
     (
