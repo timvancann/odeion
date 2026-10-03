@@ -8,6 +8,7 @@ mod state;
 mod theme;
 mod ui;
 mod view;
+mod wave;
 
 use gpui::{
     App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px,

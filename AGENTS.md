@@ -21,6 +21,9 @@ and draws:
 - `playlist.rs`: next, previous and shuffle over the list a song was started from (the
   album, favourites, search results or library; the run of rows between headers).
 - `keys.rs`: the keymap and the ⌘? sheet, see Keyboard.
+- `wave.rs`: the practice view's waveform: read on 8 threads when a song starts (each
+  placed by packet timestamps, with a second of decoder warm-up), summarised to one
+  column per pixel, and which stretch the detail view shows.
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
   app that last reported a song, not as key presses, so this is the only way in.
 - `state.rs`: paths, settings, favourites, opening a song in Transcribe!.
@@ -71,6 +74,12 @@ key to both or the test fails.
   (phrase by phrase), `- =` halve and double it. Every change plays around the edge it
   moved, to be judged by ear. On the progress bar, drag an edge or shift-click for the
   end. The rules live on `audio::Loop`.
+- **`P` toggles the practice view**: the list gives way to the song's loudness contour
+  (with the shown stretch boxed) over a large RMS waveform that frames the loop, or
+  follows the playhead without one. ⌘= ⌘- zoom. Both take clicks and drags like the
+  progress bar. The waveform is read for every song that starts, shown or not, and kept
+  in memory only. Peaks are not drawn: on loud masters they all reach the top and hide
+  the transients.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), the
   theme picker, which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
   Esc restores), and vim keys on or off.
@@ -104,9 +113,15 @@ commit signing is off for this repo.
 
 Ideas Tim liked but hasn't asked for yet. Check with him before building one.
 
-- **Waveform in the progress bar**, next up: an overview that shows transients, so
-  loop edges are easier to place. Decode lazily when a song starts, cache about 1,000
-  peaks per file, show the plain bar until they arrive. Never during the library scan.
+- **Beats in the practice view**, next up: onset strength (spectral flux, or SuperFlux
+  for guitar) plus Ellis's dynamic-programming beat tracker, computed with the waveform,
+  then loop edges snapping to beats. Prototype outside riff first and judge the ticks
+  by eye on real songs; neural trackers (Beat This!) are the heavier fallback.
+- **A beat grid**, after beats: `b` toggles it. With it on, `[ ]` snap to the nearest
+  beat, `{ } ( )` move an edge a whole beat, dragging snaps (⌥ drags freely), and
+  `h l` / `← →` step by beats instead of 5 s. Back works like previous song: more than
+  ~150 ms into a beat goes to its start, at its start goes to the beat before. Bars
+  (shift-step, bar-sized loops) only if the tracker finds downbeats.
 - **Read Transcribe!'s loops** from the `.xsc` next to the song, read-only, so loops made
   there appear in riff. The format still needs looking at.
 - **Loops aligned to beats**, as Moises does with beat detection. This is Transcribe!

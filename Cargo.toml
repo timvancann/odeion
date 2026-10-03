@@ -11,3 +11,4 @@ rodio = { version = "0.22.2", features = ["symphonia-aiff"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 souvlaki = "0.8"
+symphonia = { version = "=0.5.5", features = ["mp3", "flac", "pcm", "vorbis", "ogg", "wav", "aiff", "isomp4", "aac"] }

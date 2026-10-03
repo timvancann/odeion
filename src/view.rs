@@ -10,11 +10,12 @@ use crate::scan;
 use crate::state::{self, Favorites, Settings};
 use crate::theme::{self, Theme};
 use crate::ui::{self, *};
+use crate::wave::{self, Wave};
 use gpui::{
     Bounds, Context, Div, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     ObjectFit,
     PathPromptOptions, Pixels, ScrollStrategy, Stateful, UniformListScrollHandle, Window, canvas,
-    div, img, prelude::*, px, relative, rgb, uniform_list,
+    div, fill, img, point, prelude::*, px, relative, rgb, size, uniform_list,
 };
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -30,6 +31,8 @@ const TITLEBAR: f32 = 32.;
 const SEEK: f64 = 5.0;
 /// Placing a loop's end plays this much before it.
 const LEAD_IN: Duration = Duration::from_millis(1500);
+/// How much the practice view shows around the playhead before any zooming.
+const SPAN: Duration = Duration::from_secs(8);
 /// A click this close to a loop edge grabs it.
 const GRAB: f32 = 8.;
 /// How long a scan's result stays in the search bar.
@@ -68,6 +71,30 @@ impl Picker {
     }
 }
 
+/// Something drawn along the song: the progress bar, and the practice view's overview
+/// and detail. Painting records where it is and which stretch of the song it shows, so
+/// clicks and drags can turn a position into a moment.
+#[derive(Clone, Default)]
+struct Strip(Rc<Cell<(Bounds<Pixels>, Duration, Duration)>>);
+
+impl Strip {
+    /// The moment under `x`, and how many seconds a pixel there is.
+    fn time_at(&self, x: Pixels) -> Option<(Duration, f64)> {
+        let (bounds, from, to) = self.0.get();
+        let width = f32::from(bounds.size.width);
+        if width <= 0. || to <= from {
+            return None;
+        }
+        let fraction = (f32::from(x - bounds.origin.x) / width).clamp(0., 1.) as f64;
+        let span = (to - from).as_secs_f64();
+        Some((from + Duration::from_secs_f64(span * fraction), span / width as f64))
+    }
+
+    fn set(&self, bounds: Bounds<Pixels>, from: Duration, to: Duration) {
+        self.0.set((bounds, from, to));
+    }
+}
+
 /// A loop edge, being placed or dragged.
 #[derive(Clone, Copy, PartialEq)]
 enum Edge {
@@ -101,8 +128,18 @@ pub struct Riff {
     prefs: Option<Prefs>,
     /// The first key of a two-key vim command (`gg`, `zz`, `dd`).
     pending: Option<char>,
-    /// The loop edge being dragged on the progress bar.
-    dragging: Option<Edge>,
+    /// The loop edge being dragged, and on which strip.
+    dragging: Option<(Edge, Strip)>,
+    /// The practice view (`P`) instead of the list.
+    practice: bool,
+    /// The playing song's waveform, once read; read for every song, shown or not.
+    wave: Option<(PathBuf, Rc<Wave>)>,
+    reading: Option<(PathBuf, Receiver<Result<Wave, String>>)>,
+    wave_error: Option<String>,
+    /// How much of the song the detail view shows.
+    span: Duration,
+    overview: Strip,
+    detail: Strip,
     /// When the window last moved or resized and that isn't saved yet.
     moved: Option<std::time::Instant>,
     rows: Vec<Row>,
@@ -119,7 +156,7 @@ pub struct Riff {
     /// The media keys and Now Playing, when macOS lets riff have them.
     media: Option<Media>,
     message: Option<(String, bool)>,
-    bar: Rc<Cell<Bounds<Pixels>>>,
+    bar: Strip,
 }
 
 fn cache_file() -> PathBuf {
@@ -193,6 +230,13 @@ impl Riff {
             moved: None,
             pending: None,
             dragging: None,
+            practice: false,
+            wave: None,
+            reading: None,
+            wave_error: None,
+            span: SPAN,
+            overview: Strip::default(),
+            detail: Strip::default(),
             rows: Vec::new(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
@@ -204,7 +248,7 @@ impl Riff {
             shuffle: false,
             media: Media::new(),
             message: None,
-            bar: Rc::new(Cell::new(Bounds::default())),
+            bar: Strip::default(),
         };
         riff.message = riff.audio.error.clone().map(|e| (e, true));
         riff.reindex(None);
@@ -380,6 +424,16 @@ impl Riff {
             self.moved = None;
             self.save_settings();
         }
+        if let Some((path, rx)) = &self.reading
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(w) => self.wave = Some((path.clone(), Rc::new(w))),
+                Err(e) => self.wave_error = Some(e),
+            }
+            self.reading = None;
+            changed = true;
+        }
         if self.audio.ended() && self.next_song() {
             changed = true;
         }
@@ -549,6 +603,16 @@ impl Riff {
 
     fn play(&mut self, track: Track) {
         self.audio.play(&track.path);
+        if self.wave.as_ref().is_none_or(|(p, _)| *p != track.path) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = track.path.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(wave::read(&path));
+            });
+            self.reading = Some((track.path.clone(), rx));
+            self.wave = None;
+            self.wave_error = None;
+        }
         self.now = Some(track);
         self.message = None;
     }
@@ -811,6 +875,11 @@ impl Riff {
                 self.audio.looping.slide(forward, song);
                 self.audition(Edge::Start);
             }
+            Action::Practice => self.practice = !self.practice,
+            Action::Zoom(factor) => {
+                let most = song.unwrap_or(SPAN).max(Duration::from_secs(1));
+                self.span = self.span.mul_f64(factor).clamp(Duration::from_millis(500), most);
+            }
             Action::Resize(factor) => {
                 self.audio.looping.resize(factor, song);
                 if factor < 1.0 {
@@ -855,28 +924,18 @@ impl Riff {
         }
     }
 
-    /// The moment in the song under `x` on the progress bar, and how many seconds a
-    /// pixel there is.
-    fn time_at(&self, x: Pixels) -> Option<(Duration, f64)> {
-        let bounds = self.bar.get();
-        let width = f32::from(bounds.size.width);
-        let duration = self.audio.duration.filter(|_| width > 0.)?;
-        let fraction = (f32::from(x - bounds.origin.x) / width).clamp(0., 1.) as f64;
-        Some((duration.mul_f64(fraction), duration.as_secs_f64() / width as f64))
-    }
-
-    /// A click on the progress bar: grabs a loop edge near it, sets the loop's end with
-    /// shift, and otherwise seeks.
-    fn bar_down(&mut self, event: &MouseDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        let Some((at, per_px)) = self.time_at(event.position.x) else { return };
+    /// A click on a strip: grabs a loop edge near it, sets the loop's end with shift,
+    /// and otherwise seeks.
+    fn strip_down(&mut self, strip: &Strip, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some((at, per_px)) = strip.time_at(event.position.x) else { return };
         let looping = self.audio.looping;
         let near = |edge: Option<Duration>| {
             edge.is_some_and(|e| (e.as_secs_f64() - at.as_secs_f64()).abs() <= GRAB as f64 * per_px)
         };
         if near(looping.end) {
-            self.dragging = Some(Edge::End);
+            self.dragging = Some((Edge::End, strip.clone()));
         } else if near(looping.start) {
-            self.dragging = Some(Edge::Start);
+            self.dragging = Some((Edge::Start, strip.clone()));
         } else if event.modifiers.shift {
             self.audio.looping.set_end(at);
             if self.audio.looping.active() {
@@ -889,11 +948,11 @@ impl Riff {
     }
 
     fn drag(&mut self, event: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        let Some(edge) = self.dragging else { return };
+        let Some((edge, strip)) = &self.dragging else { return };
         if event.pressed_button != Some(MouseButton::Left) {
             return self.drop_edge(cx);
         }
-        let Some((at, _)) = self.time_at(event.position.x) else { return };
+        let Some((at, _)) = strip.time_at(event.position.x) else { return };
         let song = self.audio.duration;
         match edge {
             Edge::Start => self.audio.looping.move_start(at),
@@ -904,7 +963,7 @@ impl Riff {
 
     /// Lets go of a dragged edge, and plays around where it landed.
     fn drop_edge(&mut self, cx: &mut Context<Self>) {
-        if let Some(edge) = self.dragging.take() {
+        if let Some((edge, _)) = self.dragging.take() {
             self.audition(edge);
             cx.notify();
         }
@@ -1131,9 +1190,15 @@ impl Riff {
             .flex()
             .items_center()
             .cursor_pointer()
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::bar_down))
+            .on_mouse_down(MouseButton::Left, {
+                let bar = self.bar.clone();
+                cx.listener(move |riff, e, _, cx| riff.strip_down(&bar, e, cx))
+            })
             .child(
-                canvas(move |bounds, _, _| bar.set(bounds), |_, _, _, _| {})
+                canvas(
+                    move |bounds, _, _| bar.set(bounds, Duration::ZERO, duration.unwrap_or_default()),
+                    |_, _, _, _| {},
+                )
                     .absolute()
                     .size_full(),
             )
@@ -1392,6 +1457,97 @@ impl Riff {
             )
     }
 
+    /// The practice view: the whole song as a loudness contour with the shown stretch
+    /// boxed, and below it that stretch in detail, the loop on it. Both take clicks and
+    /// drags like the progress bar.
+    fn render_practice(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let at = self.audio.position();
+        let looping = self.audio.looping;
+        let wave = self
+            .wave
+            .as_ref()
+            .filter(|(p, _)| self.now.as_ref().is_some_and(|n| n.path == *p))
+            .map(|(_, w)| w.clone());
+        let song = self.audio.duration.or(wave.as_ref().map(|w| w.length()));
+        let detail_dragged = self
+            .dragging
+            .as_ref()
+            .is_some_and(|(_, strip)| Rc::ptr_eq(&strip.0, &self.detail.0));
+        // While an edge is dragged here, the view holds still so it stays under the pointer.
+        let (from, to) = match song {
+            _ if detail_dragged => {
+                let (_, from, to) = self.detail.0.get();
+                (from, to)
+            }
+            Some(song) => wave::window(at, looping, self.span, song),
+            None => (Duration::ZERO, self.span),
+        };
+        let status = match (&wave, &self.wave_error, &self.now) {
+            (Some(_), ..) => None,
+            (None, Some(e), _) => Some(format!("couldn't read the waveform: {e}")),
+            (None, None, Some(_)) => Some("reading the waveform…".to_string()),
+            (None, None, None) => Some("play a song to see its waveform".to_string()),
+        };
+        let strip = |id: &'static str, strip: &Strip, view: Painting| {
+            let down = strip.clone();
+            div()
+                .id(id)
+                .relative()
+                .rounded_lg()
+                .bg(rgb(t.surface))
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |riff, e, _, cx| riff.strip_down(&down, e, cx)),
+                )
+                .child(paint_wave(strip.clone(), view).absolute().size_full())
+        };
+        let common = Painting {
+            wave: wave.clone(),
+            from: Duration::ZERO,
+            to: song.unwrap_or(self.span),
+            at,
+            looping,
+            boxed: None,
+            contour: true,
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .px_1()
+                    .font_family(MONO)
+                    .text_xs()
+                    .text_color(rgb(t.dim))
+                    .child(format!("Practice, {:.1} s shown", (to - from).as_secs_f64()))
+                    .child("P back   ⌘= ⌘- zoom   drag the loop edges"),
+            )
+            .child(strip("overview", &self.overview, Painting { boxed: Some((from, to)), ..common.clone() }).h(px(40.)))
+            .child(
+                strip("detail", &self.detail, Painting { from, to, contour: false, ..common })
+                    .flex_1()
+                    .children(status.map(|s| {
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(t.dim))
+                            .child(s)
+                    })),
+            )
+    }
+
     /// The album view's header: the cover large, the album's name and what's on it, so
     /// it's plain that only this album is listed.
     fn render_album(&self, of: &Track) -> impl IntoElement {
@@ -1629,6 +1785,82 @@ impl Riff {
     }
 }
 
+/// What a waveform strip draws: `from` to `to` of the song as RMS, the playhead and
+/// loop on it, and in the overview the stretch the detail shows. The detail is scaled to
+/// the song's loudest moment, so loudness compares across zooms; a contour (the
+/// overview) to its own loudest column, so sections and breaks stand out.
+#[derive(Clone)]
+struct Painting {
+    wave: Option<Rc<Wave>>,
+    from: Duration,
+    to: Duration,
+    at: Duration,
+    looping: crate::audio::Loop,
+    boxed: Option<(Duration, Duration)>,
+    contour: bool,
+}
+
+fn tint(color: u32, alpha: u8) -> gpui::Rgba {
+    gpui::rgba((color << 8) | alpha as u32)
+}
+
+/// One bar per pixel: cheap enough to redraw every frame at any zoom.
+fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
+    canvas(
+        move |bounds, _, _| strip.set(bounds, p.from, p.to),
+        move |bounds, _, window, _| {
+            let t = t();
+            let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+            let span = (p.to - p.from).as_secs_f64();
+            if span <= 0. || w <= 0. {
+                return;
+            }
+            let x_of = |d: Duration| {
+                let x = ((d.as_secs_f64() - p.from.as_secs_f64()) / span) as f32 * w;
+                x.clamp(0., w)
+            };
+            let rect = |x: f32, y: f32, wd: f32, ht: f32| {
+                Bounds::new(
+                    point(bounds.origin.x + px(x), bounds.origin.y + px(y)),
+                    size(px(wd), px(ht)),
+                )
+            };
+            if let Some(end) = p.looping.end {
+                let (a, b) = (x_of(p.looping.start.unwrap_or_default()), x_of(end));
+                window.paint_quad(fill(rect(a, 0., b - a, h), tint(t.on, 0x26)));
+            }
+            if let Some((from, to)) = p.boxed {
+                let (a, b) = (x_of(from), x_of(to));
+                window.paint_quad(fill(rect(a, 0., (b - a).max(2.), h), tint(t.text, 0x14)));
+            }
+            if let Some(wave) = &p.wave {
+                let columns = wave.columns(p.from, p.to, w as usize);
+                let scale = if p.contour {
+                    columns.iter().map(|c| c.rms()).fold(0., f32::max)
+                } else {
+                    wave.loudest()
+                };
+                let mid = h / 2.;
+                let bar = |x: usize, v: f32| {
+                    let half = (v / scale.max(1e-6)).min(1.) * (mid - 2.);
+                    rect(x as f32, mid - half, 1., (half * 2.).max(1.))
+                };
+                let played = x_of(p.at) as usize;
+                for (x, c) in columns.iter().enumerate() {
+                    let color = if x < played { t.accent } else { t.dim };
+                    window.paint_quad(fill(bar(x, c.rms()), tint(color, 0xff)));
+                }
+            }
+            if let Some(end) = p.looping.end {
+                for edge in [p.looping.start.unwrap_or_default(), end] {
+                    window.paint_quad(fill(rect(x_of(edge) - 1., 0., 2., h), tint(t.on, 0xff)));
+                }
+            }
+            window.paint_quad(fill(rect(x_of(p.at), 0., 1., h), tint(t.text, 0xff)));
+        },
+    )
+}
+
 /// A dimmed layer over the whole window, holding a sheet in its middle.
 fn overlay(id: &'static str) -> Stateful<Div> {
     div()
@@ -1655,6 +1887,11 @@ fn tilde(path: &std::path::Path) -> String {
 
 impl Render for Riff {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The detail view keeps the loop in sight, refitting only when it must.
+        let looping = self.audio.looping;
+        if let Some(end) = looping.end.filter(|_| self.dragging.is_none()) {
+            self.span = wave::fit(self.span, end - looping.start.unwrap_or_default());
+        }
         let hint = match &self.message {
             Some((text, error)) => div()
                 .text_color(rgb(if *error { t().error } else { t().dim }))
@@ -1699,18 +1936,20 @@ impl Render for Riff {
             .font_family(UI)
             .text_color(rgb(t().text))
             .child(self.render_search())
-            .children(self.album.as_ref().map(|of| self.render_album(of)))
-            .child(
-                uniform_list(
-                    "library",
-                    self.rows.len(),
-                    cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
-                        range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
-                    }),
+            .when(self.practice, |d| d.child(self.render_practice(cx)))
+            .when(!self.practice, |d| {
+                d.children(self.album.as_ref().map(|of| self.render_album(of))).child(
+                    uniform_list(
+                        "library",
+                        self.rows.len(),
+                        cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
+                            range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(self.scroll.clone())
+                    .flex_1(),
                 )
-                .track_scroll(self.scroll.clone())
-                .flex_1(),
-            )
+            })
             .child(self.render_now(cx))
             .child(
                 div()

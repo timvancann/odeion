@@ -6,6 +6,8 @@
 
 /// Nudging a loop edge moves it this far.
 pub const NUDGE: f64 = 0.05;
+/// Each zoom step shows this many times more or less.
+pub const ZOOM: f64 = 1.5;
 /// ⌃D and ⌃U move this many rows.
 pub const HALF_PAGE: isize = 6;
 const SEEK: f64 = 5.0;
@@ -42,6 +44,10 @@ pub enum Action {
     NudgeEnd(f64),
     Slide(bool),
     Resize(f64),
+    /// The practice view with the waveform, on or off.
+    Practice,
+    /// Zoom the practice view: below 1 closer in, above 1 further out.
+    Zoom(f64),
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift
@@ -74,6 +80,8 @@ pub fn anywhere(p: Press) -> Option<Action> {
         ("?", true, _) => Help,
         ("/", true, _) if p.shift => Help,
         (",", true, _) => Settings,
+        ("=" | "+", true, _) => Zoom(1.0 / ZOOM),
+        ("-", true, _) => Zoom(ZOOM),
         ("q", true, _) => Quit,
         ("backspace", true, _) => ClearSearch,
         _ => return None,
@@ -89,6 +97,9 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
     }
     if p.cmd {
         return None;
+    }
+    if p.key == "p" && p.shift && !p.ctrl {
+        return Some(Practice);
     }
     let always = match p.key {
         "enter" => Some(Play),
@@ -165,6 +176,13 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("( )", "", "narrow at the start or end"),
             ("< >", "", "slide back or on by its length"),
             ("- =", "", "halve or double it"),
+        ],
+    ),
+    (
+        "Practice",
+        &[
+            ("P", "", "the waveform, on or off"),
+            ("⌘= ⌘-", "", "zoom in or out"),
         ],
     ),
     (
