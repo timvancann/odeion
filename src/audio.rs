@@ -1,24 +1,30 @@
 //! Playback: one song at a time, seeking, and an A/B loop.
 
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
+use rodio::source::SeekError;
+use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 /// A loop between two points. Without an end there is no loop; without a start it runs
-/// from the beginning of the song.
+/// from the beginning of the song. Switched off, it keeps its edges but doesn't loop.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Loop {
     pub start: Option<Duration>,
     pub end: Option<Duration>,
+    pub off: bool,
 }
 
 impl Loop {
     /// A start at or after the end drops the end: the old loop no longer makes sense.
+    /// Placing an edge switches the loop on.
     pub fn set_start(&mut self, at: Duration) {
         self.start = Some(at);
+        self.off = false;
         if self.end.is_some_and(|end| end <= at) {
             self.end = None;
         }
@@ -28,16 +34,28 @@ impl Loop {
     pub fn set_end(&mut self, at: Duration) {
         if at > self.start.unwrap_or_default() {
             self.end = Some(at);
+            self.off = false;
         }
     }
 
+    /// Both edges are there (or an end, looping from the song's start).
     pub fn active(&self) -> bool {
         self.end.is_some()
     }
 
+    /// It has edges and loops.
+    pub fn looping(&self) -> bool {
+        self.active() && !self.off
+    }
+
+    /// Looping on or off, keeping the edges.
+    pub fn switch(&mut self) {
+        self.off = !self.off;
+    }
+
     /// Where to jump to when playback has reached `at`, if anywhere.
     pub fn jump(&self, at: Duration) -> Option<Duration> {
-        let end = self.end?;
+        let end = self.end.filter(|_| !self.off)?;
         (at >= end).then(|| self.start.unwrap_or_default())
     }
 
@@ -130,6 +148,96 @@ fn shifted(at: Duration, by: f64) -> Duration {
 
 type Song = Decoder<BufReader<File>>;
 
+/// What the audio thread and the window share: the loop to keep, in frames (`NONE` for
+/// no loop), and how far the song has played.
+#[derive(Debug)]
+struct Shared {
+    start: AtomicU64,
+    end: AtomicU64,
+    played: AtomicU64,
+}
+
+const NONE: u64 = u64::MAX;
+
+impl Default for Shared {
+    fn default() -> Self {
+        Shared { start: AtomicU64::new(0), end: AtomicU64::new(NONE), played: AtomicU64::new(0) }
+    }
+}
+
+/// The song as the player hears it, looping at the exact sample. Checking for the loop's
+/// end from the window, every 40 ms, let it play up to 40 ms past it. It also keeps the
+/// position itself: the player can't see a jump made in here.
+struct Looped<S> {
+    inner: S,
+    shared: Arc<Shared>,
+    channels: u16,
+    rate: u32,
+    /// Which sample of the current frame comes next.
+    sample: u16,
+}
+
+impl<S: Source> Looped<S> {
+    fn new(inner: S, shared: Arc<Shared>) -> Self {
+        let (channels, rate) = (inner.channels().get(), inner.sample_rate().get());
+        Looped { inner, shared, channels, rate, sample: 0 }
+    }
+
+    fn frames(&self, at: Duration) -> u64 {
+        (at.as_secs_f64() * self.rate as f64).round() as u64
+    }
+}
+
+impl<S: Source> Iterator for Looped<S> {
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<rodio::Sample> {
+        if self.sample == 0 {
+            let end = self.shared.end.load(Ordering::Relaxed);
+            if end != NONE && self.shared.played.load(Ordering::Relaxed) >= end {
+                let start = self.shared.start.load(Ordering::Relaxed);
+                let to = Duration::from_secs_f64(start as f64 / self.rate as f64);
+                if self.inner.try_seek(to).is_ok() {
+                    self.shared.played.store(start, Ordering::Relaxed);
+                }
+            }
+        }
+        let sample = self.inner.next()?;
+        self.sample += 1;
+        if self.sample == self.channels {
+            self.sample = 0;
+            self.shared.played.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(sample)
+    }
+}
+
+impl<S: Source> Source for Looped<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        // A jump can land mid-span, so make no promises about span boundaries.
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(at)?;
+        self.sample = 0;
+        self.shared.played.store(self.frames(at), Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 pub struct Audio {
     /// None when there is no output device; everything else still works, silently.
     sink: Option<MixerDeviceSink>,
@@ -141,6 +249,9 @@ pub struct Audio {
     pub error: Option<String>,
     /// Where to start once the song has opened.
     start_at: Option<Duration>,
+    /// The loop and position, shared with the audio thread.
+    shared: Arc<Shared>,
+    rate: u32,
 }
 
 impl Audio {
@@ -157,6 +268,8 @@ impl Audio {
             player: None,
             loading: None,
             start_at: None,
+            shared: Arc::default(),
+            rate: 44_100,
             path: None,
             duration: None,
             looping: Loop::default(),
@@ -191,10 +304,12 @@ impl Audio {
             changed = true;
             match (result, &self.sink) {
                 (Ok(song), Some(sink)) => {
-                    use rodio::Source;
                     self.duration = song.total_duration();
+                    self.rate = song.sample_rate().get();
+                    self.shared = Arc::default();
+                    self.keep_loop();
                     let player = Player::connect_new(sink.mixer());
-                    player.append(song);
+                    player.append(Looped::new(song, self.shared.clone()));
                     if let Some(at) = self.start_at.take() {
                         let _ = player.try_seek(at);
                     }
@@ -204,10 +319,20 @@ impl Audio {
                 (Err(e), _) => self.error = Some(e),
             }
         }
-        if let Some(to) = self.looping.jump(self.position()) {
-            self.seek(to);
-        }
+        self.keep_loop();
         changed || self.playing()
+    }
+
+    /// Hands the loop to the audio thread, which keeps it to the sample.
+    fn keep_loop(&self) {
+        let frames = |d: Duration| (d.as_secs_f64() * self.rate as f64).round() as u64;
+        let looping = self.looping;
+        let (start, end) = match looping.end.filter(|_| looping.looping()) {
+            Some(end) => (frames(looping.start.unwrap_or_default()), frames(end)),
+            None => (0, NONE),
+        };
+        self.shared.start.store(start, Ordering::Relaxed);
+        self.shared.end.store(end, Ordering::Relaxed);
     }
 
     /// Whether the song played to its end.
@@ -227,7 +352,9 @@ impl Audio {
 
     pub fn position(&self) -> Duration {
         match &self.player {
-            Some(p) if !p.empty() => p.get_pos(),
+            Some(p) if !p.empty() => Duration::from_secs_f64(
+                self.shared.played.load(Ordering::Relaxed) as f64 / self.rate as f64,
+            ),
             Some(_) => self.duration.unwrap_or_default(),
             None => Duration::ZERO,
         }
@@ -330,7 +457,7 @@ mod tests {
     }
 
     fn looped(start: u64, end: u64) -> Loop {
-        Loop { start: Some(s(start)), end: Some(s(end)) }
+        Loop { start: Some(s(start)), end: Some(s(end)), off: false }
     }
 
     #[test]
@@ -403,11 +530,79 @@ mod tests {
     }
 
     #[test]
+    fn switched_off_a_loop_keeps_its_edges_but_doesnt_loop() {
+        let mut l = looped(10, 20);
+        l.switch();
+        assert_eq!(l.jump(s(25)), None);
+        assert!(l.active() && !l.looping());
+        l.nudge_end(1.0, None);
+        assert_eq!(l.end, Some(s(21)));
+        // Placing an edge means looping again.
+        l.set_end(s(22));
+        assert!(l.looping());
+        assert_eq!(l.jump(s(25)), Some(s(10)));
+    }
+
+    /// A source of `frames` stereo frames whose samples count up, seekable.
+    struct Counting {
+        at: usize,
+        frames: usize,
+    }
+
+    impl Iterator for Counting {
+        type Item = rodio::Sample;
+        fn next(&mut self) -> Option<rodio::Sample> {
+            (self.at < self.frames * 2).then(|| {
+                self.at += 1;
+                ((self.at - 1) / 2) as rodio::Sample
+            })
+        }
+    }
+
+    impl Source for Counting {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> ChannelCount {
+            ChannelCount::new(2).unwrap()
+        }
+        fn sample_rate(&self) -> SampleRate {
+            SampleRate::new(1000).unwrap()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+        fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
+            self.at = (at.as_secs_f64() * 1000.0).round() as usize * 2;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_audio_loops_at_the_exact_frame_and_knows_where_it_is() {
+        let shared = Arc::new(Shared::default());
+        shared.start.store(100, Ordering::Relaxed);
+        shared.end.store(110, Ordering::Relaxed);
+        let mut song = Looped::new(Counting { at: 0, frames: 1000 }, shared.clone());
+        let frames: Vec<rodio::Sample> = song.by_ref().take(2 * 125).step_by(2).collect();
+        // Frames 0..110, then 100.. again: never frame 110 itself.
+        assert_eq!(frames[109], 109.0);
+        assert_eq!(frames[110], 100.0);
+        assert!(!frames.contains(&110.0));
+        // 125 frames: 0..110, then 100..110 once more, then 100..105.
+        assert_eq!(shared.played.load(Ordering::Relaxed), 105);
+        assert_eq!(frames[124], 104.0);
+        // Seeking from outside keeps the position honest too.
+        song.try_seek(Duration::from_millis(500)).unwrap();
+        assert_eq!(shared.played.load(Ordering::Relaxed), 500);
+    }
+
+    #[test]
     fn a_start_past_the_end_drops_the_end() {
         let mut l = Loop::default();
         l.set_end(s(20));
         l.set_start(s(30));
-        assert_eq!(l, Loop { start: Some(s(30)), end: None });
+        assert_eq!(l, Loop { start: Some(s(30)), end: None, off: false });
     }
 }
 

@@ -2,6 +2,7 @@
 //! control can be clicked too.
 
 use crate::audio::Audio;
+use crate::beats::{self, Beats};
 use crate::keys::{self, Action};
 use crate::library::{self, Track};
 use crate::media::Media;
@@ -32,7 +33,7 @@ const SEEK: f64 = 5.0;
 /// Placing a loop's end plays this much before it.
 const LEAD_IN: Duration = Duration::from_millis(1500);
 /// How much the practice view shows around the playhead before any zooming.
-const SPAN: Duration = Duration::from_secs(8);
+const SPAN: Duration = Duration::from_secs(10);
 /// A click this close to a loop edge grabs it.
 const GRAB: f32 = 8.;
 /// How long a scan's result stays in the search bar.
@@ -135,6 +136,11 @@ pub struct Riff {
     /// The playing song's waveform, once read; read for every song, shown or not.
     wave: Option<(PathBuf, Rc<Wave>)>,
     reading: Option<(PathBuf, Receiver<Result<Wave, String>>)>,
+    /// The playing song's beats, found in the background like the waveform.
+    beats: Option<(PathBuf, Rc<Beats>)>,
+    finding: Option<(PathBuf, Receiver<Result<Beats, String>>)>,
+    /// The beat grid (`b`): loop edges and steps follow the beats.
+    grid: bool,
     wave_error: Option<String>,
     /// How much of the song the detail view shows.
     span: Duration,
@@ -236,6 +242,9 @@ impl Riff {
             practice: false,
             wave: None,
             reading: None,
+            beats: None,
+            finding: None,
+            grid: false,
             wave_error: None,
             span: SPAN,
             smooth: Default::default(),
@@ -439,6 +448,17 @@ impl Riff {
             self.reading = None;
             changed = true;
         }
+        if let Some((path, rx)) = &self.finding
+            && let Ok(result) = rx.try_recv()
+        {
+            // Without beats the grid simply stays off for this song; the waveform still
+            // reports a song that can't be read.
+            if let Ok(found) = result {
+                self.beats = Some((path.clone(), Rc::new(found)));
+            }
+            self.finding = None;
+            changed = true;
+        }
         if self.audio.ended() && self.next_song() {
             changed = true;
         }
@@ -617,6 +637,13 @@ impl Riff {
             self.reading = Some((track.path.clone(), rx));
             self.wave = None;
             self.wave_error = None;
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = track.path.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(beats::read(&path));
+            });
+            self.finding = Some((track.path.clone(), rx));
+            self.beats = None;
         }
         self.now = Some(track);
         self.message = None;
@@ -837,7 +864,17 @@ impl Riff {
                 self.play_selected();
             }
             Action::Toggle => self.audio.toggle(),
-            Action::Seek(by) => self.audio.seek_by(by),
+            Action::Seek(by) => match self.grid() {
+                // Back restarts the beat you're in first, like previous song.
+                Some(b) => {
+                    let at = self.audio.position();
+                    let to = if by < 0. { b.previous(at) } else { b.next(at) };
+                    if let Some(to) = to {
+                        self.audio.seek(to);
+                    }
+                }
+                None => self.audio.seek_by(by),
+            },
             Action::ToStart => self.audio.seek(Duration::ZERO),
             Action::FromLoopStart => {
                 let start = self.audio.looping.start.unwrap_or_default();
@@ -858,11 +895,11 @@ impl Riff {
             Action::Help => self.help = !self.help,
             Action::Settings | Action::Quit => {}
             Action::LoopStart => {
-                let at = self.audio.position();
+                let at = self.snap(self.audio.position());
                 self.audio.looping.set_start(at);
             }
             Action::LoopEnd => {
-                let at = self.audio.position();
+                let at = self.snap(self.audio.position());
                 self.audio.looping.set_end(at);
                 self.frame_loop();
                 if let Some(start) = self.audio.looping.start.filter(|_| self.audio.looping.active()) {
@@ -870,30 +907,86 @@ impl Riff {
                 }
             }
             Action::LoopClear => self.audio.looping = Default::default(),
+            Action::LoopSwitch => self.audio.looping.switch(),
+            // On the grid, an edge moves a whole beat and the loop slides and resizes in
+            // beats, so it stays on the music as the band drifts.
             Action::NudgeStart(by) => {
-                self.audio.looping.nudge_start(by);
+                let grid = self.grid();
+                let looping = &mut self.audio.looping;
+                match grid {
+                    Some(b) => {
+                        let from = looping.start.unwrap_or_default();
+                        if let Some(to) = b.step(from, if by < 0. { -1 } else { 1 }) {
+                            looping.move_start(to);
+                        }
+                    }
+                    None => looping.nudge_start(by),
+                }
                 self.audition(Edge::Start);
             }
             Action::NudgeEnd(by) => {
-                self.audio.looping.nudge_end(by, song);
+                let grid = self.grid();
+                let looping = &mut self.audio.looping;
+                match (grid, looping.end) {
+                    (Some(b), Some(end)) => {
+                        if let Some(to) = b.step(end, if by < 0. { -1 } else { 1 }) {
+                            looping.move_end(to, song);
+                        }
+                    }
+                    _ => looping.nudge_end(by, song),
+                }
                 self.audition(Edge::End);
             }
             Action::Slide(forward) => {
-                self.audio.looping.slide(forward, song);
+                let grid = self.grid();
+                let looping = &mut self.audio.looping;
+                match (grid, looping.end) {
+                    (Some(b), Some(end)) => {
+                        let start = looping.start.unwrap_or_default();
+                        if let Some((a, z)) = b.slide(start, end, forward) {
+                            (looping.start, looping.end) = (Some(a), Some(z));
+                        }
+                    }
+                    _ => looping.slide(forward, song),
+                }
                 self.audition(Edge::Start);
             }
+            Action::Grid => self.grid = !self.grid,
             Action::Practice => self.practice = !self.practice,
             Action::Zoom(factor) => {
                 let most = song.unwrap_or(SPAN).max(Duration::from_secs(1));
                 self.span = self.span.mul_f64(factor).clamp(Duration::from_millis(500), most);
             }
             Action::Resize(factor) => {
-                self.audio.looping.resize(factor, song);
+                let grid = self.grid();
+                let looping = &mut self.audio.looping;
+                match (grid, looping.end) {
+                    (Some(b), Some(end)) => {
+                        if let Some(to) = b.resize(looping.start.unwrap_or_default(), end, factor) {
+                            looping.move_end(to, song);
+                        }
+                    }
+                    _ => looping.resize(factor, song),
+                }
                 if factor < 1.0 {
                     self.audition(Edge::Start);
                 }
             }
         }
+    }
+
+    /// The playing song's beats while the grid is on and they are known.
+    fn grid(&self) -> Option<Rc<Beats>> {
+        let now = self.now.as_ref()?;
+        self.beats
+            .as_ref()
+            .filter(|(p, _)| self.grid && *p == now.path)
+            .map(|(_, b)| b.clone())
+    }
+
+    /// A moment on the grid: the nearest beat while it is on, otherwise itself.
+    fn snap(&self, at: Duration) -> Duration {
+        self.grid().and_then(|b| b.nearest(at)).unwrap_or(at)
     }
 
     /// Plays around a loop edge just placed, so it can be judged by ear: from the start,
@@ -953,7 +1046,7 @@ impl Riff {
         } else if near(looping.start) {
             self.dragging = Some((Edge::Start, strip.clone()));
         } else if event.modifiers.shift {
-            self.audio.looping.set_end(at);
+            self.audio.looping.set_end(self.snap(at));
             self.frame_loop();
             if self.audio.looping.active() {
                 self.audition(Edge::Start);
@@ -970,6 +1063,8 @@ impl Riff {
             return self.drop_edge(cx);
         }
         let Some((at, _)) = strip.time_at(event.position.x) else { return };
+        // On the grid an edge snaps to beats; ⌥ drags it freely.
+        let at = if event.modifiers.alt { at } else { self.snap(at) };
         let song = self.audio.duration;
         match edge {
             Edge::Start => self.audio.looping.move_start(at),
@@ -1192,9 +1287,10 @@ impl Riff {
         };
         let loop_label = match (looping.start, looping.end) {
             (_, Some(end)) => format!(
-                "{} to {}",
+                "{} to {}{}",
                 ui::clock(looping.start.unwrap_or_default()),
-                ui::clock(end)
+                ui::clock(end),
+                if looping.off { ", off (| loops it)" } else { "" }
             ),
             (Some(start), None) => format!("from {}, ] sets the end", ui::clock(start)),
             (None, None) => "[ ] sets a loop".to_string(),
@@ -1236,7 +1332,7 @@ impl Riff {
                             .w(relative(fraction(end) - start))
                             .rounded_sm()
                             .bg(rgb(t().loops))
-                            .opacity(0.35)
+                            .opacity(if looping.off { 0.12 } else { 0.35 })
                     }))
                     .child(
                         div()
@@ -1333,12 +1429,13 @@ impl Riff {
                         },
                     )))
                     .child(
-                        button("loop", "repeat", None, looping.active()).on_click(cx.listener(
+                        button("loop", "repeat", None, looping.looping()).on_click(cx.listener(
                             |riff, _, _, cx| {
                                 let at = riff.audio.position();
                                 let looping = &mut riff.audio.looping;
+                                // With both edges set it switches looping; \ clears them.
                                 if looping.active() {
-                                    *looping = Default::default();
+                                    looping.switch();
                                 } else if looping.start.is_none() {
                                     looping.set_start(at);
                                 } else {
@@ -1370,7 +1467,7 @@ impl Riff {
                     .child(time)
                     .child(
                         div()
-                            .text_color(rgb(if looping.active() { t().loops } else { t().dim }))
+                            .text_color(rgb(if looping.looping() { t().loops } else { t().dim }))
                             .child(loop_label),
                     ),
             )
@@ -1528,7 +1625,21 @@ impl Riff {
             looping,
             boxed: None,
             contour: true,
+            beats: None,
+            grid: self.grid,
         };
+        let beats = self
+            .beats
+            .as_ref()
+            .filter(|(p, _)| self.now.as_ref().is_some_and(|n| n.path == *p))
+            .map(|(_, b)| b.clone());
+        let mut about = format!("Practice, {:.1} s shown", (to - from).as_secs_f64());
+        if let Some(bpm) = beats.as_ref().and_then(|b| b.tempo_at(at)) {
+            about.push_str(&format!(", about {bpm:.0} BPM here"));
+        }
+        if self.grid {
+            about.push_str(if beats.is_some() { ", grid on" } else { ", grid on (finding beats…)" });
+        }
         div()
             .flex_1()
             .min_h_0()
@@ -1543,12 +1654,12 @@ impl Riff {
                     .font_family(MONO)
                     .text_xs()
                     .text_color(rgb(t.dim))
-                    .child(format!("Practice, {:.1} s shown", (to - from).as_secs_f64()))
-                    .child("P back   - = zoom   drag the loop edges"),
+                    .child(about)
+                    .child("P back   - = zoom   b grid   drag the loop edges"),
             )
             .child(strip("overview", &self.overview, Painting { boxed: Some((from, to)), ..common.clone() }).h(px(40.)))
             .child(
-                strip("detail", &self.detail, Painting { from, to, contour: false, ..common })
+                strip("detail", &self.detail, Painting { from, to, contour: false, beats, ..common })
                     .flex_1()
                     .children(status.map(|s| {
                         div()
@@ -1814,6 +1925,9 @@ struct Painting {
     looping: crate::audio::Loop,
     boxed: Option<(Duration, Duration)>,
     contour: bool,
+    /// Beat ticks behind the waveform, brighter while the grid is on.
+    beats: Option<Rc<Beats>>,
+    grid: bool,
 }
 
 fn tint(color: u32, alpha: u8) -> gpui::Rgba {
@@ -1841,9 +1955,11 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
                     size(px(wd), px(ht)),
                 )
             };
+            // A loop switched off keeps its place, faded.
+            let (region, edge) = if p.looping.off { (0x10, 0x70) } else { (0x26, 0xff) };
             if let Some(end) = p.looping.end {
                 let (a, b) = (x_of(p.looping.start.unwrap_or_default()), x_of(end));
-                window.paint_quad(fill(rect(a, 0., b - a, h), tint(t.loops, 0x26)));
+                window.paint_quad(fill(rect(a, 0., b - a, h), tint(t.loops, region)));
             }
             // The stretch the detail shows: outlined, so it reads at a glance.
             if let Some((from, to)) = p.boxed {
@@ -1854,6 +1970,21 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
                 }
                 for y in [0., h - 2.] {
                     window.paint_quad(fill(rect(a, y, b - a, 2.), tint(t.accent, 0xff)));
+                }
+            }
+            // Beats as small chevrons pointing in from the top and bottom edges: a full
+            // line through the waveform was too much.
+            if let Some(beats) = &p.beats {
+                let color = tint(t.text, if p.grid { 0xb0 } else { 0x38 });
+                let first = beats.times.partition_point(|&b| b < p.from);
+                for &beat in beats.times[first..].iter().take_while(|&&b| b <= p.to) {
+                    let x = x_of(beat);
+                    for row in 0..5 {
+                        let half = (4 - row) as f32;
+                        let row = row as f32;
+                        window.paint_quad(fill(rect(x - half, row, half * 2. + 1., 1.), color));
+                        window.paint_quad(fill(rect(x - half, h - 1. - row, half * 2. + 1., 1.), color));
+                    }
                 }
             }
             if let Some(wave) = &p.wave {
@@ -1880,8 +2011,8 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
                 }
             }
             // Each edge as soon as it is set, a start on its own too.
-            for edge in [p.looping.start, p.looping.end].into_iter().flatten() {
-                window.paint_quad(fill(rect(x_of(edge) - 1., 0., 2., h), tint(t.loops, 0xff)));
+            for at in [p.looping.start, p.looping.end].into_iter().flatten() {
+                window.paint_quad(fill(rect(x_of(at) - 1., 0., 2., h), tint(t.loops, edge)));
             }
             window.paint_quad(fill(rect(x_of(p.at), 0., 1., h), tint(t.text, 0xff)));
         },
@@ -1918,12 +2049,19 @@ impl Render for Riff {
         // playhead smoothed between the player's position updates.
         let playing = self.audio.playing();
         let at = self.smooth.at(self.audio.position(), playing, self.started.elapsed());
+        // Between frames the smoothed playhead can run a moment past the loop's end,
+        // where the audio has already jumped back; draw it where the music is.
+        let looping = self.audio.looping;
+        let at = match (looping.jump(at), looping.end) {
+            (Some(start), Some(end)) => start + (at - end),
+            _ => at,
+        };
         if self.practice && playing {
             window.request_animation_frame();
         }
         // The detail view keeps the loop in sight, growing only when it must.
         let looping = self.audio.looping;
-        if let Some(end) = looping.end.filter(|_| self.dragging.is_none()) {
+        if let Some(end) = looping.end.filter(|_| looping.looping() && self.dragging.is_none()) {
             self.span = wave::fit(self.span, end - looping.start.unwrap_or_default());
         }
         let hint = match &self.message {

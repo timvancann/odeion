@@ -40,6 +40,8 @@ pub enum Action {
     LoopStart,
     LoopEnd,
     LoopClear,
+    /// Looping on or off, keeping the edges.
+    LoopSwitch,
     NudgeStart(f64),
     NudgeEnd(f64),
     Slide(bool),
@@ -48,6 +50,8 @@ pub enum Action {
     Practice,
     /// Zoom the practice view: below 1 closer in, above 1 further out.
     Zoom(f64),
+    /// The beat grid on or off: loop edges and steps follow the beats.
+    Grid,
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift
@@ -101,6 +105,9 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
     if p.key == "p" && p.shift && !p.ctrl {
         return Some(Practice);
     }
+    if p.key == "b" && !p.shift && !p.ctrl {
+        return Some(Grid);
+    }
     let always = match p.key {
         "enter" => Some(Play),
         "escape" => Some(Clear),
@@ -108,6 +115,7 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
         "[" => Some(LoopStart),
         "]" => Some(LoopEnd),
         "\\" => Some(LoopClear),
+        "|" => Some(LoopSwitch),
         // Braces widen the loop, parentheses narrow it, each at the edge on its side.
         "{" => Some(NudgeStart(-NUDGE)),
         "}" => Some(NudgeEnd(NUDGE)),
@@ -174,6 +182,7 @@ pub const SHEET: &[(&str, &[Line])] = &[
         &[
             ("[ ]", "", "loop starts or ends here"),
             ("\\", "", "clear the loop"),
+            ("|", "", "loop on or off, keeping its edges"),
             ("{ }", "", "widen at the start or end"),
             ("( )", "", "narrow at the start or end"),
             ("< >", "", "slide back or on by its length"),
@@ -185,6 +194,7 @@ pub const SHEET: &[(&str, &[Line])] = &[
         &[
             ("P", "", "the waveform, on or off"),
             ("- =", "", "zoom out or in"),
+            ("b", "", "beat grid: loops and steps follow the beats"),
         ],
     ),
     (

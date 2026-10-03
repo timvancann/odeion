@@ -92,11 +92,12 @@ impl Wave {
     }
 }
 
-/// The stretch the detail view shows. With a loop, `span` centred on it; otherwise `span`
-/// with the playhead a quarter in. Kept inside the song where it fits.
+/// The stretch the detail view shows. With a loop that loops, `span` centred on it;
+/// otherwise (no loop, or one switched off) `span` with the playhead a quarter in. Kept
+/// inside the song where it fits.
 pub fn window(at: Duration, looping: Loop, span: Duration, song: Duration) -> (Duration, Duration) {
     let span = span.as_secs_f64();
-    let from = match looping.end {
+    let from = match looping.end.filter(|_| looping.looping()) {
         Some(end) => {
             let start = looping.start.unwrap_or_default().as_secs_f64();
             (start + end.as_secs_f64()) / 2.0 - span / 2.0
@@ -118,7 +119,7 @@ pub fn fit(span: Duration, length: Duration) -> Duration {
     if length.as_secs_f64() * 1.1 > span.as_secs_f64() { frame(length) } else { span }
 }
 
-fn open(path: &Path) -> Result<Box<dyn FormatReader>, String> {
+pub(crate) fn open(path: &Path) -> Result<Box<dyn FormatReader>, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -309,9 +310,12 @@ mod tests {
 
     #[test]
     fn the_window_frames_the_loop_or_follows_the_playhead() {
-        let looped = Loop { start: Some(s(10.0)), end: Some(s(14.0)) };
+        let looped = Loop { start: Some(s(10.0)), end: Some(s(14.0)), off: false };
         assert_eq!(window(s(50.0), looped, s(8.0), s(100.0)), (s(8.0), s(16.0)));
         assert_eq!(window(s(50.0), Loop::default(), s(8.0), s(100.0)), (s(48.0), s(56.0)));
+        // A loop switched off is left behind: the view follows the playhead.
+        let off = Loop { off: true, ..looped };
+        assert_eq!(window(s(50.0), off, s(8.0), s(100.0)), (s(48.0), s(56.0)));
         // Near the start or end it stays inside the song.
         assert_eq!(window(s(1.0), Loop::default(), s(8.0), s(100.0)), (s(0.0), s(8.0)));
         assert_eq!(window(s(99.0), Loop::default(), s(8.0), s(100.0)), (s(92.0), s(100.0)));

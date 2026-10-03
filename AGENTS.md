@@ -17,13 +17,20 @@ and draws:
 - `library.rs`: what a track is, reading one from its path, sort order, search, albums.
 - `scan.rs`: walking the folder, merging with the cache, reading tags and covers on
   background threads.
-- `audio.rs`: playback via rodio, and the A/B `Loop` rules.
+- `audio.rs`: playback via rodio, and the A/B `Loop` rules. The loop is kept inside
+  the audio stream (`Looped`), to the sample, and that wrapper also keeps the playing
+  position, since rodio's player can't see a jump made inside it. Checking from the
+  window every 40 ms let the music run up to 40 ms past the loop's end.
 - `playlist.rs`: next, previous and shuffle over the list a song was started from (the
   album, favourites, search results or library; the run of rows between headers).
 - `keys.rs`: the keymap and the ⌘? sheet, see Keyboard.
 - `wave.rs`: the practice view's waveform: read on 8 threads when a song starts (each
   placed by packet timestamps, with a second of decoder warm-up), summarised to one
   column per pixel, and which stretch the detail view shows.
+- `beats.rs`: where the beats fall (SuperFlux onsets, Ellis tempo and tracker at
+  tightness 300, each beat moved onto its attack to within ~1 ms) and the grid rules on
+  them. Found in the background when a song starts, about 0.3 s. Old rock drifts, so
+  the grid is the detected beats, never "BPM times n".
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
   app that last reported a song, not as key presses, so this is the only way in.
 - `state.rs`: paths, settings, favourites, opening a song in Transcribe!.
@@ -69,7 +76,9 @@ key to both or the test fails.
 - **The ⌘ shortcuts always work**: ⌘P, ⌘F, ⌘A, ⌘T (the *highlighted* song), ⌘S,
   ⌘← ⌘→ or ⌘H ⌘L previous and next, ⌘, settings, ⌘? keys, ⌘Q. ⌘H is free because
   there is no menu bar to hide the app with. ⌃J ⌃K and arrows move; plain ← → seek.
-- **Loop keys always work**: `[ ]` set the edges at the playhead, `\` clears, `{ }`
+- **Loop keys always work**: `[ ]` set the edges at the playhead, `\` clears, `|` switches
+  looping off and on keeping the edges (the loop button too, once both are set; placing
+  an edge switches it back on), `{ }`
   widen the loop by 50 ms at the start or end and `( )` narrow it, `< >` slide the loop by its own length
   (phrase by phrase), `_ +` halve and double it. Every change plays around the edge it
   moved, to be judged by ear. On the progress bar, drag an edge or shift-click for the
@@ -84,6 +93,11 @@ key to both or the test fails.
   only grows if the loop stops fitting. Loops have their own theme colour, `loops`: the
   first terminal colour (cyan, magenta, green, blue) that stands apart from the accent
   and text, since some themes' accent *is* their cyan.
+- **`b` toggles the beat grid** (the practice view marks beats with small chevrons at
+  its top and bottom edges, faint until the grid is on, and shows the local tempo). On the grid `[ ]` and shift-click snap to the nearest beat, `{ } ( )`
+  move an edge a whole beat, `< >` and `_ +` work in beats, `h l` / `← →` step by
+  beats (back restarts the beat you're in first), dragging snaps (⌥ drags freely).
+  Off, everything is as before; songs without a steady beat should stay off.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), the
   theme picker, which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
   Esc restores), and vim keys on or off.
@@ -117,15 +131,10 @@ commit signing is off for this repo.
 
 Ideas Tim liked but hasn't asked for yet. Check with him before building one.
 
-- **Beats in the practice view**, next up: onset strength (spectral flux, or SuperFlux
-  for guitar) plus Ellis's dynamic-programming beat tracker, computed with the waveform,
-  then loop edges snapping to beats. Prototype outside riff first and judge the ticks
-  by eye on real songs; neural trackers (Beat This!) are the heavier fallback.
-- **A beat grid**, after beats: `b` toggles it. With it on, `[ ]` snap to the nearest
-  beat, `{ } ( )` move an edge a whole beat, dragging snaps (⌥ drags freely), and
-  `h l` / `← →` step by beats instead of 5 s. Back works like previous song: more than
-  ~150 ms into a beat goes to its start, at its start goes to the beat before. Bars
-  (shift-step, bar-sized loops) only if the tracker finds downbeats.
+- **Grid corrections**, later (Tim skipped them for now, 2026-10-03): shift the grid by half a beat (funk read on the
+  offbeats) and halve or double the tempo (Neon Knights read at 95, Wildest Dreams at
+  200), applied from the playhead on. Then perhaps tap tempo. Neural trackers (Beat
+  This!) only if corrections are needed too often; they would also bring bars.
 - **Read Transcribe!'s loops** from the `.xsc` next to the song, read-only, so loops made
   there appear in riff. The format still needs looking at.
 - **Loops aligned to beats**, as Moises does with beat detection. This is Transcribe!
