@@ -1,10 +1,11 @@
 # Working in this repo
 
-Riff is Tim's practice player: find a song in his music folder, play it, loop a bit, and
-hand it to Transcribe! for real work. It exists because Transcribe!'s own file finding is
-painful. **Transcribe! is the practice tool; riff is the way in.** Speed and pitch
-control, waveforms and markers belong to Transcribe!. When a feature request drifts
-there, say so before building it. The A/B loop is the deliberate exception.
+Riff is Tim's practice player: find a song in his music folder, play it, and practise
+it: loops to the sample, a waveform with beats, saved regions, slow-down, and other
+recordings of the song (backing tracks, stem sets) to switch between. It began as a way
+into Transcribe! (whose file finding is painful) and grew into the practice tool, by
+Tim's choice; Transcribe! is still a button away for deeper work. Practice features
+are in scope; ask before adding anything that turns riff into an editor or a DAW.
 
 A single GPUI 0.2.2 app (pinned, like jasmijn's desktop app, whose patterns this copies),
 macOS only, no network, no accounts.
@@ -38,6 +39,8 @@ and draws:
   apart, and the set is aligned to the song by its onsets (10 ms to find, 1 ms rises to
   place). One that doesn't clearly match gets a timeline of its own. Tim's backing track
   aligned at +1.907 s, his Moises stems at +0.047 s (encoder delay).
+- `resume.rs`: where each song was left (`resume.json`): its recording (song or
+  variation), slow-down, playhead and each recording's loop.
 - `regions.rs`: loops saved under a name per song (`regions.json` in the data folder):
   order, renaming the same stretch, next and previous, removal.
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
@@ -102,6 +105,19 @@ key to both or the test fails.
   only grows if the loop stops fitting. Loops have their own theme colour, `loops`: the
   first terminal colour (cyan, magenta, green, blue) that stands apart from the accent
   and text, since some themes' accent *is* their cyan.
+- **Songs resume where they were left**: recording, slow-down and loops always; the
+  playhead only when Tim picks the song himself (a song following on in a list starts
+  at the top), and not when it was left within 5 s of the end. Slow-down is per song.
+  Kept on leaving a song, switching recording or speed, every 5 s of playing, and ⌘Q.
+- **Slow-down**: `S` on and off, `,` `.` step through 50 to 90% (from 70%, and turn it
+  on); also the 50 to 90 buttons on the now-playing card (the lit one again turns it
+  off). Pitch is kept: Signalsmith
+  Stretch at its full preset (Tim compared it with SoundTouch, "night and day"; the
+  cheaper preset saves nothing worth it at 0.5% of a core). It sits after the loop and
+  the stem mix (`audio::Stretched`), so loops, stems and beats stay in song time; off,
+  samples pass straight through. It reports what it holds back (~0.1 s) so the playhead
+  shows what's heard, and a soft limiter keeps its rare peaks (up to 1.8) under full
+  scale.
 - **`b` toggles the beat grid** (the practice view marks beats with small chevrons at
   its top and bottom edges, faint until the grid is on, and shows the local tempo). On the grid `[ ]` and shift-click snap to the nearest beat, `{ } ( )`
   move an edge a whole beat, `< >` and `_ +` work in beats, `h l` / `← →` step by

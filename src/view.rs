@@ -8,6 +8,7 @@ use crate::library::{self, Track};
 use crate::media::Media;
 use crate::playlist::Playlist;
 use crate::regions::{Region, Regions};
+use crate::resume::{Resume, Spot};
 use crate::variations::{self, Variation, Variations};
 use crate::scan;
 use crate::state::{self, Favorites, Settings};
@@ -34,6 +35,9 @@ const TITLEBAR: f32 = 32.;
 const SEEK: f64 = 5.0;
 /// Placing a loop's end plays this much before it.
 const LEAD_IN: Duration = Duration::from_millis(1500);
+/// The slow-down's speeds; 100% is slow-down off.
+const SPEEDS: [f32; 5] = [0.5, 0.6, 0.7, 0.8, 0.9];
+const SPEED_LABELS: [&str; 5] = ["50%", "60%", "70%", "80%", "90%"];
 /// How much the practice view shows around the playhead before any zooming.
 const SPAN: Duration = Duration::from_secs(10);
 /// A click this close to a loop edge grabs it.
@@ -156,6 +160,12 @@ pub struct Riff {
     /// itself, n its n-th variation.
     variations: Variations,
     variation: usize,
+    /// Slow-down: whether it is on, and which of `SPEEDS` it plays at (starting at 70%).
+    slow: bool,
+    speed: usize,
+    /// Where each song was left, and when the playing one's was last kept.
+    resume: Resume,
+    kept: std::time::Instant,
     /// Each recording's loop while another plays, so switching back brings it back.
     loops: HashMap<PathBuf, crate::audio::Loop>,
     /// Files being made a variation of a song, in the background.
@@ -196,6 +206,10 @@ fn cache_file() -> PathBuf {
 
 fn favorites_file() -> PathBuf {
     state::data_dir().join("favorites.json")
+}
+
+fn resume_file() -> PathBuf {
+    state::data_dir().join("resume.json")
 }
 
 fn variations_file() -> PathBuf {
@@ -283,7 +297,11 @@ impl Riff {
             bound: None,
             variations: Variations::load(&variations_file()),
             variation: 0,
+            slow: false,
+            speed: 2,
             loops: HashMap::new(),
+            resume: Resume::load(&resume_file()),
+            kept: std::time::Instant::now(),
             adding: None,
             wave_error: None,
             span: SPAN,
@@ -467,6 +485,11 @@ impl Riff {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.audio.tick();
+        // Where the playing song is, kept now and then, so a crash loses little.
+        if self.audio.playing() && self.kept.elapsed() > Duration::from_secs(5) {
+            self.keep_spot();
+            self.store_resume();
+        }
         if self.scan_note.as_ref().is_some_and(|(_, since)| since.elapsed() > RESULT_FOR)
             && self.tagging.is_none()
         {
@@ -707,11 +730,23 @@ impl Riff {
         }
     }
 
-    fn play(&mut self, track: Track) {
+    /// Plays a song where it was left: its recording, slow-down and loops, and, when
+    /// picked by hand (`pick`), its playhead. A song that follows on in a list starts
+    /// from the top.
+    fn play(&mut self, track: Track, pick: bool) {
+        self.keep_spot();
+        self.store_resume();
         self.bound = None;
         self.variation = 0;
         self.muted.clear();
         self.solo = None;
+        let spot = self.resume.of(&track.path).cloned().unwrap_or_default();
+        self.loops.extend(spot.loops.clone());
+        self.slow = spot.slow;
+        self.speed = spot.speed.min(SPEEDS.len() - 1);
+        self.audio.set_speed(if self.slow { SPEEDS[self.speed] } else { 1.0 });
+        let at = if pick { spot.start(track.seconds.map(Duration::from_secs)) } else { Duration::ZERO };
+        let variations = self.variations.of(&track.path).len();
         self.audio.play(std::slice::from_ref(&track.path), &[1.0]);
         if self.wave.as_ref().is_none_or(|(p, _)| *p != track.path) {
             self.read_wave(vec![track.path.clone()]);
@@ -726,8 +761,47 @@ impl Riff {
             self.finding = Some((track.path.clone(), rx));
             self.beats = None;
         }
+        let path = track.path.clone();
         self.now = Some(track);
         self.message = None;
+        if (1..=variations).contains(&spot.variation) {
+            self.open_recording(spot.variation, at);
+        } else {
+            self.audio.looping = self.loops.get(&path).copied().unwrap_or_default();
+            self.audio.resume_at(at);
+            if self.audio.looping.active() {
+                self.frame_loop();
+            }
+        }
+    }
+
+    /// Notes where the playing song is: its recording, slow-down, playhead and loops.
+    fn keep_spot(&mut self) {
+        let Some(now) = self.now.clone() else { return };
+        if let Some(recording) = self.recording() {
+            self.loops.insert(recording, self.audio.looping);
+        }
+        let recordings = std::iter::once(now.path.clone())
+            .chain(self.variations.of(&now.path).iter().filter_map(|v| v.files.first().cloned()));
+        let loops = recordings
+            .filter_map(|r| self.loops.get(&r).map(|l| (r, *l)))
+            .filter(|(_, l)| l.start.is_some() || l.end.is_some())
+            .collect();
+        let spot = Spot {
+            variation: self.variation,
+            slow: self.slow,
+            speed: self.speed,
+            at: self.audio.position(),
+            loops,
+        };
+        self.resume.keep(&now.path, spot);
+        self.kept = std::time::Instant::now();
+    }
+
+    fn store_resume(&mut self) {
+        if let Err(e) = self.resume.store(&resume_file()) {
+            self.message = Some((format!("couldn't save where songs were: {e}"), true));
+        }
     }
 
     /// Reads the waveform of what plays (stems summed), keyed by its first file.
@@ -741,6 +815,59 @@ impl Riff {
         self.wave = None;
         self.wave_error = None;
         self.stem_waves.clear();
+    }
+
+    /// The slow-down presets as a row of buttons, the one playing lit. A click picks one;
+    /// clicking the lit one turns slow-down off, back to full speed.
+    fn speed_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        div()
+            .flex()
+            .items_center()
+            .h(px(36.))
+            .p(px(3.))
+            .gap(px(2.))
+            .rounded_md()
+            .bg(rgb(t.raised))
+            .child(div().px_1().child(ui::icon("gauge", 16., if self.slow { t.accent } else { t.dim })))
+            .children(SPEED_LABELS.iter().enumerate().map(|(i, label)| {
+                let lit = self.slow && self.speed == i;
+                div()
+                    .id(("speed", i))
+                    .h_full()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .font_family(MONO)
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(lit, |d| d.bg(rgb(t.accent_soft)))
+                    .hover(|d| d.bg(rgb(t.faint)))
+                    .text_color(rgb(if lit { t.accent } else { t.dim }))
+                    .child(label.trim_end_matches('%').to_string())
+                    .on_click(cx.listener(move |riff, _, _, cx| {
+                        if riff.slow && riff.speed == i {
+                            riff.slow = false;
+                        } else {
+                            (riff.slow, riff.speed) = (true, i);
+                        }
+                        riff.apply_speed();
+                        cx.notify();
+                    }))
+            }))
+    }
+
+    /// Hands the speed to the audio: a preset when slow-down is on, otherwise as recorded.
+    fn apply_speed(&mut self) {
+        let speed = if self.slow { SPEEDS[self.speed] } else { 1.0 };
+        self.audio.set_speed(speed);
+        self.keep_spot();
+        self.store_resume();
+        self.message = Some((
+            if self.slow { format!("slowed to {:.0}%, pitch kept", speed * 100.) } else { "full speed".into() },
+            false,
+        ));
     }
 
     /// Each stem's gain: the soloed one alone, otherwise all but the muted.
@@ -791,6 +918,20 @@ impl Riff {
             }
             _ => Duration::ZERO,
         };
+        self.open_recording(target, at);
+        self.keep_spot();
+        self.store_resume();
+    }
+
+    /// Plays recording `target` of the song (0 the song, n its n-th variation) from
+    /// `at`, with that recording's own loop.
+    fn open_recording(&mut self, target: usize, at: Duration) {
+        let Some(now) = self.now.clone() else { return };
+        let list = self.variations.of(&now.path).to_vec();
+        if target > list.len() {
+            return;
+        }
+        let into = if target == 0 { Some(0.0) } else { list[target - 1].offset };
         let (files, gains, label) = match target {
             0 => (vec![now.path.clone()], vec![1.0], "the song".to_string()),
             n => {
@@ -912,7 +1053,7 @@ impl Riff {
             })
             .collect();
         self.playlist = Playlist::new(list, &track.path, self.seed());
-        self.play(track);
+        self.play(track, true);
     }
 
     /// A fresh shuffle when shuffling, none otherwise.
@@ -930,7 +1071,7 @@ impl Riff {
         // A song gone since a rescan is skipped.
         while let Some(path) = self.playlist.next().cloned() {
             if let Some(track) = self.track_at(&path) {
-                self.play(track);
+                self.play(track, false);
                 return true;
             }
         }
@@ -947,7 +1088,7 @@ impl Riff {
             // Seeking keeps the A/B loop, which starting the song again would clear.
             self.audio.seek(Duration::ZERO);
         } else if let Some(track) = self.track_at(&path) {
-            self.play(track);
+            self.play(track, false);
         }
     }
 
@@ -1020,7 +1161,11 @@ impl Riff {
         // The sheets swallow every key but their own toggles and ⌘Q.
         match global {
             // GPUI apps get no menu bar, so ⌘Q has to be handled here.
-            Some(Action::Quit) => return cx.quit(),
+            Some(Action::Quit) => {
+                self.keep_spot();
+                self.store_resume();
+                return cx.quit();
+            }
             Some(Action::Help) => {
                 self.help = !self.help;
                 cx.notify();
@@ -1235,6 +1380,22 @@ impl Riff {
                 if let Some(region) = self.regions.step(&recording, from, forward).cloned() {
                     self.play_region(&region);
                 }
+            }
+            Action::Slow => {
+                self.slow = !self.slow;
+                self.apply_speed();
+            }
+            Action::Speed(faster) => {
+                // Stepping from off starts at the preset; on, it moves through them.
+                if self.slow {
+                    self.speed = if faster {
+                        (self.speed + 1).min(SPEEDS.len() - 1)
+                    } else {
+                        self.speed.saturating_sub(1)
+                    };
+                }
+                self.slow = true;
+                self.apply_speed();
             }
             Action::Variation => self.next_variation(),
             Action::Mute(n) if n < self.muted.len() => {
@@ -1714,9 +1875,10 @@ impl Riff {
             "opening…".to_string()
         } else {
             format!(
-                "{} / {}",
+                "{} / {}{}",
                 ui::clock(position),
-                duration.map_or("–".to_string(), ui::clock)
+                duration.map_or("–".to_string(), ui::clock),
+                if self.slow { format!(" at {}", SPEED_LABELS[self.speed]) } else { String::new() }
             )
         };
         let loop_label = match (looping.start, looping.end) {
@@ -1862,6 +2024,7 @@ impl Riff {
                             cx.notify();
                         },
                     )))
+                    .child(self.speed_buttons(cx))
                     .child(
                         button("loop", "repeat", None, looping.looping()).on_click(cx.listener(
                             |riff, _, _, cx| {
@@ -2082,6 +2245,9 @@ impl Riff {
         }
         if self.grid {
             about.push_str(if beats.is_some() { ", grid on" } else { ", grid on (finding beats…)" });
+        }
+        if self.slow {
+            about.push_str(&format!(", at {} speed", SPEED_LABELS[self.speed]));
         }
         div()
             .id("practice")
@@ -2663,7 +2829,7 @@ impl Render for Riff {
         // The practice view glides with the music: drawn every frame while it plays, the
         // playhead smoothed between the player's position updates.
         let playing = self.audio.playing();
-        let at = self.smooth.at(self.audio.position(), playing, self.started.elapsed());
+        let at = self.smooth.at(self.audio.position(), playing, self.started.elapsed(), self.audio.speed());
         // Between frames the smoothed playhead can run a moment past the loop's end,
         // where the audio has already jumped back; draw it where the music is.
         let looping = self.audio.looping;

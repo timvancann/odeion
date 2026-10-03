@@ -12,7 +12,7 @@ use std::time::Duration;
 
 /// A loop between two points. Without an end there is no loop; without a start it runs
 /// from the beginning of the song. Switched off, it keeps its edges but doesn't loop.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Loop {
     pub start: Option<Duration>,
     pub end: Option<Duration>,
@@ -127,9 +127,10 @@ const SLACK: Duration = Duration::from_millis(60);
 
 impl Smooth {
     /// Where to draw the playhead, given the player's position and a clock reading.
-    pub fn at(&mut self, real: Duration, playing: bool, now: Duration) -> Duration {
+    pub fn at(&mut self, real: Duration, playing: bool, now: Duration, speed: f32) -> Duration {
         if playing && let Some((from, then)) = self.anchor {
-            let guess = from + now.saturating_sub(then);
+            let gone = now.saturating_sub(then);
+            let guess = from + if speed < 1.0 { gone.mul_f64(speed as f64) } else { gone };
             if guess.abs_diff(real) <= SLACK {
                 return guess;
             }
@@ -208,6 +209,142 @@ impl<S: Source> Source for Mix<S> {
     }
 }
 
+/// Keeps slowed audio inside full scale. Stretching re-aligns phases, and peaks that
+/// were apart can land together: on loud masters 0.02 to 0.06% of samples went over,
+/// up to 1.8, and the hardware would clip them into crackle. Below 0.9 nothing changes;
+/// above it peaks bend smoothly toward 1 and never pass it. Only those rare peaks are
+/// touched, so the level stays as it was.
+fn soft_limit(x: f32) -> f32 {
+    const KNEE: f32 = 0.9;
+    let size = x.abs();
+    if size <= KNEE {
+        return x;
+    }
+    x.signum() * (KNEE + (1.0 - KNEE) * ((size - KNEE) / (1.0 - KNEE)).tanh())
+}
+
+/// Output frames the slow-down makes at a time.
+const BLOCK: usize = 512;
+
+/// The song slowed down without changing pitch (Signalsmith Stretch, a phase vocoder,
+/// at its full-quality preset: half a percent of a core). At full speed it stays out of
+/// the way: samples pass through untouched, with no delay. It comes after the loop, so
+/// loops keep to the sample in the song's time.
+struct Stretched<S> {
+    inner: S,
+    shared: Arc<Shared>,
+    stretch: signalsmith_stretch::Stretch,
+    channels: usize,
+    /// Output waiting to be played, and how far into it.
+    out: Vec<f32>,
+    at: usize,
+    input: Vec<f32>,
+    /// Input frames owed from rounding blocks at the speed.
+    carry: f64,
+    /// Whether the last sample came through the stretcher.
+    stretching: bool,
+}
+
+impl<S: Source> Stretched<S> {
+    fn new(inner: S, shared: Arc<Shared>) -> Self {
+        let channels = inner.channels().get() as usize;
+        let stretch =
+            signalsmith_stretch::Stretch::preset_default(channels as u32, inner.sample_rate().get());
+        Stretched {
+            inner,
+            shared,
+            stretch,
+            channels,
+            out: Vec::new(),
+            at: 0,
+            input: Vec::new(),
+            carry: 0.0,
+            stretching: false,
+        }
+    }
+
+    /// Starts afresh: after a seek, or when slowing down begins.
+    fn restart(&mut self) {
+        self.stretch.reset();
+        self.out.clear();
+        self.at = 0;
+        self.carry = 0.0;
+    }
+}
+
+impl<S: Source> Iterator for Stretched<S> {
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<rodio::Sample> {
+        let speed = f32::from_bits(self.shared.speed.load(Ordering::Relaxed)) as f64;
+        if speed >= 0.999 {
+            if self.stretching {
+                // Back to full speed: what the stretcher held back is dropped.
+                self.stretching = false;
+                self.restart();
+                self.shared.delay.store(0, Ordering::Relaxed);
+            }
+            return self.inner.next();
+        }
+        if !self.stretching {
+            self.stretching = true;
+            self.restart();
+        }
+        if self.at >= self.out.len() {
+            let wanted = BLOCK as f64 * speed + self.carry;
+            let frames = wanted.floor() as usize;
+            self.carry = wanted - frames as f64;
+            self.input.clear();
+            for _ in 0..frames * self.channels {
+                match self.inner.next() {
+                    Some(v) => self.input.push(v),
+                    None => break,
+                }
+            }
+            if self.input.is_empty() {
+                return None;
+            }
+            // A last, partial frame is padded so the stretcher gets whole frames.
+            let whole = self.input.len().div_ceil(self.channels) * self.channels;
+            self.input.resize(whole, 0.0);
+            self.out.resize(BLOCK * self.channels, 0.0);
+            self.stretch.process(&self.input, &mut self.out);
+            self.at = 0;
+            let held = self.stretch.input_latency() as f64 + self.stretch.output_latency() as f64 * speed;
+            self.shared.delay.store(held as u64, Ordering::Relaxed);
+        }
+        let v = soft_limit(self.out[self.at]);
+        self.at += 1;
+        Some(v)
+    }
+}
+
+impl<S: Source> Source for Stretched<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(at)?;
+        if self.stretching {
+            self.restart();
+        }
+        Ok(())
+    }
+}
+
 fn gains(of: &[f32]) -> Arc<Vec<AtomicU32>> {
     Arc::new(of.iter().map(|g| AtomicU32::new(g.to_bits())).collect())
 }
@@ -219,13 +356,23 @@ struct Shared {
     start: AtomicU64,
     end: AtomicU64,
     played: AtomicU64,
+    /// Playback speed (f32 bits): 1 plays as recorded, below slows down.
+    speed: AtomicU32,
+    /// Frames the slow-down holds back: played but not heard yet.
+    delay: AtomicU64,
 }
 
 const NONE: u64 = u64::MAX;
 
 impl Default for Shared {
     fn default() -> Self {
-        Shared { start: AtomicU64::new(0), end: AtomicU64::new(NONE), played: AtomicU64::new(0) }
+        Shared {
+            start: AtomicU64::new(0),
+            end: AtomicU64::new(NONE),
+            played: AtomicU64::new(0),
+            speed: AtomicU32::new(1.0f32.to_bits()),
+            delay: AtomicU64::new(0),
+        }
     }
 }
 
@@ -313,6 +460,8 @@ pub struct Audio {
     gains: Arc<Vec<AtomicU32>>,
     /// Stay paused once the files open (a switch made while paused).
     start_paused: bool,
+    /// Playback speed, below 1 slowed down; kept across songs.
+    speed: f32,
     pub duration: Option<Duration>,
     pub looping: Loop,
     pub error: Option<String>,
@@ -342,6 +491,7 @@ impl Audio {
             files: Vec::new(),
             gains: gains(&[]),
             start_paused: false,
+            speed: 1.0,
             duration: None,
             looping: Loop::default(),
         }
@@ -384,6 +534,16 @@ impl Audio {
         self.start_paused = paused;
     }
 
+    /// Plays at `speed` (1 as recorded, below slower) from now on, pitch unchanged.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed;
+        self.shared.speed.store(speed.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
     /// The stems' gains, from now on.
     pub fn set_gains(&self, now: &[f32]) {
         for (gain, g) in self.gains.iter().zip(now) {
@@ -405,7 +565,9 @@ impl Audio {
                     self.shared = Arc::default();
                     self.keep_loop();
                     let player = Player::connect_new(sink.mixer());
-                    player.append(Looped::new(song, self.shared.clone()));
+                    self.shared.speed.store(self.speed.to_bits(), Ordering::Relaxed);
+                    let looped = Looped::new(song, self.shared.clone());
+                    player.append(Stretched::new(looped, self.shared.clone()));
                     if let Some(at) = self.start_at.take() {
                         let _ = player.try_seek(at);
                     }
@@ -451,9 +613,12 @@ impl Audio {
 
     pub fn position(&self) -> Duration {
         match &self.player {
-            Some(p) if !p.empty() => Duration::from_secs_f64(
-                self.shared.played.load(Ordering::Relaxed) as f64 / self.rate as f64,
-            ),
+            // What's heard: what the song has played, less what the slow-down still holds.
+            Some(p) if !p.empty() => {
+                let played = self.shared.played.load(Ordering::Relaxed);
+                let held = self.shared.delay.load(Ordering::Relaxed);
+                Duration::from_secs_f64(played.saturating_sub(held) as f64 / self.rate as f64)
+            }
             Some(_) => self.duration.unwrap_or_default(),
             None => Duration::ZERO,
         }
@@ -475,6 +640,11 @@ impl Audio {
             Some(p) => p.pause(),
             None => {}
         }
+    }
+
+    /// Starts the song that is opening at `at`, rather than the top.
+    pub fn resume_at(&mut self, at: Duration) {
+        self.start_at = Some(at).filter(|at| !at.is_zero());
     }
 
     /// Plays from `at`, whether paused, playing or ended.
@@ -621,16 +791,20 @@ mod tests {
     #[test]
     fn the_smooth_playhead_glides_between_steps_and_follows_jumps() {
         let mut p = Smooth::default();
-        assert_eq!(p.at(s(10), true, ms(0)), s(10));
+        assert_eq!(p.at(s(10), true, ms(0), 1.0), s(10));
         // The player still says 10 s; 16 ms later the playhead has moved on anyway.
-        assert_eq!(p.at(s(10), true, ms(16)), s(10) + ms(16));
-        assert_eq!(p.at(s(10) + ms(40), true, ms(32)), s(10) + ms(32));
+        assert_eq!(p.at(s(10), true, ms(16), 1.0), s(10) + ms(16));
+        assert_eq!(p.at(s(10) + ms(40), true, ms(32), 1.0), s(10) + ms(32));
         // A loop jump back to 4 s is followed at once.
-        assert_eq!(p.at(s(4), true, ms(48)), s(4));
-        assert_eq!(p.at(s(4), true, ms(64)), s(4) + ms(16));
+        assert_eq!(p.at(s(4), true, ms(48), 1.0), s(4));
+        assert_eq!(p.at(s(4), true, ms(64), 1.0), s(4) + ms(16));
         // Paused, it stays where the player is.
-        assert_eq!(p.at(s(7), false, ms(80)), s(7));
-        assert_eq!(p.at(s(7), false, ms(96)), s(7));
+        assert_eq!(p.at(s(7), false, ms(80), 1.0), s(7));
+        assert_eq!(p.at(s(7), false, ms(96), 1.0), s(7));
+        // Slowed to half speed, the playhead moves at half speed.
+        let mut p = Smooth::default();
+        assert_eq!(p.at(s(10), true, ms(0), 0.5), s(10));
+        assert_eq!(p.at(s(10), true, ms(40), 0.5), s(10) + ms(20));
     }
 
     #[test]
@@ -711,6 +885,7 @@ mod tests {
             files: Vec::new(),
             gains: gains(&[]),
             start_paused: false,
+            speed: 1.0,
             duration: None,
             looping: looped(0, 16),
             error: None,
@@ -743,6 +918,45 @@ mod tests {
         let rest: Vec<rodio::Sample> = mix.collect();
         assert_eq!(rest.len(), 2 * 10 - 7);
         assert_eq!(rest.last(), Some(&9.0));
+    }
+
+    #[test]
+    fn the_limiter_leaves_normal_levels_alone_and_keeps_peaks_under_full_scale() {
+        for x in [0.0, 0.3, -0.75, 0.9, -0.9] {
+            assert_eq!(soft_limit(x), x);
+        }
+        for x in [0.95f32, 1.0, 1.8, -1.8, 40.0] {
+            let y = soft_limit(x);
+            assert!(y.abs() <= 1.0 && y.abs() > 0.9 && y.signum() == x.signum(), "{x} gave {y}");
+        }
+        // Smooth: bigger stays bigger.
+        assert!(soft_limit(1.2) < soft_limit(1.5));
+    }
+
+    #[test]
+    fn at_full_speed_samples_pass_through_untouched() {
+        let shared = Arc::new(Shared::default());
+        let song = Stretched::new(Counting { at: 0, frames: 50 }, shared.clone());
+        let straight: Vec<rodio::Sample> = Counting { at: 0, frames: 50 }.collect();
+        assert_eq!(song.collect::<Vec<_>>(), straight);
+        assert_eq!(shared.delay.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn slowed_down_the_song_lasts_longer_and_reports_what_it_holds_back() {
+        let shared = Arc::new(Shared::default());
+        shared.speed.store(0.5f32.to_bits(), Ordering::Relaxed);
+        let mut song = Stretched::new(Counting { at: 0, frames: 4000 }, shared.clone());
+        let heard = song.by_ref().count();
+        // At half speed 4,000 frames take about twice as long; blocks round it up.
+        let frames = heard / 2;
+        assert!((7900..=8400).contains(&frames), "{frames} frames");
+        assert!(shared.delay.load(Ordering::Relaxed) > 0);
+        // Back at full speed it passes straight through again.
+        shared.speed.store(1.0f32.to_bits(), Ordering::Relaxed);
+        song.try_seek(Duration::ZERO).unwrap();
+        assert_eq!(song.next(), Some(0.0));
+        assert_eq!(shared.delay.load(Ordering::Relaxed), 0);
     }
 
     #[test]

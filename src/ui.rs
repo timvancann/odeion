@@ -39,7 +39,7 @@ macro_rules! icons {
 
 icons!(
     "play", "pause", "repeat", "external-link", "music", "search", "star", "folder", "x", "plus",
-    "palette", "check", "skip-back", "skip-forward", "shuffle", "keyboard",
+    "palette", "check", "skip-back", "skip-forward", "shuffle", "keyboard", "gauge",
 );
 
 impl AssetSource for Assets {

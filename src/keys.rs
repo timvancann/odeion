@@ -64,6 +64,10 @@ pub enum Action {
     AddVariation,
     /// Remove the playing variation.
     RemoveVariation,
+    /// Slow-down on or off.
+    Slow,
+    /// The next slower (false) or faster (true) slow-down preset; turns slow-down on.
+    Speed(bool),
     /// Mute or unmute stem n (from 0) of a stem set.
     Mute(usize),
     /// Solo stem n, or end the solo.
@@ -133,6 +137,9 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
             ("n", false) => return Some(Region(true)),
             ("n", true) => return Some(Region(false)),
             ("x", false) => return Some(RemoveRegion),
+            ("s", true) => return Some(Slow),
+            (",", false) => return Some(Speed(false)),
+            (".", false) => return Some(Speed(true)),
             ("v", false) => return Some(Variation),
             ("v", true) => return Some(AddVariation),
             ("x", true) => return Some(RemoveVariation),
@@ -229,6 +236,8 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("P", "", "the waveform, on or off"),
             ("- =", "", "zoom out or in"),
             ("b", "", "beat grid: loops and steps follow the beats"),
+            ("S", "", "slow down on or off, pitch kept"),
+            (", .", "", "slower or faster: 50 to 90%"),
             ("v", "", "next recording: the song, its variations"),
             ("V", "", "add a variation (or drop files on a song)"),
             ("X", "", "remove the playing variation"),
