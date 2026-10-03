@@ -138,6 +138,9 @@ pub struct Riff {
     wave_error: Option<String>,
     /// How much of the song the detail view shows.
     span: Duration,
+    /// The playhead as the practice view draws it, and the clock that moves it.
+    smooth: crate::audio::Smooth,
+    started: std::time::Instant,
     overview: Strip,
     detail: Strip,
     /// When the window last moved or resized and that isn't saved yet.
@@ -235,6 +238,8 @@ impl Riff {
             reading: None,
             wave_error: None,
             span: SPAN,
+            smooth: Default::default(),
+            started: std::time::Instant::now(),
             overview: Strip::default(),
             detail: Strip::default(),
             rows: Vec::new(),
@@ -849,8 +854,9 @@ impl Riff {
                 let track = self.selected_track().cloned().or_else(|| self.now.clone());
                 self.transcribe(track);
             }
-            // Handled before anything else in `key`.
-            Action::Help | Action::Settings | Action::Quit => {}
+            // Bare `?` arrives here; ⌘? is handled first in `key`, as are ⌘, and ⌘Q.
+            Action::Help => self.help = !self.help,
+            Action::Settings | Action::Quit => {}
             Action::LoopStart => {
                 let at = self.audio.position();
                 self.audio.looping.set_start(at);
@@ -858,6 +864,7 @@ impl Riff {
             Action::LoopEnd => {
                 let at = self.audio.position();
                 self.audio.looping.set_end(at);
+                self.frame_loop();
                 if let Some(start) = self.audio.looping.start.filter(|_| self.audio.looping.active()) {
                     self.audio.seek(start);
                 }
@@ -901,6 +908,15 @@ impl Riff {
         self.audio.play_from(at);
     }
 
+    /// Zooms the practice view to a loop just completed. Afterwards the zoom is the
+    /// player's own (`wave::fit`).
+    fn frame_loop(&mut self) {
+        let looping = self.audio.looping;
+        if let Some(end) = looping.end {
+            self.span = wave::frame(end - looping.start.unwrap_or_default());
+        }
+    }
+
     /// Highlights the playing song, nearest the cursor when it is listed twice.
     fn to_playing(&mut self) {
         let Some(path) = self.now.as_ref().map(|n| n.path.clone()) else { return };
@@ -938,6 +954,7 @@ impl Riff {
             self.dragging = Some((Edge::Start, strip.clone()));
         } else if event.modifiers.shift {
             self.audio.looping.set_end(at);
+            self.frame_loop();
             if self.audio.looping.active() {
                 self.audition(Edge::Start);
             }
@@ -1218,7 +1235,7 @@ impl Riff {
                             .left(relative(start))
                             .w(relative(fraction(end) - start))
                             .rounded_sm()
-                            .bg(rgb(t().on))
+                            .bg(rgb(t().loops))
                             .opacity(0.35)
                     }))
                     .child(
@@ -1236,7 +1253,7 @@ impl Riff {
                             .left(relative(fraction(start)))
                             .w(px(2.))
                             .h(px(12.))
-                            .bg(rgb(t().on))
+                            .bg(rgb(t().loops))
                     })),
             );
 
@@ -1353,7 +1370,7 @@ impl Riff {
                     .child(time)
                     .child(
                         div()
-                            .text_color(rgb(if looping.active() { t().on } else { t().dim }))
+                            .text_color(rgb(if looping.active() { t().loops } else { t().dim }))
                             .child(loop_label),
                     ),
             )
@@ -1460,9 +1477,8 @@ impl Riff {
     /// The practice view: the whole song as a loudness contour with the shown stretch
     /// boxed, and below it that stretch in detail, the loop on it. Both take clicks and
     /// drags like the progress bar.
-    fn render_practice(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_practice(&self, at: Duration, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
-        let at = self.audio.position();
         let looping = self.audio.looping;
         let wave = self
             .wave
@@ -1528,7 +1544,7 @@ impl Riff {
                     .text_xs()
                     .text_color(rgb(t.dim))
                     .child(format!("Practice, {:.1} s shown", (to - from).as_secs_f64()))
-                    .child("P back   ⌘= ⌘- zoom   drag the loop edges"),
+                    .child("P back   - = zoom   drag the loop edges"),
             )
             .child(strip("overview", &self.overview, Painting { boxed: Some((from, to)), ..common.clone() }).h(px(40.)))
             .child(
@@ -1827,34 +1843,45 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
             };
             if let Some(end) = p.looping.end {
                 let (a, b) = (x_of(p.looping.start.unwrap_or_default()), x_of(end));
-                window.paint_quad(fill(rect(a, 0., b - a, h), tint(t.on, 0x26)));
+                window.paint_quad(fill(rect(a, 0., b - a, h), tint(t.loops, 0x26)));
             }
+            // The stretch the detail shows: outlined, so it reads at a glance.
             if let Some((from, to)) = p.boxed {
-                let (a, b) = (x_of(from), x_of(to));
-                window.paint_quad(fill(rect(a, 0., (b - a).max(2.), h), tint(t.text, 0x14)));
+                let (a, b) = (x_of(from), x_of(to).max(x_of(from) + 2.));
+                window.paint_quad(fill(rect(a, 0., b - a, h), tint(t.accent, 0x24)));
+                for x in [a, b - 2.] {
+                    window.paint_quad(fill(rect(x, 0., 2., h), tint(t.accent, 0xff)));
+                }
+                for y in [0., h - 2.] {
+                    window.paint_quad(fill(rect(a, y, b - a, 2.), tint(t.accent, 0xff)));
+                }
             }
             if let Some(wave) = &p.wave {
-                let columns = wave.columns(p.from, p.to, w as usize);
+                let (behind, columns) = wave.columns(p.from, p.to, w as usize);
                 let scale = if p.contour {
                     columns.iter().map(|c| c.rms()).fold(0., f32::max)
                 } else {
                     wave.loudest()
                 };
                 let mid = h / 2.;
-                let bar = |x: usize, v: f32| {
-                    let half = (v / scale.max(1e-6)).min(1.) * (mid - 2.);
-                    rect(x as f32, mid - half, 1., (half * 2.).max(1.))
-                };
-                let played = x_of(p.at) as usize;
-                for (x, c) in columns.iter().enumerate() {
+                // Whole device pixels, so a column never smears across two.
+                let device = window.scale_factor();
+                let snap = |x: f32| (x * device).round() / device;
+                let played = x_of(p.at);
+                for (i, c) in columns.iter().enumerate() {
+                    let x = snap(i as f32 - behind as f32);
+                    if x >= w {
+                        break;
+                    }
+                    let half = (c.rms() / scale.max(1e-6)).min(1.) * (mid - 2.);
                     let color = if x < played { t.accent } else { t.dim };
-                    window.paint_quad(fill(bar(x, c.rms()), tint(color, 0xff)));
+                    let bar = rect(x.max(0.), mid - half, 1., (half * 2.).max(1.));
+                    window.paint_quad(fill(bar, tint(color, 0xff)));
                 }
             }
-            if let Some(end) = p.looping.end {
-                for edge in [p.looping.start.unwrap_or_default(), end] {
-                    window.paint_quad(fill(rect(x_of(edge) - 1., 0., 2., h), tint(t.on, 0xff)));
-                }
+            // Each edge as soon as it is set, a start on its own too.
+            for edge in [p.looping.start, p.looping.end].into_iter().flatten() {
+                window.paint_quad(fill(rect(x_of(edge) - 1., 0., 2., h), tint(t.loops, 0xff)));
             }
             window.paint_quad(fill(rect(x_of(p.at), 0., 1., h), tint(t.text, 0xff)));
         },
@@ -1886,8 +1913,15 @@ fn tilde(path: &std::path::Path) -> String {
 }
 
 impl Render for Riff {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The detail view keeps the loop in sight, refitting only when it must.
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The practice view glides with the music: drawn every frame while it plays, the
+        // playhead smoothed between the player's position updates.
+        let playing = self.audio.playing();
+        let at = self.smooth.at(self.audio.position(), playing, self.started.elapsed());
+        if self.practice && playing {
+            window.request_animation_frame();
+        }
+        // The detail view keeps the loop in sight, growing only when it must.
         let looping = self.audio.looping;
         if let Some(end) = looping.end.filter(|_| self.dragging.is_none()) {
             self.span = wave::fit(self.span, end - looping.start.unwrap_or_default());
@@ -1936,7 +1970,7 @@ impl Render for Riff {
             .font_family(UI)
             .text_color(rgb(t().text))
             .child(self.render_search())
-            .when(self.practice, |d| d.child(self.render_practice(cx)))
+            .when(self.practice, |d| d.child(self.render_practice(at, cx)))
             .when(!self.practice, |d| {
                 d.children(self.album.as_ref().map(|of| self.render_album(of))).child(
                     uniform_list(

@@ -71,15 +71,19 @@ key to both or the test fails.
   there is no menu bar to hide the app with. ⌃J ⌃K and arrows move; plain ← → seek.
 - **Loop keys always work**: `[ ]` set the edges at the playhead, `\` clears, `{ }`
   widen the loop by 50 ms at the start or end and `( )` narrow it, `< >` slide the loop by its own length
-  (phrase by phrase), `- =` halve and double it. Every change plays around the edge it
+  (phrase by phrase), `_ +` halve and double it. Every change plays around the edge it
   moved, to be judged by ear. On the progress bar, drag an edge or shift-click for the
   end. The rules live on `audio::Loop`.
 - **`P` toggles the practice view**: the list gives way to the song's loudness contour
   (with the shown stretch boxed) over a large RMS waveform that frames the loop, or
-  follows the playhead without one. ⌘= ⌘- zoom. Both take clicks and drags like the
+  follows the playhead without one. `- =` zoom (⌘- ⌘= too). It is redrawn every
+  frame while playing, the playhead smoothed between the player's position updates. Both take clicks and drags like the
   progress bar. The waveform is read for every song that starts, shown or not, and kept
   in memory only. Peaks are not drawn: on loud masters they all reach the top and hide
-  the transients.
+  the transients. A completed loop is framed once; after that the zoom is Tim's and
+  only grows if the loop stops fitting. Loops have their own theme colour, `loops`: the
+  first terminal colour (cyan, magenta, green, blue) that stands apart from the accent
+  and text, since some themes' accent *is* their cyan.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), the
   theme picker, which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
   Esc restores), and vim keys on or off.

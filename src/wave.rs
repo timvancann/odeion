@@ -56,25 +56,39 @@ impl Wave {
         self.points.iter().map(|p| p.rms()).fold(0.0, f32::max)
     }
 
-    /// `width` columns spanning `from` to `to`: each the loudest peak and the mean square
-    /// of the points under it. Columns past the end are silent.
-    pub fn columns(&self, from: Duration, to: Duration, width: usize) -> Vec<Point> {
+    /// Columns for `width` pixels showing `from` to `to`: each the loudest peak and the
+    /// mean square of the points under it, silent past the end.
+    ///
+    /// Columns are anchored to the song, not the view: column `k` always covers the same
+    /// audio, so a view sliding with the playhead moves columns without reshaping them
+    /// (summarising from `from` made every frame group the points differently, and the
+    /// waveform shimmered). Returns where the first column starts, in columns left of
+    /// `from` (0 to 1), and one column more than fits, to cover the right edge.
+    pub fn columns(&self, from: Duration, to: Duration, width: usize) -> (f64, Vec<Point>) {
+        // Rounded, so float noise in the span can't move the boundaries between frames.
+        let wide = ((to - from).as_secs_f64() / width.max(1) as f64 * 1e6).round() / 1e6;
+        if wide <= 0.0 {
+            return (0.0, Vec::new());
+        }
+        let first = (from.as_secs_f64() / wide).floor();
+        let behind = from.as_secs_f64() / wide - first;
+        let columns = (0..=width).map(|i| self.column((first as usize + i) as f64 * wide, wide));
+        (behind, columns.collect())
+    }
+
+    /// The points from `start` for `wide` seconds, summarised.
+    fn column(&self, start: f64, wide: f64) -> Point {
         let per = self.seconds_per_point();
-        let (a, b) = (from.as_secs_f64() / per, to.as_secs_f64() / per);
-        (0..width)
-            .map(|x| {
-                let lo = (a + (b - a) * x as f64 / width as f64) as usize;
-                let hi = ((a + (b - a) * (x + 1) as f64 / width as f64) as usize).max(lo + 1);
-                let under = &self.points[lo.min(self.points.len())..hi.min(self.points.len())];
-                if under.is_empty() {
-                    return Point::default();
-                }
-                Point {
-                    peak: under.iter().map(|p| p.peak).fold(0.0, f32::max),
-                    square: under.iter().map(|p| p.square).sum::<f32>() / under.len() as f32,
-                }
-            })
-            .collect()
+        let lo = (start / per) as usize;
+        let hi = (((start + wide) / per) as usize).max(lo + 1);
+        let under = &self.points[lo.min(self.points.len())..hi.min(self.points.len())];
+        if under.is_empty() {
+            return Point::default();
+        }
+        Point {
+            peak: under.iter().map(|p| p.peak).fold(0.0, f32::max),
+            square: under.iter().map(|p| p.square).sum::<f32>() / under.len() as f32,
+        }
     }
 }
 
@@ -93,16 +107,15 @@ pub fn window(at: Duration, looping: Loop, span: Duration, song: Duration) -> (D
     (Duration::from_secs_f64(from), Duration::from_secs_f64(from + span))
 }
 
-/// How much the detail view shows for a loop of `length`: `span` stays while the loop
-/// fits with room and fills a fair part of it, so nudging doesn't make the zoom jitter;
-/// otherwise the loop with 30% room.
+/// The span that frames a loop of `length`: the loop with 30% room.
+pub fn frame(length: Duration) -> Duration {
+    Duration::from_secs_f64((length.as_secs_f64() * 1.3).max(0.5))
+}
+
+/// How much the detail view shows while there is a loop. The zoom stays as set, however
+/// far out (nudges and drags leave it alone), and only grows when the loop no longer fits.
 pub fn fit(span: Duration, length: Duration) -> Duration {
-    let (span, length) = (span.as_secs_f64(), length.as_secs_f64());
-    if length * 1.1 <= span && length >= span * 0.4 {
-        Duration::from_secs_f64(span)
-    } else {
-        Duration::from_secs_f64((length * 1.3).max(0.5))
-    }
+    if length.as_secs_f64() * 1.1 > span.as_secs_f64() { frame(length) } else { span }
 }
 
 fn open(path: &Path) -> Result<Box<dyn FormatReader>, String> {
@@ -260,21 +273,38 @@ mod tests {
     fn columns_keep_the_loudest_peak_under_them() {
         let mut wave = Wave { rate: STEP as u32, points: vec![Point::default(); 100] };
         wave.points[42] = Point { peak: 1.0, square: 0.5 };
-        let cols = wave.columns(s(0.0), s(100.0), 10);
-        assert_eq!(cols.len(), 10);
+        let (behind, cols) = wave.columns(s(0.0), s(100.0), 10);
+        assert_eq!((behind, cols.len()), (0.0, 11));
         assert_eq!(cols[4].peak, 1.0);
         assert_eq!(cols[4].square, 0.05);
         assert!(cols.iter().enumerate().all(|(i, c)| i == 4 || c.peak == 0.0));
-        assert_eq!(wave.columns(s(200.0), s(210.0), 3), vec![Point::default(); 3]);
+        assert_eq!(wave.columns(s(200.0), s(210.0), 3).1, vec![Point::default(); 4]);
     }
 
     #[test]
-    fn the_zoom_refits_only_when_the_loop_outgrows_or_shrinks_well_below_it() {
+    fn a_sliding_view_moves_columns_without_reshaping_them() {
+        let points = (0..1000).map(|i| Point { peak: (i % 7) as f32, square: (i % 13) as f32 }).collect();
+        let wave = Wave { rate: STEP as u32, points };
+        // A 100 s view over 40 columns, slid by a fraction of a column at a time.
+        let (_, still) = wave.columns(s(10.0), s(110.0), 40);
+        for slide in [0.3, 1.1, 2.5, 7.49] {
+            let (behind, moved) = wave.columns(s(10.0 + slide), s(110.0 + slide), 40);
+            // Columns are 2.5 s, numbered from the start of the song.
+            let whole = ((10.0 + slide) / 2.5) as usize - (10.0 / 2.5) as usize;
+            assert_eq!(moved[..30], still[whole..whole + 30], "slid {slide}");
+            assert!((0.0..1.0).contains(&behind));
+        }
+    }
+
+    #[test]
+    fn the_zoom_stays_as_set_and_only_grows_when_the_loop_outgrows_it() {
         assert_eq!(fit(s(8.0), s(6.0)), s(8.0));
         assert_eq!(fit(s(8.0), s(6.05)), s(8.0));
+        // Zoomed far out around a short loop: left alone.
+        assert_eq!(fit(s(60.0), s(2.0)), s(60.0));
         assert_eq!(fit(s(8.0), s(7.5)), s(7.5 * 1.3));
-        assert_eq!(fit(s(8.0), s(2.0)), s(2.0 * 1.3));
-        assert_eq!(fit(s(8.0), s(0.1)), s(0.5));
+        assert_eq!(frame(s(2.0)), s(2.0 * 1.3));
+        assert_eq!(frame(s(0.1)), s(0.5));
     }
 
     #[test]

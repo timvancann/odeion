@@ -18,8 +18,8 @@ pub struct Theme {
     pub dim: u32,
     pub faint: u32,
     pub error: u32,
-    /// The loop region: a second colour, so the accent only ever means "selected".
-    pub on: u32,
+    /// The loop: a colour of its own, so it never blends into the accent or waveform.
+    pub loops: u32,
 }
 
 pub const DEFAULT_NAME: &str = "Gold";
@@ -37,7 +37,7 @@ pub fn gold() -> Theme {
         dim: 0x8f8574,
         faint: 0x3f392f,
         error: 0xe0563f,
-        on: 0x9fbf6e,
+        loops: 0x9fbf6e,
     }
 }
 
@@ -93,6 +93,15 @@ pub fn from_zed(theme: &Value) -> Option<Theme> {
             .unwrap_or(default)
     };
     let accent = pick(&["text.accent"], fallback.accent);
+    let (text, dim) = (pick(&["text"], fallback.text), pick(&["text.muted"], fallback.dim));
+    // The editor's terminal colours give plenty of choice; take the first that stands
+    // apart from what a loop is drawn over: the waveform (accent played, dim to come)
+    // and the background. Tokyo Night's accent *is* its cyan.
+    let loops = ["terminal.ansi.cyan", "terminal.ansi.magenta", "terminal.ansi.green", "terminal.ansi.blue"]
+        .iter()
+        .filter_map(|k| colour(&style[*k], bg))
+        .find(|&c| [accent, dim, bg].iter().all(|&other| apart(c, other)))
+        .unwrap_or(fallback.loops);
     Some(Theme {
         name,
         bg,
@@ -103,12 +112,45 @@ pub fn from_zed(theme: &Value) -> Option<Theme> {
         ),
         accent,
         accent_soft: blend(accent, bg, 0.25),
-        text: pick(&["text"], fallback.text),
-        dim: pick(&["text.muted"], fallback.dim),
+        text,
+        dim,
         faint: pick(&["border.variant", "border"], fallback.faint),
         error: pick(&["error"], fallback.error),
-        on: pick(&["success"], fallback.on),
+        loops,
     })
+}
+
+/// Whether two colours are easy to tell apart. Two colourful ones by hue, since two
+/// blues of different brightness still read as the same blue. A colourful one stands
+/// apart from a greyish one unless nearly identical. Two greyish ones by distance in RGB.
+fn apart(a: u32, b: u32) -> bool {
+    let d = |shift: u32| ((a >> shift) & 0xff) as f32 - ((b >> shift) & 0xff) as f32;
+    let distance = (d(16).powi(2) + d(8).powi(2) + d(0).powi(2)).sqrt();
+    match (hue(a), hue(b)) {
+        (Some(x), Some(y)) => {
+            let d = (x - y).abs();
+            d.min(360.0 - d) > 35.0
+        }
+        (Some(_), None) | (None, Some(_)) => distance > 40.0,
+        (None, None) => distance > 80.0,
+    }
+}
+
+/// A colour's hue in degrees, or nothing for greyish colours.
+fn hue(c: u32) -> Option<f32> {
+    let (r, g, b) = (((c >> 16) & 0xff) as f32, ((c >> 8) & 0xff) as f32, (c & 0xff) as f32);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    if max - min < 64.0 {
+        return None;
+    }
+    let h = if max == r {
+        (g - b) / (max - min)
+    } else if max == g {
+        2.0 + (b - r) / (max - min)
+    } else {
+        4.0 + (r - g) / (max - min)
+    };
+    Some((h * 60.0).rem_euclid(360.0))
 }
 
 /// Where Zed keeps installed and user themes.
@@ -196,7 +238,20 @@ mod tests {
         assert_eq!(t.dim, 0x787c99);
         assert_eq!(t.faint, 0x101014);
         assert_eq!(t.error, 0xf7768e);
-        assert_eq!(t.on, 0x9ece6a);
+    }
+
+    #[test]
+    fn the_loop_takes_a_terminal_colour_unlike_the_accent() {
+        let mut theme = tokyo();
+        theme["style"]["terminal.ansi.cyan"] = json!("#7dcfff"); // the accent itself
+        theme["style"]["terminal.ansi.magenta"] = json!("#bb9af7");
+        assert_eq!(from_zed(&theme).unwrap().loops, 0xbb9af7);
+        theme["style"]["terminal.ansi.cyan"] = json!("#2ac3de");
+        // Close to the accent still counts as the same.
+        assert_eq!(from_zed(&theme).unwrap().loops, 0xbb9af7);
+        theme["style"]["terminal.ansi.cyan"] = json!("#e0af68");
+        assert_eq!(from_zed(&theme).unwrap().loops, 0xe0af68);
+        assert_eq!(from_zed(&tokyo()).unwrap().loops, gold().loops);
     }
 
     #[test]

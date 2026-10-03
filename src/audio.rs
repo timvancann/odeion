@@ -95,6 +95,32 @@ impl Loop {
     }
 }
 
+/// A playhead that moves smoothly between the player's position updates, for drawing
+/// at the screen's frame rate. It runs on its own clock and takes the player's word
+/// again only when they disagree by more than `SLACK`: a seek, a loop jump, a pause.
+#[derive(Debug, Default)]
+pub struct Smooth {
+    /// The position, and the clock time it was taken at.
+    anchor: Option<(Duration, Duration)>,
+}
+
+/// More than a position update's step, less than anything a person would notice.
+const SLACK: Duration = Duration::from_millis(60);
+
+impl Smooth {
+    /// Where to draw the playhead, given the player's position and a clock reading.
+    pub fn at(&mut self, real: Duration, playing: bool, now: Duration) -> Duration {
+        if playing && let Some((from, then)) = self.anchor {
+            let guess = from + now.saturating_sub(then);
+            if guess.abs_diff(real) <= SLACK {
+                return guess;
+            }
+        }
+        self.anchor = playing.then_some((real, now));
+        real
+    }
+}
+
 /// The shortest loop: shorter than this, the edges can't be heard apart.
 pub const MIN_LOOP: Duration = Duration::from_millis(100);
 
@@ -359,6 +385,21 @@ mod tests {
         assert_eq!(l, looped(10, 12));
         l.resize(2.0, Some(s(13)));
         assert_eq!(l, looped(10, 13));
+    }
+
+    #[test]
+    fn the_smooth_playhead_glides_between_steps_and_follows_jumps() {
+        let mut p = Smooth::default();
+        assert_eq!(p.at(s(10), true, ms(0)), s(10));
+        // The player still says 10 s; 16 ms later the playhead has moved on anyway.
+        assert_eq!(p.at(s(10), true, ms(16)), s(10) + ms(16));
+        assert_eq!(p.at(s(10) + ms(40), true, ms(32)), s(10) + ms(32));
+        // A loop jump back to 4 s is followed at once.
+        assert_eq!(p.at(s(4), true, ms(48)), s(4));
+        assert_eq!(p.at(s(4), true, ms(64)), s(4) + ms(16));
+        // Paused, it stays where the player is.
+        assert_eq!(p.at(s(7), false, ms(80)), s(7));
+        assert_eq!(p.at(s(7), false, ms(96)), s(7));
     }
 
     #[test]

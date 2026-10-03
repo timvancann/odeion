@@ -115,8 +115,10 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
         ")" => Some(NudgeEnd(-NUDGE)),
         "<" => Some(Slide(false)),
         ">" => Some(Slide(true)),
-        "-" => Some(Resize(0.5)),
-        "=" => Some(Resize(2.0)),
+        "_" => Some(Resize(0.5)),
+        "+" => Some(Resize(2.0)),
+        "-" => Some(Zoom(ZOOM)),
+        "=" => Some(Zoom(1.0 / ZOOM)),
         _ => None,
     };
     if always.is_some() || !vim {
@@ -175,14 +177,14 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("{ }", "", "widen at the start or end"),
             ("( )", "", "narrow at the start or end"),
             ("< >", "", "slide back or on by its length"),
-            ("- =", "", "halve or double it"),
+            ("_ +", "", "halve or double it"),
         ],
     ),
     (
         "Practice",
         &[
             ("P", "", "the waveform, on or off"),
-            ("⌘= ⌘-", "", "zoom in or out"),
+            ("- =", "", "zoom out or in"),
         ],
     ),
     (
