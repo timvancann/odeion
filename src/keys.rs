@@ -33,6 +33,8 @@ pub enum Action {
     Shuffle,
     Favorite,
     Album,
+    /// Everything by the highlighted song's artist, or back.
+    Artist,
     Transcribe,
     Help,
     Settings,
@@ -45,7 +47,6 @@ pub enum Action {
     NudgeStart(f64),
     NudgeEnd(f64),
     Slide(bool),
-    Resize(f64),
     /// The practice view with the waveform, on or off.
     Practice,
     /// Zoom the practice view: below 1 closer in, above 1 further out.
@@ -64,6 +65,9 @@ pub enum Action {
     AddVariation,
     /// Remove the playing variation.
     RemoveVariation,
+    /// Minimise the window, or make it full screen (no menu bar does it for riff).
+    Minimize,
+    FullScreen,
     /// Slow-down on or off.
     Slow,
     /// The next slower (false) or faster (true) slow-down preset; turns slow-down on.
@@ -94,7 +98,10 @@ pub fn anywhere(p: Press) -> Option<Action> {
         ("pagedown", ..) => Move(10),
         ("pageup", ..) => Move(-10),
         ("p", true, _) => Search,
+        ("m", true, false) => Minimize,
+        ("f", true, true) => FullScreen,
         ("f", true, _) => Favorite,
+        ("a", true, _) if p.shift => Artist,
         ("a", true, _) => Album,
         ("t", true, _) => Transcribe,
         ("s", true, _) => Shuffle,
@@ -161,8 +168,6 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
         ")" => Some(NudgeEnd(-NUDGE)),
         "<" => Some(Slide(false)),
         ">" => Some(Slide(true)),
-        "_" => Some(Resize(0.5)),
-        "+" => Some(Resize(2.0)),
         "-" => Some(Zoom(ZOOM)),
         "=" => Some(Zoom(1.0 / ZOOM)),
         _ => None,
@@ -192,10 +197,68 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
         ("?", ..) => Help,
         ("f" | "m", false, false) => Favorite,
         ("a", false, false) => Album,
+        ("a", true, _) => Artist,
+        ("i", false, false) => Search,
         ("t", false, false) => Transcribe,
         ("s", false, false) => Shuffle,
         _ => return None,
     })
+}
+
+/// What a keycap on the sheet does ("⌘←", "G", "⌃⌘F", "gg"), read through the same
+/// keymap as a real key press, so the sheet and tooltips can't drift from it.
+pub fn resolve(cap: &str, vim: bool) -> Option<Action> {
+    if cap == "gg" || cap == "zz" {
+        let mut pending = None;
+        let press = Press { key: &cap[..1], ..Press::default() };
+        normal(press, vim, &mut pending);
+        return normal(press, vim, &mut pending);
+    }
+    // Modifiers in any order: "⌃⌘F" as macOS writes it.
+    let (mut cmd, mut ctrl, mut alt, mut shift, mut rest) = (false, false, false, false, cap);
+    loop {
+        if let Some(r) = rest.strip_prefix('⇧') {
+            (shift, rest) = (true, r);
+        } else if let Some(r) = rest.strip_prefix('⌘') {
+            (cmd, rest) = (true, r);
+        } else if let Some(r) = rest.strip_prefix('⌃') {
+            (ctrl, rest) = (true, r);
+        } else if let Some(r) = rest.strip_prefix('⌥') {
+            (alt, rest) = (true, r);
+        } else {
+            break;
+        }
+    }
+    let named = match rest {
+        "←" => "left",
+        "→" => "right",
+        "↑" => "up",
+        "↓" => "down",
+        "⌫" => "backspace",
+        "Enter" => "enter",
+        "Space" => "space",
+        "Esc" => "escape",
+        "PgUp" => "pageup",
+        "PgDn" => "pagedown",
+        other => other,
+    };
+    let upper = named.len() == 1 && named.chars().all(|c| c.is_ascii_uppercase());
+    let key = if upper || ctrl || cmd { named.to_lowercase() } else { named.to_string() };
+    let press = Press { key: &key, cmd, ctrl, shift: shift || (upper && !ctrl && !cmd), alt };
+    normal(press, vim, &mut None)
+}
+
+/// The keys for an action, as the sheet writes them: for tooltips. Vim keys only while
+/// vim keys are on.
+pub fn keys_for(action: Action, vim: bool) -> Vec<&'static str> {
+    SHEET
+        .iter()
+        .flat_map(|(_, lines)| lines.iter())
+        .flat_map(|(keys, vim_keys, _)| {
+            keys.split_whitespace().chain(vim_keys.split_whitespace().filter(move |_| vim))
+        })
+        .filter(|cap| resolve(cap, vim) == Some(action))
+        .collect()
 }
 
 /// One line of the ⌘? sheet: the keys that always work, the vim keys, and what they do.
@@ -224,7 +287,6 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("{ }", "", "widen at the start or end"),
             ("( )", "", "narrow at the start or end"),
             ("< >", "", "slide back or on by its length"),
-            ("_ +", "", "halve or double it"),
             ("r", "", "save it as a region, named"),
             ("n N", "", "next or previous region"),
             ("x", "", "delete its region"),
@@ -250,13 +312,14 @@ pub const SHEET: &[(&str, &[Line])] = &[
         &[
             ("⌘F", "f m", "favourite or not"),
             ("⌘A", "a", "only this album, again to leave"),
+            ("⇧⌘A", "A", "only this artist, again to leave"),
             ("⌘T", "t", "highlighted song to Transcribe!"),
         ],
     ),
     (
         "Finding",
         &[
-            ("⌘P", "/", "search on or off"),
+            ("⌘P", "/ i", "search on or off"),
             ("↑ ↓ ⌃J ⌃K", "j k", "move"),
             ("", "gg G", "top or bottom"),
             ("", "⌃U ⌃D", "half a page"),
@@ -266,58 +329,21 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("⌘⌫", "", "clear the search"),
         ],
     ),
-    ("App", &[("⌘,", "", "settings"), ("⌘?", "?", "these keys"), ("⌘Q", "", "quit")]),
+    (
+        "App",
+        &[
+            ("⌘,", "", "settings"),
+            ("⌘?", "?", "these keys"),
+            ("⌘M", "", "minimise"),
+            ("⌃⌘F", "", "full screen"),
+            ("⌘Q", "", "quit"),
+        ],
+    ),
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Reads a keycap as the sheet writes it ("⌘←", "G", "⌃D", "gg") into presses.
-    fn presses(cap: &str) -> Vec<Press<'static>> {
-        let cap: &'static str = Box::leak(cap.to_string().into_boxed_str());
-        if cap == "gg" || cap == "zz" {
-            let key = &cap[..1];
-            return vec![Press { key, ..Press::default() }; 2];
-        }
-        let (cmd, rest) = match cap.strip_prefix('⌘') {
-            Some(rest) => (true, rest),
-            None => (false, cap),
-        };
-        let (ctrl, rest) = match rest.strip_prefix('⌃') {
-            Some(rest) => (true, rest),
-            None => (false, rest),
-        };
-        let (alt, rest) = match rest.strip_prefix('⌥') {
-            Some(rest) => (true, rest),
-            None => (false, rest),
-        };
-        let named = match rest {
-            "←" => "left",
-            "→" => "right",
-            "↑" => "up",
-            "↓" => "down",
-            "⌫" => "backspace",
-            "Enter" => "enter",
-            "Space" => "space",
-            "Esc" => "escape",
-            "PgUp" => "pageup",
-            "PgDn" => "pagedown",
-            other => other,
-        };
-        let upper = named.len() == 1 && named.chars().all(|c| c.is_ascii_uppercase());
-        let key: &'static str = if upper || ctrl || cmd {
-            Box::leak(named.to_lowercase().into_boxed_str())
-        } else {
-            named
-        };
-        vec![Press { key, cmd, ctrl, shift: upper && !ctrl && !cmd, alt }]
-    }
-
-    fn resolve(cap: &str, vim: bool) -> Option<Action> {
-        let mut pending = None;
-        presses(cap).into_iter().fold(None, |_, p| normal(p, vim, &mut pending))
-    }
 
     #[test]
     fn every_key_on_the_sheet_does_something() {
@@ -334,12 +360,23 @@ mod tests {
     }
 
     #[test]
+    fn tooltips_find_every_key_for_an_action() {
+        assert_eq!(keys_for(Action::Previous, true), ["⌘←", "H"]);
+        assert_eq!(keys_for(Action::Previous, false), ["⌘←"]);
+        assert_eq!(keys_for(Action::Toggle, false), ["Space"]);
+        assert_eq!(keys_for(Action::FullScreen, false), ["⌃⌘F"]);
+        assert!(keys_for(Action::Quit, false).contains(&"⌘Q"));
+    }
+
+    #[test]
     fn vim_and_cmd_keys_agree() {
         assert_eq!(resolve("H", true), resolve("⌘←", true));
         assert_eq!(resolve("f", true), resolve("m", true));
         assert_eq!(resolve("/", true), resolve("⌘P", true));
         assert_eq!(resolve("gg", true), Some(Action::Top));
         assert_eq!(resolve("G", true), Some(Action::Bottom));
+        assert_eq!(resolve("A", true), resolve("⇧⌘A", true));
+        assert_eq!(resolve("i", true), Some(Action::Search));
     }
 
     #[test]

@@ -67,14 +67,6 @@ impl Beats {
         Some((*self.times.get(a)?, *self.times.get(b)?))
     }
 
-    /// The end of a loop from `start` that is `factor` times as many beats as now, at
-    /// least one beat.
-    pub fn resize(&self, start: Duration, end: Duration, factor: f64) -> Option<Duration> {
-        let (a, b) = (self.index(start)?, self.index(end)?);
-        let n = ((b.saturating_sub(a)) as f64 * factor).round().max(1.0) as usize;
-        self.times.get(a + n).copied()
-    }
-
     /// The tempo around `at` in beats per minute, from the four beats on either side, so
     /// it follows a band that speeds up.
     pub fn tempo_at(&self, at: Duration) -> Option<f64> {
@@ -415,15 +407,12 @@ mod tests {
     }
 
     #[test]
-    fn loops_move_and_resize_in_beats_even_as_the_tempo_drifts() {
+    fn loops_slide_in_beats_even_as_the_tempo_drifts() {
         let b = grid(&[0.0, 0.5, 1.0, 1.5, 2.0, 2.4, 2.8, 3.2, 3.6]);
         // Two beats from 1.0, slid on: the next two, shorter in seconds.
         assert_eq!(b.slide(s(1.0), s(2.0), true), Some((s(2.0), s(2.8))));
         assert_eq!(b.slide(s(1.0), s(2.0), false), Some((s(0.0), s(1.0))));
         assert_eq!(b.slide(s(0.5), s(1.5), false), None);
-        assert_eq!(b.resize(s(1.0), s(3.6), 0.5), Some(s(2.4)));
-        assert_eq!(b.resize(s(1.0), s(1.5), 0.5), Some(s(1.5)));
-        assert_eq!(b.resize(s(1.0), s(2.0), 2.0), Some(s(2.8)));
         assert_eq!(b.step(s(1.1), 1), Some(s(1.5)));
         assert_eq!(b.step(s(1.1), -1), Some(s(0.5)));
         assert_eq!(b.step(s(0.1), -1), None);

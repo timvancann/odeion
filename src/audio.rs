@@ -103,14 +103,6 @@ impl Loop {
         self.start = Some(new_start);
         self.end = Some(new_start + length);
     }
-
-    /// Halves (`factor` 0.5) or doubles (2.0) the loop, keeping its start.
-    pub fn resize(&mut self, factor: f64, song: Option<Duration>) {
-        if let Some(end) = self.end {
-            let start = self.start.unwrap_or_default();
-            self.move_end(start + (end - start).mul_f64(factor), song);
-        }
-    }
 }
 
 /// A playhead that moves smoothly between the player's position updates, for drawing
@@ -777,15 +769,6 @@ mod tests {
         let mut l = looped(3, 7);
         l.slide(false, None);
         assert_eq!(l, looped(0, 4));
-    }
-
-    #[test]
-    fn halving_and_doubling_keep_the_start() {
-        let mut l = looped(10, 14);
-        l.resize(0.5, None);
-        assert_eq!(l, looped(10, 12));
-        l.resize(2.0, Some(s(13)));
-        assert_eq!(l, looped(10, 13));
     }
 
     #[test]

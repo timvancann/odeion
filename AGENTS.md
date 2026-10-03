@@ -82,17 +82,18 @@ key to both or the test fails.
   anywhere to search", where Space could not pause during a search.
 - **Vim keys are on by default** (a settings row turns them off): `j k`, `gg G`,
   `⌃U ⌃D`, `zz` to the playing song, `h l` seek, `H L` previous and next song, `^` back
-  to the start, `o` play from the loop start, `f`/`m` favourite, `a` album, `t`
+  to the start, `o` play from the loop start, `f`/`m` favourite, `a` album, `A` artist, `i` search, `t`
   Transcribe!, `s` shuffle, `?` keys, `dd` removes a folder in settings. No counts,
   by choice.
-- **The ⌘ shortcuts always work**: ⌘P, ⌘F, ⌘A, ⌘T (the *highlighted* song), ⌘S,
+- **The ⌘ shortcuts always work**: ⌘P, ⌘F, ⌘A, ⇧⌘A (artist view), ⌘T (the *highlighted* song), ⌘S,
   ⌘← ⌘→ or ⌘H ⌘L previous and next, ⌘, settings, ⌘? keys, ⌘Q. ⌘H is free because
   there is no menu bar to hide the app with. ⌃J ⌃K and arrows move; plain ← → seek.
 - **Loop keys always work**: `[ ]` set the edges at the playhead, `\` clears, `|` switches
   looping off and on keeping the edges (the loop button too, once both are set; placing
   an edge switches it back on), `{ }`
   widen the loop by 50 ms at the start or end and `( )` narrow it, `< >` slide the loop by its own length
-  (phrase by phrase), `_ +` halve and double it. Every change plays around the edge it
+  (phrase by phrase). Halving and doubling were tried and removed: Tim never used them.
+  Every change plays around the edge it
   moved, to be judged by ear. On the progress bar, drag an edge or shift-click for the
   end. The rules live on `audio::Loop`.
 - **`P` toggles the practice view**: the list gives way to the song's loudness contour
@@ -120,11 +121,11 @@ key to both or the test fails.
   scale.
 - **`b` toggles the beat grid** (the practice view marks beats with small chevrons at
   its top and bottom edges, faint until the grid is on, and shows the local tempo). On the grid `[ ]` and shift-click snap to the nearest beat, `{ } ( )`
-  move an edge a whole beat, `< >` and `_ +` work in beats, `h l` / `← →` step by
+  move an edge a whole beat, `< >` slide in beats, `h l` / `← →` step by
   beats (back restarts the beat you're in first), dragging snaps (⌥ drags freely).
   Off, everything is as before; songs without a steady beat should stay off.
-- **Regions**: `r` saves the loop as a region and asks a name (Enter saves, Esc keeps
-  a name saying where it is; on a loop that is already a region it renames), `n` `N`
+- **Regions**: `r` saves the loop as a region and asks a name in a dialog (Enter saves,
+  an empty name saves one saying where it is, Esc cancels; on a loop that is already a region it renames), `n` `N`
   play the next and previous region as the loop, `x` deletes the loop's region. A loop
   played from (or saved as) a region stays bound to it: edge changes are saved into the
   region, until the loop slides away (`< >`), is cleared, or another region or song plays. The
@@ -141,8 +142,20 @@ key to both or the test fails.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), the
   theme picker, which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
   Esc restores), and vim keys on or off.
-- GPUI apps get no menu bar, so ⌘Q and every other ⌘ shortcut are handled by hand, and
-  none collide with system menu items.
+- **Every action has a button too**, built with `Riff::tool` (an icon, a tooltip and
+  the action, done through `Riff::act` exactly as its key would). Tooltips list keys
+  from `keys::keys_for`, which reads the ⌘? sheet through the real keymap, so they stay
+  right if keys are ever remapped; never write a key into a tooltip by hand. Icons live
+  in `assets/icons/`: Lucide's where one fits, riff's own (loop edges, widen, narrow,
+  slide, beats, regions) drawn in the same stroke style from the loop's brackets. The
+  design is the "Riff controls and icons" canvas.
+- GPUI apps get no menu bar, so ⌘Q, ⌘M (minimise), ⌃⌘F (full screen) and every other
+  ⌘ shortcut are handled by hand, and none collide with system menu items. A real menu
+  bar would take ⌘H for hiding riff, which is previous song here.
+- **The letter rail** beside the full library (not in search, album or artist views):
+  click or drag along `# A–Z` and the list glides (220 ms, eased, by setting the scroll
+  offset each frame) to that letter's first artist below the favourites, highlighting
+  it. Letters follow the sort (`library::initial`), so a jump never lands out of order.
 - The Transcribe! button sits on the now-playing card, so it opens the *playing* song.
 
 ## GPUI traps hit here

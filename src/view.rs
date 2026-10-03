@@ -102,6 +102,43 @@ impl Strip {
     }
 }
 
+/// A tooltip: what a control does, and the keys that do the same, looked up from the
+/// keymap so they stay right when keys change.
+struct Tip {
+    what: gpui::SharedString,
+    keys: Vec<&'static str>,
+}
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(t.raised))
+            .border_1()
+            .border_color(rgb(t.faint))
+            .font_family(UI)
+            .text_xs()
+            .text_color(rgb(t.text))
+            .child(self.what.clone())
+            .children(self.keys.iter().map(|k| {
+                div()
+                    .px_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(t.faint))
+                    .font_family(MONO)
+                    .text_color(rgb(t.accent))
+                    .child(k.to_string())
+            }))
+    }
+}
+
 /// A loop edge, being placed or dragged.
 #[derive(Clone, Copy, PartialEq)]
 enum Edge {
@@ -191,6 +228,8 @@ pub struct Riff {
     favorites: Favorites,
     /// The album filter (⌘A), by one of its tracks.
     album: Option<Track>,
+    /// The artist filter (⇧⌘A), by one of their tracks.
+    artist: Option<Track>,
     /// What plays next and before: the list the song was started from.
     playlist: Playlist,
     shuffle: bool,
@@ -198,6 +237,12 @@ pub struct Riff {
     media: Option<Media>,
     message: Option<(String, bool)>,
     bar: Strip,
+    /// The letter rail beside the library, where it was last drawn.
+    rail: Rc<Cell<Bounds<Pixels>>>,
+    /// The letter under the pointer while it drags along the rail.
+    scrubbing: Option<char>,
+    /// A scroll in progress: from and to (list offsets) and when it began.
+    glide: Option<(Pixels, Pixels, std::time::Instant)>,
 }
 
 fn cache_file() -> PathBuf {
@@ -316,11 +361,15 @@ impl Riff {
             now: None,
             favorites: Favorites::load(&favorites_file()),
             album: None,
+            artist: None,
             playlist: Playlist::default(),
             shuffle: false,
             media: Media::new(),
             message: None,
             bar: Strip::default(),
+            rail: Rc::default(),
+            scrubbing: None,
+            glide: None,
         };
         riff.message = riff.audio.error.clone().map(|e| (e, true));
         riff.reindex(None);
@@ -661,6 +710,8 @@ impl Riff {
     }
 
     fn rebuild_rows(&mut self) {
+        // A glide aimed at the old list would drag the new one along.
+        self.glide = None;
         self.rows.clear();
         if let Some(of) = &self.album {
             // The album's header sits above the list, see `render_album`.
@@ -669,6 +720,9 @@ impl Riff {
                     .into_iter()
                     .map(Row::Track),
             );
+        } else if let Some(of) = &self.artist {
+            // Likewise the artist's, see `render_artist`.
+            self.rows.extend(library::artist(&self.tracks, of).into_iter().map(Row::Track));
         } else if self.query.trim().is_empty() {
             // Library order, since the tracks are sorted.
             let mut favorites: Vec<usize> = self
@@ -719,6 +773,7 @@ impl Riff {
     }
 
     fn move_selection(&mut self, by: isize) {
+        self.glide = None;
         let target = (self.selected as isize + by).clamp(0, self.rows.len() as isize - 1);
         let step = if by < 0 { -1 } else { 1 };
         if let Some(row) = self
@@ -726,7 +781,10 @@ impl Riff {
             .or_else(|| self.first_track_row(target.max(0) as usize, -step))
         {
             self.selected = row;
-            self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+            // A row off screen is brought in at the edge it comes from: one row's
+            // scroll, not a page's (always `Top` threw a row below the view to the top).
+            let edge = if by > 0 { ScrollStrategy::Bottom } else { ScrollStrategy::Top };
+            self.scroll.scroll_to_item(row, edge);
         }
     }
 
@@ -834,6 +892,10 @@ impl Riff {
                 let lit = self.slow && self.speed == i;
                 div()
                     .id(("speed", i))
+                    .tooltip(self.tip(
+                        format!("{label} speed, pitch kept; click again for full speed"),
+                        &[Action::Speed(false), Action::Speed(true), Action::Slow],
+                    ))
                     .h_full()
                     .px_2()
                     .flex()
@@ -856,6 +918,70 @@ impl Riff {
                         cx.notify();
                     }))
             }))
+    }
+
+    /// An action from a click, done exactly as its key would do it.
+    fn act(&mut self, action: Action, cx: &mut Context<Self>) {
+        match action {
+            Action::Settings => {
+                if self.prefs.is_some() {
+                    self.close_prefs();
+                } else {
+                    self.prefs = Some(Prefs::default());
+                }
+            }
+            Action::AddVariation => self.pick_variation(cx),
+            _ => {
+                self.perform(action);
+                self.follow_region(action);
+            }
+        }
+        cx.notify();
+    }
+
+    /// An icon button doing `action`, lit while it is on; its tooltip says what it does
+    /// and its keys.
+    fn tool(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        icon: &'static str,
+        what: &str,
+        action: Action,
+        lit: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = t();
+        div()
+            .id(id)
+            .w(px(32.))
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .cursor_pointer()
+            .when(lit, |d| d.bg(rgb(t.accent_soft)))
+            .hover(|d| d.bg(rgb(t.faint)))
+            .child(ui::icon(icon, 16., if lit { t.accent } else { t.text }))
+            .tooltip(self.tip(what.to_string(), &[action]))
+            .on_click(cx.listener(move |riff, _, _, cx| {
+                // Not also a click on what it sits on (a row, the title bar).
+                cx.stop_propagation();
+                riff.act(action, cx);
+            }))
+    }
+
+    /// A tooltip for a control doing `what`, with the keys for `actions`.
+    fn tip(
+        &self,
+        what: impl Into<gpui::SharedString>,
+        actions: &[Action],
+    ) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
+        let what = what.into();
+        let keys: Vec<&'static str> =
+            actions.iter().flat_map(|a| keys::keys_for(*a, self.settings.vim)).collect();
+        move |_, cx| cx.new(|_| Tip { what: what.clone(), keys: keys.clone() }).into()
     }
 
     /// Hands the speed to the audio: a preset when slow-down is on, otherwise as recorded.
@@ -905,7 +1031,17 @@ impl Riff {
             self.message = Some(("no variations: drop files on the song, or V to pick".into(), false));
             return;
         }
-        let target = (self.variation + 1) % (list.len() + 1);
+        self.select_recording((self.variation + 1) % (list.len() + 1));
+    }
+
+    /// Plays recording `target` of the song (0 the song, n its n-th variation), from the
+    /// same moment where the two line up.
+    fn select_recording(&mut self, target: usize) {
+        let Some(now) = self.now.clone() else { return };
+        let list = self.variations.of(&now.path).to_vec();
+        if target == self.variation || target > list.len() {
+            return;
+        }
         let into = if target == 0 { Some(0.0) } else { list[target - 1].offset };
         // Each recording keeps its own loop: this one's is put away, the next one's
         // comes back. The position carries over where the two line up.
@@ -1134,6 +1270,31 @@ impl Riff {
             Some(_) => None,
             None => self.selected_track().cloned(),
         };
+        self.artist = None;
+        self.reindex(keep);
+        self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+    }
+
+    /// ⇧⌘A: everything by the selected song's artist, or back to what was shown before.
+    fn toggle_artist(&mut self) {
+        let keep = self.selected_path();
+        self.artist = match self.artist {
+            Some(_) => None,
+            None => self.selected_track().cloned(),
+        };
+        self.album = None;
+        self.reindex(keep);
+        self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+    }
+
+    /// The album or artist of `track` (the playing song, from its card), with `track`
+    /// highlighted.
+    fn show(&mut self, track: Track, artist: bool) {
+        let keep = Some(track.path.clone());
+        (self.album, self.artist) = if artist { (None, Some(track)) } else { (Some(track), None) };
+        self.query.clear();
+        self.searching = false;
+        self.practice = false;
         self.reindex(keep);
         self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
     }
@@ -1148,7 +1309,7 @@ impl Riff {
         });
     }
 
-    fn key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         let press = keys::Press {
             key: &k.key,
@@ -1161,6 +1322,9 @@ impl Riff {
         // The sheets swallow every key but their own toggles and ⌘Q.
         match global {
             // GPUI apps get no menu bar, so ⌘Q has to be handled here.
+            // Without a menu bar macOS doesn't do these for riff.
+            Some(Action::Minimize) => return window.minimize_window(),
+            Some(Action::FullScreen) => return window.toggle_fullscreen(),
             Some(Action::Quit) => {
                 self.keep_spot();
                 self.store_resume();
@@ -1197,8 +1361,9 @@ impl Riff {
         }
         if let Some(name) = &mut self.naming {
             match k.key.as_str() {
-                "enter" => self.name_region(true),
-                "escape" => self.name_region(false),
+                "enter" => self.name_region(),
+                // A dialog's Esc: nothing saved.
+                "escape" => self.naming = None,
                 "backspace" => {
                     name.pop();
                 }
@@ -1301,13 +1466,14 @@ impl Riff {
             Action::Shuffle => self.toggle_shuffle(),
             Action::Favorite => self.toggle_favorite(),
             Action::Album => self.toggle_album(),
+            Action::Artist => self.toggle_artist(),
             Action::Transcribe => {
                 let track = self.selected_track().cloned().or_else(|| self.now.clone());
                 self.transcribe(track);
             }
             // Bare `?` arrives here; ⌘? is handled first in `key`, as are ⌘, and ⌘Q.
             Action::Help => self.help = !self.help,
-            Action::Settings | Action::Quit => {}
+            Action::Settings | Action::Quit | Action::Minimize | Action::FullScreen => {}
             Action::LoopStart => {
                 let at = self.snap(self.audio.position());
                 self.audio.looping.set_start(at);
@@ -1322,7 +1488,7 @@ impl Riff {
             }
             Action::LoopClear => self.audio.looping = Default::default(),
             Action::LoopSwitch => self.audio.looping.switch(),
-            // On the grid, an edge moves a whole beat and the loop slides and resizes in
+            // On the grid, an edge moves a whole beat and the loop slides in
             // beats, so it stays on the music as the band drifts.
             Action::NudgeStart(by) => {
                 let grid = self.grid();
@@ -1447,33 +1613,18 @@ impl Riff {
                 let most = song.unwrap_or(SPAN).max(Duration::from_secs(1));
                 self.span = self.span.mul_f64(factor).clamp(Duration::from_millis(500), most);
             }
-            Action::Resize(factor) => {
-                let grid = self.grid();
-                let looping = &mut self.audio.looping;
-                match (grid, looping.end) {
-                    (Some(b), Some(end)) => {
-                        if let Some(to) = b.resize(looping.start.unwrap_or_default(), end, factor) {
-                            looping.move_end(to, song);
-                        }
-                    }
-                    _ => looping.resize(factor, song),
-                }
-                if factor < 1.0 {
-                    self.audition(Edge::Start);
-                }
-            }
         }
     }
 
-    /// The loop becomes a region, under the typed name or, without one (or on Esc), a
-    /// name saying where it is.
-    fn name_region(&mut self, typed: bool) {
+    /// The loop becomes a region, under the typed name or, without one, a name saying
+    /// where it is.
+    fn name_region(&mut self) {
         let Some(name) = self.naming.take() else { return };
         let looping = self.audio.looping;
         let (Some(recording), Some(end)) = (self.recording(), looping.end) else { return };
         let start = looping.start.unwrap_or_default();
         let name = Some(name.trim().to_string())
-            .filter(|n| typed && !n.is_empty())
+            .filter(|n| !n.is_empty())
             .unwrap_or_else(|| Region::default_name(start, end));
         self.message = Some((format!("saved {name}"), false));
         let region = Region { name, start, end };
@@ -1579,6 +1730,108 @@ impl Riff {
         }
     }
 
+    /// The whole library is listed (no search, album or artist), so the letter rail shows.
+    fn browsing(&self) -> bool {
+        !self.practice && self.album.is_none() && self.artist.is_none() && self.query.trim().is_empty()
+    }
+
+    /// Where each letter's artists begin in the list, below the favourites.
+    fn rail_letters(&self) -> Vec<(char, usize)> {
+        let from = self.rows.iter().position(|r| matches!(r, Row::Header(h) if h == "Library")).map_or(0, |h| h + 1);
+        library::letters((from..self.rows.len()).filter_map(|r| match self.rows[r] {
+            Row::Track(i) => Some((r, self.tracks[i].artist.as_str())),
+            Row::Header(_) => None,
+        }))
+    }
+
+    /// The pointer at `y` on the rail: glides to that letter's first song and highlights it.
+    fn scrub(&mut self, y: Pixels) {
+        let bounds = self.rail.get();
+        let height = f32::from(bounds.size.height);
+        if height <= 0. {
+            return;
+        }
+        let count = library::ALPHABET.len();
+        let slot = ((f32::from(y - bounds.origin.y) / height * count as f32) as usize).min(count - 1);
+        let letter = library::ALPHABET.as_bytes()[slot] as char;
+        if self.scrubbing == Some(letter) {
+            return;
+        }
+        self.scrubbing = Some(letter);
+        if let Some(row) = library::jump(&self.rail_letters(), letter) {
+            self.selected = row;
+            self.glide_to(row);
+        }
+    }
+
+    /// Scrolls smoothly until `row` is at the top of the list (or the list's end shows).
+    fn glide_to(&mut self, row: usize) {
+        let state = self.scroll.0.borrow();
+        let Some(size) = state.last_item_size.filter(|_| !self.rows.is_empty()) else { return };
+        let row_height = size.contents.height / self.rows.len() as f32;
+        let most = (size.contents.height - size.item.height).max(Pixels::ZERO);
+        let to = -(row_height * row as f32).min(most);
+        let from = state.base_handle.offset().y;
+        drop(state);
+        self.glide = Some((from, to, std::time::Instant::now()));
+    }
+
+    /// The letter rail: `#` and A to Z, the one at the top of the list lit, letters
+    /// without artists faint. Click or drag along it to glide there.
+    fn render_rail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = t();
+        let letters = self.rail_letters();
+        let state = self.scroll.0.borrow();
+        let top = state.last_item_size.filter(|_| !self.rows.is_empty()).map(|size| {
+            let row_height = f32::from(size.contents.height) / self.rows.len() as f32;
+            (-f32::from(state.base_handle.offset().y) / row_height.max(1.)).round() as usize
+        });
+        drop(state);
+        let here = self
+            .scrubbing
+            .or_else(|| top.and_then(|top| letters.iter().filter(|&&(_, at)| at <= top).last().map(|&(l, _)| l)));
+        let rail = self.rail.clone();
+        div()
+            .id("rail")
+            .relative()
+            .flex_none()
+            .w(px(22.))
+            .py_1()
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|d| d.bg(rgb(t.surface)))
+            .font_family(MONO)
+            .text_size(px(10.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|riff, e: &MouseDownEvent, _, cx| {
+                    riff.scrub(e.position.y);
+                    cx.notify();
+                }),
+            )
+            .child(canvas(move |bounds, _, _| rail.set(bounds), |_, _, _, _| {}).absolute().size_full())
+            .children(library::ALPHABET.chars().map(|letter| {
+                let has = letters.iter().any(|&(l, _)| l == letter);
+                let lit = here == Some(letter);
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(if lit {
+                        t.accent
+                    } else if has {
+                        t.dim
+                    } else {
+                        t.faint
+                    }))
+                    .child(letter.to_string())
+            }))
+            .into_any_element()
+    }
+
     /// Highlights the playing song, nearest the cursor when it is listed twice.
     fn to_playing(&mut self) {
         let Some(path) = self.now.as_ref().map(|n| n.path.clone()) else { return };
@@ -1594,9 +1847,10 @@ impl Riff {
     }
 
     fn set_query(&mut self, query: String) {
-        if query != self.query || self.album.is_some() {
+        if query != self.query || self.album.is_some() || self.artist.is_some() {
             self.query = query;
             self.album = None;
+            self.artist = None;
             self.rebuild_rows();
             self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
@@ -1628,6 +1882,14 @@ impl Riff {
     }
 
     fn drag(&mut self, event: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.scrubbing.is_some() {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.scrub(event.position.y);
+            } else {
+                self.scrubbing = None;
+            }
+            return cx.notify();
+        }
         let Some((edge, strip)) = &self.dragging else { return };
         if event.pressed_button != Some(MouseButton::Left) {
             return self.drop_edge(cx);
@@ -1676,6 +1938,7 @@ impl Riff {
                 let variations = self.variations.of(&track.path).len();
                 div()
                     .id(("row", ix))
+                    .group("song-row")
                     .w_full()
                     .h(px(ROW))
                     .px_3()
@@ -1743,22 +2006,48 @@ impl Riff {
                                             .child(format!("+{variations}"))
                                     })),
                             )
+                            // The artist opens the artist view, as ⇧⌘A does.
                             .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(rgb(t().dim))
-                                    .child(track.artist.clone()),
+                                div().flex().min_w_0().child(
+                                    div()
+                                        .id(("artist", ix))
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(rgb(t().dim))
+                                        .cursor_pointer()
+                                        .hover(|d| d.text_color(rgb(t().accent)).underline())
+                                        .tooltip(self.tip("Only this artist", &[Action::Artist]))
+                                        .on_click(cx.listener(move |riff, _, _, cx| {
+                                            cx.stop_propagation();
+                                            riff.selected = ix;
+                                            riff.act(Action::Artist, cx);
+                                        }))
+                                        .child(track.artist.clone()),
+                                ),
                             ),
                     )
+                    // The album name opens the album view, as ⌘A does.
                     .children(album.map(|album| {
                         div()
                             .w(relative(0.32))
                             .flex_none()
-                            .truncate()
-                            .text_sm()
-                            .text_color(rgb(t().dim))
-                            .child(album)
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .id(("album", ix))
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(rgb(t().dim))
+                                    .cursor_pointer()
+                                    .hover(|d| d.text_color(rgb(t().accent)).underline())
+                                    .tooltip(self.tip("Only this album", &[Action::Album]))
+                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                        cx.stop_propagation();
+                                        riff.selected = ix;
+                                        riff.act(Action::Album, cx);
+                                    }))
+                                    .child(album),
+                            )
                     }))
                     .child(
                         div()
@@ -1774,22 +2063,51 @@ impl Riff {
                     // A fixed width, so the columns line up with or without icons.
                     .child(
                         div()
-                            .w(px(36.))
+                            .w(px(48.))
                             .flex_none()
                             .flex()
+                            .items_center()
                             .justify_end()
-                            .gap_2()
+                            .gap_1()
                             .when(playing, |d| d.child(ui::icon("music", 14., t().accent)))
-                            .when(favorite, |d| {
-                                d.child(ui::icon("star", 14., if selected { t().accent } else { t().dim }))
-                            }),
+                            // A favourite's star always shows; others' when the row is
+                            // highlighted or under the pointer, to click.
+                            .child(
+                                div()
+                                    .id(("star", ix))
+                                    .size(px(24.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(rgb(t().faint)))
+                                    .when(!favorite && !selected, |d| {
+                                        d.opacity(0.).group_hover("song-row", |s| s.opacity(1.))
+                                    })
+                                    .child(ui::icon(
+                                        "star",
+                                        14.,
+                                        if favorite { t().accent } else { t().dim },
+                                    ))
+                                    .tooltip(self.tip(
+                                        if favorite { "Not a favourite" } else { "Favourite" },
+                                        &[Action::Favorite],
+                                    ))
+                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                        cx.stop_propagation();
+                                        riff.selected = ix;
+                                        riff.act(Action::Favorite, cx);
+                                    })),
+                            ),
                     )
                     .into_any_element()
             }
         }
     }
 
-    fn render_search(&self) -> impl IntoElement {
+    fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let songs = format!("{} songs", ui::count(self.tracks.len()));
         let read = self.tags_total.saturating_sub(self.tags_left);
         let status = if self.scanning.is_some() {
@@ -1804,6 +2122,7 @@ impl Riff {
         let progress = (self.tagging.is_some() && self.tags_total > 0)
             .then(|| read as f32 / self.tags_total as f32);
         div()
+            .id("search")
             .relative()
             .flex()
             .items_center()
@@ -1812,7 +2131,13 @@ impl Riff {
             .px_4()
             .rounded_lg()
             .bg(rgb(t().surface))
+            .cursor_text()
             .when(self.searching, |d| d.border_1().border_color(rgb(t().accent_soft)))
+            .when(!self.searching, |d| d.tooltip(self.tip("Search", &[Action::Search])))
+            .on_click(cx.listener(|riff, _, _, cx| {
+                riff.searching = true;
+                cx.notify();
+            }))
             .child(ui::icon("search", 16., if self.searching { t().accent } else { t().dim }))
             .child(
                 div()
@@ -1894,6 +2219,7 @@ impl Riff {
 
         let progress = div()
             .id("progress")
+            .tooltip(self.tip("Click to jump; drag a loop edge; shift-click ends the loop", &[]))
             .relative()
             .h(px(16.))
             .flex()
@@ -1918,6 +2244,16 @@ impl Riff {
                     .h(px(4.))
                     .rounded_full()
                     .bg(rgb(t().faint))
+                    // Played first, the loop over it: drawn the other way round, the
+                    // played gold hid the loop region and only its start showed.
+                    .child(
+                        div()
+                            .absolute()
+                            .h_full()
+                            .rounded_full()
+                            .bg(rgb(t().accent))
+                            .w(relative(fraction(position))),
+                    )
                     .children(looping.end.map(|end| {
                         let start = fraction(looping.start.unwrap_or_default());
                         div()
@@ -1928,24 +2264,17 @@ impl Riff {
                             .w(relative(fraction(end) - start))
                             .rounded_sm()
                             .bg(rgb(t().loops))
-                            .opacity(if looping.off { 0.12 } else { 0.35 })
+                            .opacity(if looping.off { 0.15 } else { 0.45 })
                     }))
-                    .child(
-                        div()
-                            .absolute()
-                            .h_full()
-                            .rounded_full()
-                            .bg(rgb(t().accent))
-                            .w(relative(fraction(position))),
-                    )
-                    .children(looping.start.map(|start| {
+                    .children([looping.start, looping.end].into_iter().flatten().map(|edge| {
                         div()
                             .absolute()
                             .top(px(-4.))
-                            .left(relative(fraction(start)))
+                            .left(relative(fraction(edge)))
                             .w(px(2.))
                             .h(px(12.))
                             .bg(rgb(t().loops))
+                            .opacity(if looping.off { 0.5 } else { 1.0 })
                     })),
             );
 
@@ -1992,59 +2321,39 @@ impl Riff {
                                     .text_color(rgb(t().text))
                                     .child(title),
                             )
-                            .child(div().truncate().text_sm().text_color(rgb(t().dim)).child(artist)),
-                    )
-                    .child(button("previous", "skip-back", None, false).on_click(cx.listener(
-                        |riff, _, _, cx| {
-                            riff.previous_song();
-                            cx.notify();
-                        },
-                    )))
-                    .child(
-                        button(
-                            "toggle",
-                            if self.audio.playing() { "pause" } else { "play" },
-                            None,
-                            false,
-                        )
-                        .on_click(cx.listener(|riff, _, _, cx| {
-                            riff.audio.toggle();
-                            cx.notify();
-                        })),
-                    )
-                    .child(button("next", "skip-forward", None, false).on_click(cx.listener(
-                        |riff, _, _, cx| {
-                            riff.next_song();
-                            cx.notify();
-                        },
-                    )))
-                    .child(button("shuffle", "shuffle", None, self.shuffle).on_click(cx.listener(
-                        |riff, _, _, cx| {
-                            riff.toggle_shuffle();
-                            cx.notify();
-                        },
-                    )))
-                    .child(self.speed_buttons(cx))
-                    .child(
-                        button("loop", "repeat", None, looping.looping()).on_click(cx.listener(
-                            |riff, _, _, cx| {
-                                let at = riff.audio.position();
-                                let looping = &mut riff.audio.looping;
-                                // With both edges set it switches looping; \ clears them.
-                                if looping.active() {
-                                    looping.switch();
-                                } else if looping.start.is_none() {
-                                    looping.set_start(at);
-                                } else {
-                                    looping.set_end(at);
-                                }
-                                riff.follow_region(Action::LoopEnd);
-                                cx.notify();
-                            },
-                        )),
+                            .child(self.now_subtitle(artist, cx)),
                     )
                     .child(
-                        button("transcribe", "external-link", Some("Transcribe!"), false).on_click(
+                        pill()
+                            .child(self.tool("previous", "skip-back", "Previous song", Action::Previous, false, cx))
+                            .child(self.tool(
+                                "toggle",
+                                if self.audio.playing() { "pause" } else { "play" },
+                                "Play or pause",
+                                Action::Toggle,
+                                false,
+                                cx,
+                            ))
+                            .child(self.tool("next", "skip-forward", "Next song", Action::Next, false, cx))
+                            .child(self.tool("shuffle", "shuffle", "Shuffle", Action::Shuffle, self.shuffle, cx)),
+                    )
+                    .child(
+                        pill()
+                            .child(self.tool("loop-start", "loop-start", "Loop starts here", Action::LoopStart, false, cx))
+                            .child(self.tool("loop-end", "loop-end", "Loop ends here", Action::LoopEnd, false, cx))
+                            .child(self.tool(
+                                "loop",
+                                "repeat",
+                                "Loop on or off, keeping its edges",
+                                Action::LoopSwitch,
+                                looping.looping(),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        button("transcribe", "external-link", Some("Transcribe!"), false)
+                            .tooltip(self.tip("Open the playing song in Transcribe!", &[]))
+                            .on_click(
                             cx.listener(|riff, _, _, cx| {
                                 // The button sits on the playing card, so it means that song.
                                 let track = riff.now.clone().or_else(|| riff.selected_track().cloned());
@@ -2054,7 +2363,14 @@ impl Riff {
                         ),
                     ),
             )
-            .child(progress)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(progress.flex_1())
+                    .child(self.speed_buttons(cx)),
+            )
             .child(
                 div()
                     .flex()
@@ -2070,6 +2386,11 @@ impl Riff {
                     ),
             )
     }
+}
+
+/// A rounded group of tools that belong together.
+fn pill() -> Div {
+    div().flex().items_center().gap(px(2.)).p(px(3.)).rounded_lg().bg(rgb(t().raised))
 }
 
 /// A cover thumbnail, or a quiet placeholder.
@@ -2149,7 +2470,12 @@ impl Riff {
                         .child(div().text_sm().text_color(rgb(t().text)).child(what.to_string()))
                 }))
         };
-        let (left, right) = keys::SHEET.split_at(2);
+        // Each group goes to the shorter column, so the two stay even as groups grow.
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        let lines = |col: &Vec<&(&str, &[keys::Line])>| col.iter().map(|g| g.1.len() + 2).sum::<usize>();
+        for g in keys::SHEET {
+            if lines(&left) <= lines(&right) { left.push(g) } else { right.push(g) }
+        }
         overlay("help")
             .on_click(cx.listener(|riff, _, _, cx| {
                 riff.help = false;
@@ -2157,6 +2483,10 @@ impl Riff {
             }))
             .child(
                 div()
+                    .id("keys-sheet")
+                    // Scrolls rather than cuts keys off in a short window.
+                    .max_h(relative(0.94))
+                    .overflow_y_scroll()
                     .flex()
                     .gap_6()
                     .p_5()
@@ -2164,8 +2494,8 @@ impl Riff {
                     .bg(rgb(t().surface))
                     .border_1()
                     .border_color(rgb(t().faint))
-                    .child(div().flex().flex_col().gap_5().children(left.iter().map(group)))
-                    .child(div().flex().flex_col().gap_5().children(right.iter().map(group))),
+                    .child(div().flex().flex_col().gap_5().children(left.into_iter().map(group)))
+                    .child(div().flex().flex_col().gap_5().children(right.into_iter().map(group))),
             )
     }
 
@@ -2200,12 +2530,29 @@ impl Riff {
             (None, None, Some(_)) => Some("reading the waveform…".to_string()),
             (None, None, None) => Some("play a song to see its waveform".to_string()),
         };
+        let beats = self.beats_now();
+        let mut about = format!("{:.1} s shown", (to - from).as_secs_f64());
+        if self.current_variation().is_some_and(|v| v.offset.is_none()) {
+            about.push_str(", its own timeline");
+        }
+        if let Some(bpm) = beats.as_ref().and_then(|b| b.tempo_at(at)) {
+            about.push_str(&format!(", about {bpm:.0} BPM here"));
+        }
+        if self.grid {
+            about.push_str(if beats.is_some() { ", grid on" } else { ", grid on (finding beats…)" });
+        }
+        if self.slow {
+            about.push_str(&format!(", at {} speed", SPEED_LABELS[self.speed]));
+        }
+        let toolbar = self.practice_toolbar(about, cx);
         let lane = self.region_lane(song.unwrap_or(self.span), cx);
+        let loop_bar = self.loop_bar(cx);
         let lanes = self.stem_lanes(song.unwrap_or(self.span), at, cx);
         let strip = |id: &'static str, strip: &Strip, view: Painting| {
             let down = strip.clone();
             div()
                 .id(id)
+                .tooltip(self.tip("Click to jump; drag a loop edge; shift-click ends the loop", &[]))
                 .relative()
                 .rounded_lg()
                 .bg(rgb(t.surface))
@@ -2228,27 +2575,6 @@ impl Riff {
             beats: None,
             grid: self.grid,
         };
-        let beats = self.beats_now();
-        let mut about = format!("Practice, {:.1} s shown", (to - from).as_secs_f64());
-        // Which recording plays, when the song has others.
-        let others = self.now.as_ref().map_or(0, |n| self.variations.of(&n.path).len());
-        if others > 0 {
-            let which = match self.current_variation() {
-                None => "the song".to_string(),
-                Some(v) if v.offset.is_none() => format!("{} (own timeline)", v.label),
-                Some(v) => v.label.clone(),
-            };
-            about = format!("{which}, {} of {}, v next. {about}", self.variation + 1, others + 1);
-        }
-        if let Some(bpm) = beats.as_ref().and_then(|b| b.tempo_at(at)) {
-            about.push_str(&format!(", about {bpm:.0} BPM here"));
-        }
-        if self.grid {
-            about.push_str(if beats.is_some() { ", grid on" } else { ", grid on (finding beats…)" });
-        }
-        if self.slow {
-            about.push_str(&format!(", at {} speed", SPEED_LABELS[self.speed]));
-        }
         div()
             .id("practice")
             .flex_1()
@@ -2264,17 +2590,7 @@ impl Riff {
             .flex()
             .flex_col()
             .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .px_1()
-                    .font_family(MONO)
-                    .text_xs()
-                    .text_color(rgb(t.dim))
-                    .child(about)
-                    .child("P back   - = zoom   b grid   drag the loop edges"),
-            )
+            .child(toolbar)
             .children(lane)
             .child(strip("overview", &self.overview, Painting { boxed: Some((from, to)), ..common.clone() }).h(px(40.)))
             .child(
@@ -2292,11 +2608,12 @@ impl Riff {
                             .child(s)
                     })),
             )
+            .child(loop_bar)
             .children(lanes)
     }
 
-    /// A stem set's stems, a lane each: number and name (a click mutes, ⌥-click solos)
-    /// and the stem's waveform over the whole song, so a part can be found anywhere in it
+    /// A stem set's stems, a lane each: number, name, mute and solo buttons, and the
+    /// stem's waveform over the whole song, so a part can be found anywhere in it
     /// (the overview above already boxes the detail's stretch). A click in a lane moves the playhead there, like
     /// the overview. Dimmed when the stem isn't heard.
     fn stem_lanes(&self, song: Duration, at: Duration, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -2308,11 +2625,7 @@ impl Riff {
         let gains = self.gains();
         let lanes = variation.stems.iter().zip(&self.stem_waves).enumerate().map(|(i, (name, wave))| {
             let heard = gains.get(i).is_some_and(|g| *g > 0.0);
-            let state = match (self.solo == Some(i), self.muted.get(i) == Some(&true)) {
-                (true, _) => "solo",
-                (false, true) => "muted",
-                _ => "",
-            };
+            let (soloed, muted) = (self.solo == Some(i), self.muted.get(i) == Some(&true));
             div()
                 .flex()
                 .items_center()
@@ -2320,33 +2633,36 @@ impl Riff {
                 .h(px(30.))
                 .child(
                     div()
-                        .id(("stem", i))
-                        .w(px(150.))
+                        .w(px(190.))
                         .flex_none()
                         .flex()
-                        .gap_2()
-                        .px_2()
+                        .gap_1()
+                        .pl_2()
+                        .pr_1()
                         .h_full()
                         .items_center()
                         .rounded_md()
                         .bg(rgb(t.surface))
-                        .cursor_pointer()
                         .text_xs()
                         .text_color(rgb(if heard { t.text } else { t.dim }))
-                        .child(div().font_family(MONO).text_color(rgb(t.dim)).child((i + 1).to_string()))
-                        .child(div().flex_1().truncate().child(name.clone()))
-                        .child(div().font_family(MONO).text_color(rgb(t.accent)).child(state))
-                        .on_click(cx.listener(move |riff, event: &gpui::ClickEvent, _, cx| {
-                            let action = if event.modifiers().alt { Action::Solo(i) } else { Action::Mute(i) };
-                            riff.perform(action);
-                            cx.notify();
-                        })),
+                        .child(div().w(px(14.)).font_family(MONO).text_color(rgb(t.dim)).child((i + 1).to_string()))
+                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                        .child(self.tool(
+                            ("mute", i),
+                            if muted { "volume-x" } else { "volume-2" },
+                            &format!("Mute {name}"),
+                            Action::Mute(i),
+                            muted,
+                            cx,
+                        ))
+                        .child(self.tool(("solo", i), "headphones", &format!("Solo {name}"), Action::Solo(i), soloed, cx)),
                 )
                 .child({
                     let strip = Strip::default();
                     let down = strip.clone();
                     div()
                         .id(("stem-wave", i))
+                        .tooltip(self.tip("Click to jump", &[]))
                         .flex_1()
                         .h_full()
                         .relative()
@@ -2388,18 +2704,20 @@ impl Riff {
         let t = t();
         let recording = self.recording()?;
         let list = self.regions.of(&recording).to_vec();
-        if list.is_empty() {
-            return None;
-        }
         let current = self.regions.matching(&recording, self.audio.looping).cloned();
         let length = song.as_secs_f64().max(1e-3);
-        Some(div().relative().h(px(22.)).children(list.into_iter().enumerate().map(|(i, region)| {
+        let empty = list.is_empty();
+        let lane = div().flex_1().relative().h(px(26.)).when(empty, |d| {
+            d.flex().items_center().px_2().text_xs().text_color(rgb(t.dim)).child("No regions yet: set a loop, then save it")
+        });
+        let lane = lane.children(list.into_iter().enumerate().map(|(i, region)| {
             let lit = current.as_ref() == Some(&region);
             let left = (region.start.as_secs_f64() / length) as f32;
             let wide = ((region.end - region.start).as_secs_f64() / length) as f32;
             let name = region.name.clone();
             div()
                 .id(("region", i))
+                .tooltip(self.tip(format!("Play {}", region.name), &[Action::Region(false), Action::Region(true)]))
                 .absolute()
                 .top_0()
                 .h_full()
@@ -2421,8 +2739,130 @@ impl Riff {
                     riff.play_region(&region);
                     cx.notify();
                 }))
-        }))
-        .into_any_element())
+        }));
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(pill().child(self.tool("region-prev", "region-prev", "Previous region", Action::Region(false), false, cx)))
+                .child(lane)
+                .child(
+                    pill()
+                        .child(self.tool("region-next", "region-next", "Next region", Action::Region(true), false, cx))
+                        .child(self.tool("region-save", "bookmark-plus", "Save the loop as a region", Action::SaveRegion, false, cx))
+                        .child(self.tool("region-delete", "bookmark-minus", "Delete the loop's region", Action::RemoveRegion, false, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Above the waveform: which recording plays (a chip each, plus adding one), what is
+    /// shown, and the beat grid and zoom.
+    fn practice_toolbar(&self, about: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = t();
+        let names: Vec<String> = std::iter::once("Song".to_string())
+            .chain(self.now.iter().flat_map(|n| self.variations.of(&n.path).iter().map(|v| v.label.clone())))
+            .collect();
+        let chips = names.into_iter().enumerate().map(|(i, name)| {
+            let lit = self.variation == i;
+            div()
+                .id(("recording", i))
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .when(lit, |d| d.bg(rgb(t.accent_soft)))
+                .hover(|d| d.bg(rgb(t.faint)))
+                .text_sm()
+                .text_color(rgb(if lit { t.accent } else { t.dim }))
+                .child(ui::icon(if i == 0 { "music" } else { "layers" }, 14., if lit { t.accent } else { t.dim }))
+                .child(div().max_w(px(160.)).truncate().child(name.clone()))
+                .tooltip(self.tip(format!("Play {}", if i == 0 { "the song itself".to_string() } else { name }), &[Action::Variation]))
+                .on_click(cx.listener(move |riff, _, _, cx| {
+                    riff.select_recording(i);
+                    cx.notify();
+                }))
+        });
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                pill()
+                    .children(chips)
+                    .child(self.tool("add-variation", "layers-plus", "Add a variation (or drop files here)", Action::AddVariation, false, cx)),
+            )
+            .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(about))
+            .child(
+                pill()
+                    .child(self.tool("grid", "beats", "Beat grid: loops and steps follow the beats", Action::Grid, self.grid, cx))
+                    .child(self.tool("zoom-out", "zoom-out", "Zoom out", Action::Zoom(keys::ZOOM), false, cx))
+                    .child(self.tool("zoom-in", "zoom-in", "Zoom in", Action::Zoom(1.0 / keys::ZOOM), false, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// Under the waveform: every loop tool, grouped (its edges, widening and narrowing,
+    /// sliding, playing and switching), and where the loop is.
+    fn loop_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = t();
+        let looping = self.audio.looping;
+        let label = match (looping.start, looping.end) {
+            (_, Some(end)) => {
+                let start = looping.start.unwrap_or_default();
+                let beats = self
+                    .beats_now()
+                    .map(|b| b.times.iter().filter(|&&x| x >= start && x < end).count())
+                    .filter(|&n| n > 0)
+                    .map_or(String::new(), |n| format!(", {n} beats"));
+                let off = if looping.off { ", off" } else { "" };
+                format!("{} to {}{beats}{off}", ui::clock(start), ui::clock(end))
+            }
+            (Some(start), None) => format!("from {}", ui::clock(start)),
+            (None, None) => "no loop".to_string(),
+        };
+        let nudge = keys::NUDGE;
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                pill()
+                    .child(self.tool("bar-loop-start", "loop-start", "Loop starts here", Action::LoopStart, false, cx))
+                    .child(self.tool("bar-loop-end", "loop-end", "Loop ends here", Action::LoopEnd, false, cx)),
+            )
+            .child(
+                pill()
+                    .child(self.tool("widen-start", "widen-start", "Widen at the start", Action::NudgeStart(-nudge), false, cx))
+                    .child(self.tool("narrow-start", "narrow-start", "Narrow at the start", Action::NudgeStart(nudge), false, cx))
+                    .child(self.tool("narrow-end", "narrow-end", "Narrow at the end", Action::NudgeEnd(-nudge), false, cx))
+                    .child(self.tool("widen-end", "widen-end", "Widen at the end", Action::NudgeEnd(nudge), false, cx)),
+            )
+            .child(
+                pill()
+                    .child(self.tool("slide-back", "slide-back", "Slide back by its length", Action::Slide(false), false, cx))
+                    .child(self.tool("slide-on", "slide-on", "Slide on by its length", Action::Slide(true), false, cx)),
+            )
+            .child(
+                pill()
+                    .child(self.tool("loop-play", "loop-play", "Play from the loop start", Action::FromLoopStart, false, cx))
+                    .child(self.tool("bar-loop", "repeat", "Loop on or off, keeping its edges", Action::LoopSwitch, looping.looping(), cx))
+                    .child(self.tool("loop-clear", "loop-clear", "Clear the loop", Action::LoopClear, false, cx)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_right()
+                    .font_family(MONO)
+                    .text_xs()
+                    .text_color(rgb(if looping.looping() { t.loops } else { t.dim }))
+                    .child(label),
+            )
+            .into_any_element()
     }
 
     /// The album view's header: the cover large, the album's name and what's on it, so
@@ -2480,7 +2920,183 @@ impl Riff {
                     .font_family(MONO)
                     .text_xs()
                     .text_color(rgb(t.dim))
-                    .child("⌘A back"),
+                    .child(format!("{} back", keys::keys_for(Action::Album, false).join(" "))),
+            )
+    }
+
+    /// Under the playing song's title: its artist and album, each opening its view, or
+    /// a hint when nothing plays.
+    fn now_subtitle(&self, fallback: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = t();
+        let Some(now) = self.now.clone() else {
+            return div().truncate().text_sm().text_color(rgb(t.dim)).child(fallback).into_any_element();
+        };
+        let link = |id: &'static str, text: String, what: &str, action: Action, artist: bool| {
+            let track = now.clone();
+            div()
+                .id(id)
+                .flex_none()
+                .cursor_pointer()
+                .hover(|d| d.text_color(rgb(t.accent)).underline())
+                .tooltip(self.tip(what.to_string(), &[action]))
+                .on_click(cx.listener(move |riff, _, _, cx| {
+                    riff.show(track.clone(), artist);
+                    cx.notify();
+                }))
+                .child(text)
+        };
+        div()
+            .flex()
+            .min_w_0()
+            .overflow_hidden()
+            .text_sm()
+            .text_color(rgb(t.dim))
+            .child(link("now-artist", now.artist.clone(), "Everything by this artist", Action::Artist, true))
+            .child(div().flex_none().child(", "))
+            .child(link("now-album", now.album.clone(), "This album", Action::Album, false))
+            .into_any_element()
+    }
+
+    /// The dialog naming the loop as a region (`r`): typing goes to the name, Enter saves
+    /// (an empty name saves one saying where it is), Esc or a click outside cancels.
+    fn render_naming(&self, name: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let looping = self.audio.looping;
+        let where_ = looping
+            .end
+            .map(|end| Region::default_name(looping.start.unwrap_or_default(), end))
+            .unwrap_or_default();
+        let renaming = self
+            .recording()
+            .is_some_and(|r| self.regions.matching(&r, looping).is_some());
+        let action = |id: &'static str, label: &'static str, key: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .h(px(34.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(rgb(if primary { t.accent_soft } else { t.raised }))
+                .hover(|d| d.bg(rgb(t.faint)))
+                .text_sm()
+                .text_color(rgb(if primary { t.accent } else { t.text }))
+                .child(label)
+                .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(key))
+        };
+        overlay("naming")
+            .on_click(cx.listener(|riff, _, _, cx| {
+                riff.naming = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("naming-sheet")
+                    .w(px(440.))
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(rgb(t.surface))
+                    .border_1()
+                    .border_color(rgb(t.faint))
+                    // A click inside the dialog is not a click outside it.
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(ui::icon("bookmark-plus", 16., t.loops))
+                            .child(div().text_color(rgb(t.text)).child(if renaming { "Rename this region" } else { "Name this region" }))
+                            .child(div().flex_1())
+                            .child(div().font_family(MONO).text_xs().text_color(rgb(t.loops)).child(where_.clone())),
+                    )
+                    .child(
+                        div()
+                            .h(px(40.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .bg(rgb(t.bg))
+                            .border_1()
+                            .border_color(rgb(t.accent_soft))
+                            .text_color(rgb(t.text))
+                            .child(name.clone())
+                            .child(div().ml(px(1.)).w(px(2.)).h(px(20.)).bg(rgb(t.accent)))
+                            .when(name.is_empty(), |d| {
+                                d.child(div().ml_2().text_color(rgb(t.faint)).child(where_.clone()))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(action("naming-cancel", "Cancel", "Esc", false).on_click(cx.listener(|riff, _, _, cx| {
+                                riff.naming = None;
+                                cx.notify();
+                            })))
+                            .child(action("naming-save", "Save", "Enter", true).on_click(cx.listener(|riff, _, _, cx| {
+                                riff.name_region();
+                                cx.notify();
+                            }))),
+                    ),
+            )
+    }
+
+    /// The artist view's header: their albums' covers, their name, and how much there is.
+    fn render_artist(&self, of: &Track) -> impl IntoElement {
+        let t = t();
+        let songs = library::artist(&self.tracks, of);
+        let seconds = songs.iter().map(|&i| self.tracks[i].seconds).sum::<Option<u64>>();
+        // One cover per album, oldest first, as the rows below list them.
+        let mut albums: Vec<&Track> = Vec::new();
+        for &i in &songs {
+            let t = &self.tracks[i];
+            if albums.last().is_none_or(|a| a.album != t.album || a.path.parent() != t.path.parent()) {
+                albums.push(t);
+            }
+        }
+        let count = if albums.len() == 1 { "1 album".to_string() } else { format!("{} albums", albums.len()) };
+        let about = format!("{count}, {}", ui::album_stats(songs.len(), seconds));
+        div()
+            .flex()
+            .items_end()
+            .gap_5()
+            .p_4()
+            .rounded_lg()
+            .bg(rgb(t.surface))
+            .child(div().flex().gap_2().children(albums.iter().take(4).map(|a| cover(a.cover.clone(), 96.))))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Artist"))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_3xl()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgb(t.text))
+                            .child(if of.artist.is_empty() { "Unknown artist".into() } else { of.artist.clone() }),
+                    )
+                    .child(div().truncate().text_sm().text_color(rgb(t.dim)).child(about)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(MONO)
+                    .text_xs()
+                    .text_color(rgb(t.dim))
+                    .child(format!("{} back", keys::keys_for(Action::Artist, false).join(" "))),
             )
     }
 
@@ -2840,23 +3456,25 @@ impl Render for Riff {
         if self.practice && playing {
             window.request_animation_frame();
         }
+        // A rail jump glides: eased out over 220 ms.
+        if let Some((from, to, began)) = self.glide {
+            let done = (began.elapsed().as_secs_f32() / 0.22).min(1.);
+            let eased = 1. - (1. - done).powi(3);
+            let base = &self.scroll.0.borrow().base_handle;
+            base.set_offset(gpui::point(base.offset().x, from + (to - from) * eased));
+            if done < 1. {
+                window.request_animation_frame();
+            } else {
+                self.glide = None;
+            }
+        }
         // The detail view keeps the loop in sight, growing only when it must.
         let looping = self.audio.looping;
         if let Some(end) = looping.end.filter(|_| looping.looping() && self.dragging.is_none()) {
             self.span = wave::fit(self.span, end - looping.start.unwrap_or_default());
         }
         let hint = match (&self.naming, &self.message) {
-            (Some(name), _) => {
-                let looping = self.audio.looping;
-                let default = looping
-                    .end
-                    .map(|end| Region::default_name(looping.start.unwrap_or_default(), end))
-                    .unwrap_or_default();
-                div().text_color(rgb(t().accent)).child(format!(
-                    "name this loop: {name}▏   Enter saves   Esc keeps \"{default}\""
-                ))
-            }
-            (None, message) => match message {
+            (_, message) => match message {
             Some((text, error)) => div()
                 .text_color(rgb(if *error { t().error } else { t().dim }))
                 .child(text.clone()),
@@ -2873,7 +3491,12 @@ impl Render for Riff {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .on_mouse_move(cx.listener(Self::drag))
-            .on_mouse_up(MouseButton::Left, cx.listener(|riff, _, _, cx| riff.drop_edge(cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|riff, _, _, cx| {
+                if riff.scrubbing.take().is_some() {
+                    cx.notify();
+                }
+                riff.drop_edge(cx)
+            }))
             .relative()
             .size_full()
             .flex()
@@ -2892,28 +3515,66 @@ impl Render for Riff {
                     .left_0()
                     .w_full()
                     .h(px(TITLEBAR))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .pr_3()
                     .on_click(|event, window, _| {
                         if event.click_count() == 2 {
                             window.titlebar_double_click();
                         }
-                    }),
+                    })
+                    .child(self.tool("practice-view", "audio-waveform", "Practice view", Action::Practice, self.practice, cx))
+                    .child(self.tool("keys", "keyboard", "Every key", Action::Help, self.help, cx))
+                    .child(self.tool("settings", "settings-2", "Settings", Action::Settings, self.prefs.is_some(), cx)),
             )
             .font_family(UI)
             .text_color(rgb(t().text))
-            .child(self.render_search())
+            .child(self.render_search(cx))
             .when(self.practice, |d| d.child(self.render_practice(at, cx)))
             .when(!self.practice, |d| {
-                d.children(self.album.as_ref().map(|of| self.render_album(of))).child(
-                    uniform_list(
-                        "library",
-                        self.rows.len(),
-                        cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
-                            range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
-                        }),
+                d.children(self.album.as_ref().map(|of| self.render_album(of)))
+                    .children(self.artist.as_ref().map(|of| self.render_artist(of)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                uniform_list(
+                                    "library",
+                                    self.rows.len(),
+                                    cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
+                                        range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
+                                    }),
+                                )
+                                .track_scroll(self.scroll.clone())
+                                .flex_1()
+                                .h_full(),
+                            )
+                            .when(self.browsing(), |d| d.child(self.render_rail(cx)))
+                            // The letter being dragged to, large, while the list glides.
+                            .children(self.scrubbing.map(|letter| {
+                                div().absolute().size_full().flex().items_center().justify_center().child(
+                                    div()
+                                        .size(px(88.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_lg()
+                                        .bg(rgb(t().raised))
+                                        .border_1()
+                                        .border_color(rgb(t().faint))
+                                        .text_3xl()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(rgb(t().accent))
+                                        .child(letter.to_string()),
+                                )
+                            })),
                     )
-                    .track_scroll(self.scroll.clone())
-                    .flex_1(),
-                )
             })
             .child(self.render_now(cx))
             .child(
@@ -2925,6 +3586,7 @@ impl Render for Riff {
                     .child(hint),
             )
             .when(self.help, |d| d.child(self.render_help(cx)))
+            .children(self.naming.clone().map(|name| self.render_naming(name, cx)))
             .children(self.prefs.as_ref().map(|p| self.render_prefs(p, cx)))
     }
 }

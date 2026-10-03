@@ -39,7 +39,11 @@ macro_rules! icons {
 
 icons!(
     "play", "pause", "repeat", "external-link", "music", "search", "star", "folder", "x", "plus",
-    "palette", "check", "skip-back", "skip-forward", "shuffle", "keyboard", "gauge",
+    "palette", "check", "skip-back", "skip-forward", "shuffle", "keyboard", "gauge", "audio-waveform", "settings-2",
+    "zoom-in", "zoom-out", "layers", "layers-plus", "volume-2", "volume-x", "headphones",
+    "bookmark-plus", "bookmark-minus", "loop-start", "loop-end", "widen-start", "narrow-start",
+    "narrow-end", "widen-end", "slide-back", "slide-on", "loop-play", "loop-clear", "beats",
+    "region-prev", "region-next", "disc",
 );
 
 impl AssetSource for Assets {

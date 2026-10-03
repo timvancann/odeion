@@ -169,6 +169,49 @@ pub fn search(tracks: &[Track], query: &str) -> Vec<usize> {
     hits.into_iter().map(|(_, i)| i).collect()
 }
 
+/// The library's index letters, in its order: digits and symbols sort first.
+pub const ALPHABET: &str = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/// The letter an artist is filed under: their first letter, `#` for anything else.
+pub fn initial(artist: &str) -> char {
+    match fold(artist).chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => c.to_ascii_uppercase(),
+        _ => '#',
+    }
+}
+
+/// Where each letter begins in a list of artists in library order: the letter and the
+/// position of its first artist, once per letter.
+pub fn letters<'a>(artists: impl IntoIterator<Item = (usize, &'a str)>) -> Vec<(char, usize)> {
+    let mut found: Vec<(char, usize)> = Vec::new();
+    for (at, artist) in artists {
+        let letter = initial(artist);
+        if !found.iter().any(|&(l, _)| l == letter) {
+            found.push((letter, at));
+        }
+    }
+    found
+}
+
+/// Where picking `letter` goes: its first artist or, when it has none, the next
+/// letter's; past the last letter, the last one there is.
+pub fn jump(letters: &[(char, usize)], letter: char) -> Option<usize> {
+    let rank = |c: char| ALPHABET.find(c).unwrap_or(0);
+    letters
+        .iter()
+        .filter(|&&(l, _)| rank(l) >= rank(letter))
+        .min_by_key(|&&(l, _)| rank(l))
+        .or(letters.iter().max_by_key(|&&(l, _)| rank(l)))
+        .map(|&(_, at)| at)
+}
+
+/// Everything by `of`'s artist, in library order (albums oldest first, each in track
+/// order), ignoring case and accents in the name.
+pub fn artist(tracks: &[Track], of: &Track) -> Vec<usize> {
+    let name = fold(&of.artist);
+    (0..tracks.len()).filter(|&i| fold(&tracks[i].artist) == name).collect()
+}
+
 /// The tracks of `of`'s album, in track order: same album name, same folder.
 pub fn album(tracks: &[Track], of: &Track) -> Vec<usize> {
     let name = fold(&of.album);
@@ -320,6 +363,42 @@ mod tests {
             track("Z", "Y", 1, "Jump Around"),
         ];
         assert_eq!(search(&tracks, "jump"), [2, 1, 0]);
+    }
+
+    #[test]
+    fn artists_are_filed_under_their_first_letter_or_hash() {
+        assert_eq!(initial("Ángela Aguilar"), 'A');
+        assert_eq!(initial("rush"), 'R');
+        assert_eq!(initial("3 Doors Down"), '#');
+        assert_eq!(initial(""), '#');
+        let artists = ["3 Doors Down", "AC/DC", "Aerosmith", "Def Leppard", "Rush", "Rush"];
+        let found = letters(artists.iter().enumerate().map(|(i, a)| (i + 10, *a)));
+        assert_eq!(found, vec![('#', 10), ('A', 11), ('D', 13), ('R', 14)]);
+    }
+
+    #[test]
+    fn a_letter_without_artists_jumps_to_the_next_one() {
+        let found = [('#', 0), ('A', 5), ('D', 9), ('R', 20)];
+        assert_eq!(jump(&found, 'A'), Some(5));
+        assert_eq!(jump(&found, 'B'), Some(9));
+        assert_eq!(jump(&found, 'S'), Some(20));
+        assert_eq!(jump(&[], 'S'), None);
+    }
+
+    #[test]
+    fn an_artist_is_every_track_under_the_name_in_library_order() {
+        let mut tracks = vec![
+            track("Rush", "Signals", 1, "Subdivisions"),
+            track("Dire Straits", "Dire Straits", 1, "Down to the Waterline"),
+            track("rush", "Moving Pictures", 2, "Red Barchetta"),
+            track("Rush", "Moving Pictures", 1, "Tom Sawyer"),
+        ];
+        tracks[1].year = Some(1978);
+        sort(&mut tracks);
+        let titles: Vec<&str> =
+            artist(&tracks, &tracks[1]).into_iter().map(|i| tracks[i].title.as_str()).collect();
+        assert!(titles.iter().all(|t| *t != "Down to the Waterline"));
+        assert_eq!(titles.len(), 3);
     }
 
     #[test]
