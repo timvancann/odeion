@@ -156,6 +156,9 @@ key to both or the test fails.
   click or drag along `# A–Z` and the list glides (220 ms, eased, by setting the scroll
   offset each frame) to that letter's first artist below the favourites, highlighting
   it. Letters follow the sort (`library::initial`), so a jump never lands out of order.
+- **The list has a scrollbar like Zed's**, drawn by riff (GPUI 0.2.2 has none): a thin
+  thumb shown while the list moves and for a second after, or with the pointer on it.
+  Dragging the thumb scrolls directly; a click elsewhere on the track glides there.
 - The Transcribe! button sits on the now-playing card, so it opens the *playing* song.
 
 ## GPUI traps hit here

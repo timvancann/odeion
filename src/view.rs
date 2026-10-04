@@ -29,6 +29,8 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 const POLL: Duration = Duration::from_millis(40);
+/// The scrollbar stays this long after the list stops moving, as in Zed.
+const SCROLLBAR_LINGERS: Duration = Duration::from_secs(1);
 const ROW: f32 = 60.;
 /// The transparent title bar's height, where the traffic lights sit.
 const TITLEBAR: f32 = 32.;
@@ -243,6 +245,16 @@ pub struct Riff {
     scrubbing: Option<char>,
     /// A scroll in progress: from and to (list offsets) and when it began.
     glide: Option<(Pixels, Pixels, std::time::Instant)>,
+    /// The list's scrollbar track, where it was last drawn.
+    track: Rc<Cell<Bounds<Pixels>>>,
+    /// Where the pointer holds the scrollbar's thumb, from its top, while dragging it.
+    grab: Option<Pixels>,
+    /// The pointer is over the scrollbar.
+    over_track: bool,
+    /// The list's scroll offset last drawn, and when it last changed: the scrollbar
+    /// shows while the list moves and a moment after.
+    seen_offset: Pixels,
+    scrolled_at: Option<std::time::Instant>,
 }
 
 fn cache_file() -> PathBuf {
@@ -370,6 +382,11 @@ impl Riff {
             rail: Rc::default(),
             scrubbing: None,
             glide: None,
+            track: Rc::default(),
+            grab: None,
+            over_track: false,
+            seen_offset: Pixels::ZERO,
+            scrolled_at: None,
         };
         riff.message = riff.audio.error.clone().map(|e| (e, true));
         riff.reindex(None);
@@ -534,6 +551,10 @@ impl Riff {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.audio.tick();
+        if self.scrolled_at.is_some_and(|at| at.elapsed() > SCROLLBAR_LINGERS) {
+            self.scrolled_at = None;
+            changed = true;
+        }
         // Where the playing song is, kept now and then, so a crash loses little.
         if self.audio.playing() && self.kept.elapsed() > Duration::from_secs(5) {
             self.keep_spot();
@@ -1766,14 +1787,110 @@ impl Riff {
 
     /// Scrolls smoothly until `row` is at the top of the list (or the list's end shows).
     fn glide_to(&mut self, row: usize) {
-        let state = self.scroll.0.borrow();
-        let Some(size) = state.last_item_size.filter(|_| !self.rows.is_empty()) else { return };
-        let row_height = size.contents.height / self.rows.len() as f32;
-        let most = (size.contents.height - size.item.height).max(Pixels::ZERO);
-        let to = -(row_height * row as f32).min(most);
-        let from = state.base_handle.offset().y;
-        drop(state);
+        let Some((content, _, _)) = self.list_extent() else { return };
+        self.glide_by(content * (row as f32 / self.rows.len() as f32));
+    }
+
+    /// Scrolls smoothly until the list is `down` from its top (as far as it goes).
+    fn glide_by(&mut self, down: Pixels) {
+        let Some((content, view, from)) = self.list_extent() else { return };
+        let to = -down.min(content - view).max(Pixels::ZERO);
         self.glide = Some((from, to, std::time::Instant::now()));
+    }
+
+    /// The list's full height, how much of it shows, and its scroll offset (zero or
+    /// less), once it has been laid out.
+    fn list_extent(&self) -> Option<(Pixels, Pixels, Pixels)> {
+        let state = self.scroll.0.borrow();
+        let size = state.last_item_size.filter(|_| !self.rows.is_empty())?;
+        Some((size.contents.height, size.item.height, state.base_handle.offset().y))
+    }
+
+    /// The scrollbar's thumb on a track `track` high: its top and height. None when
+    /// the whole list fits.
+    fn thumb(&self, track: Pixels) -> Option<(Pixels, Pixels)> {
+        let (content, view, offset) = self.list_extent()?;
+        if content <= view || track <= Pixels::ZERO {
+            return None;
+        }
+        let height = (track * (view / content)).max(px(28.)).min(track);
+        let travel = (-offset / (content - view)).clamp(0., 1.);
+        Some(((track - height) * travel, height))
+    }
+
+    /// The thumb dragged so its top is at `top` (window coordinates): the list follows
+    /// directly, no glide.
+    fn drag_thumb(&mut self, top: Pixels) {
+        let bounds = self.track.get();
+        let (Some((content, view, _)), Some((_, height))) =
+            (self.list_extent(), self.thumb(bounds.size.height))
+        else {
+            return;
+        };
+        let room = bounds.size.height - height;
+        let travel = if room > Pixels::ZERO { ((top - bounds.origin.y) / room).clamp(0., 1.) } else { 0. };
+        self.glide = None;
+        let base = &self.scroll.0.borrow().base_handle;
+        base.set_offset(gpui::point(base.offset().x, -(content - view) * travel));
+    }
+
+    /// A press on the scrollbar: on the thumb it grabs it, elsewhere the list glides so
+    /// the thumb centres there.
+    fn track_down(&mut self, y: Pixels) {
+        let bounds = self.track.get();
+        let Some((top, height)) = self.thumb(bounds.size.height) else { return };
+        let at = y - bounds.origin.y;
+        if at >= top && at <= top + height {
+            self.grab = Some(at - top);
+        } else if let Some((content, view, _)) = self.list_extent() {
+            let room = bounds.size.height - height;
+            let travel = if room > Pixels::ZERO { ((at - height / 2.) / room).clamp(0., 1.) } else { 0. };
+            self.glide_by((content - view) * travel);
+        }
+    }
+
+    /// The scrollbar over the list's right edge: a thin thumb, shown while the list
+    /// moves (and a second after), while dragged, or with the pointer on it.
+    fn render_scrollbar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = t();
+        let bounds = self.track.get();
+        let thumb = self.thumb(bounds.size.height);
+        let shown = self.grab.is_some() || self.over_track || self.scrolled_at.is_some();
+        let strong = self.grab.is_some() || self.over_track;
+        let track = self.track.clone();
+        div()
+            .id("scrollbar")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(14.))
+            .when(thumb.is_some(), |d| {
+                d.on_hover(cx.listener(|riff, hovered: &bool, _, cx| {
+                    riff.over_track = *hovered;
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|riff, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        riff.track_down(e.position.y);
+                        cx.notify();
+                    }),
+                )
+            })
+            .child(canvas(move |bounds, _, _| track.set(bounds), |_, _, _, _| {}).absolute().size_full())
+            .children(thumb.filter(|_| shown).map(|(top, height)| {
+                div()
+                    .absolute()
+                    .top(top)
+                    .h(height)
+                    .right(px(3.))
+                    .w(px(if strong { 8. } else { 6. }))
+                    .rounded_full()
+                    .bg(rgb(if strong { t.dim } else { t.faint }))
+            }))
+            .into_any_element()
     }
 
     /// The letter rail: `#` and A to Z, the one at the top of the list lit, letters
@@ -1882,6 +1999,14 @@ impl Riff {
     }
 
     fn drag(&mut self, event: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some(grab) = self.grab {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.drag_thumb(event.position.y - grab);
+            } else {
+                self.grab = None;
+            }
+            return cx.notify();
+        }
         if self.scrubbing.is_some() {
             if event.pressed_button == Some(MouseButton::Left) {
                 self.scrub(event.position.y);
@@ -3456,6 +3581,13 @@ impl Render for Riff {
         if self.practice && playing {
             window.request_animation_frame();
         }
+        // Any scroll shows the scrollbar for a moment.
+        if let Some((_, _, offset)) = self.list_extent()
+            && offset != self.seen_offset
+        {
+            self.seen_offset = offset;
+            self.scrolled_at = Some(std::time::Instant::now());
+        }
         // A rail jump glides: eased out over 220 ms.
         if let Some((from, to, began)) = self.glide {
             let done = (began.elapsed().as_secs_f32() / 0.22).min(1.);
@@ -3492,7 +3624,8 @@ impl Render for Riff {
             .on_key_down(cx.listener(Self::key))
             .on_mouse_move(cx.listener(Self::drag))
             .on_mouse_up(MouseButton::Left, cx.listener(|riff, _, _, cx| {
-                if riff.scrubbing.take().is_some() {
+                // `|`, not `||`: both drags end, whichever was on.
+                if riff.scrubbing.take().is_some() | riff.grab.take().is_some() {
                     cx.notify();
                 }
                 riff.drop_edge(cx)
@@ -3544,16 +3677,22 @@ impl Render for Riff {
                             .flex()
                             .gap_1()
                             .child(
-                                uniform_list(
-                                    "library",
-                                    self.rows.len(),
-                                    cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
-                                        range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
-                                    }),
-                                )
-                                .track_scroll(self.scroll.clone())
-                                .flex_1()
-                                .h_full(),
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .h_full()
+                                    .child(
+                                        uniform_list(
+                                            "library",
+                                            self.rows.len(),
+                                            cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
+                                                range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
+                                            }),
+                                        )
+                                        .track_scroll(self.scroll.clone())
+                                        .size_full(),
+                                    )
+                                    .child(self.render_scrollbar(cx)),
                             )
                             .when(self.browsing(), |d| d.child(self.render_rail(cx)))
                             // The letter being dragged to, large, while the list glides.
