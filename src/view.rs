@@ -8,6 +8,7 @@ use crate::library::{self, Track};
 use crate::media::Media;
 use crate::playlist::Playlist;
 use crate::regions::{Region, Regions};
+use crate::session::Session;
 use crate::resume::{Resume, Spot};
 use crate::variations::{self, Variation, Variations};
 use crate::scan;
@@ -29,6 +30,8 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 const POLL: Duration = Duration::from_millis(40);
+/// How often the session is checked and, when it changed, saved.
+const SESSION_EVERY: Duration = Duration::from_secs(1);
 /// The scrollbar stays this long after the list stops moving, as in Zed.
 const SCROLLBAR_LINGERS: Duration = Duration::from_secs(1);
 const ROW: f32 = 60.;
@@ -42,6 +45,8 @@ const SPEEDS: [f32; 5] = [0.5, 0.6, 0.7, 0.8, 0.9];
 const SPEED_LABELS: [&str; 5] = ["50%", "60%", "70%", "80%", "90%"];
 /// How much the practice view shows around the playhead before any zooming.
 const SPAN: Duration = Duration::from_secs(10);
+/// A press this close to a strip's top grabs the marker by its flag.
+const FLAG: f32 = 10.;
 /// A click this close to a loop edge grabs it.
 const GRAB: f32 = 8.;
 /// How long a scan's result stays in the search bar.
@@ -146,6 +151,8 @@ impl Render for Tip {
 enum Edge {
     Start,
     End,
+    /// The marker, dragged like a loop edge.
+    Marker,
 }
 
 enum Row {
@@ -207,11 +214,15 @@ pub struct Riff {
     kept: std::time::Instant,
     /// Each recording's loop while another plays, so switching back brings it back.
     loops: HashMap<PathBuf, crate::audio::Loop>,
+    /// Each recording's marker, where `o` plays from (`m` drops it).
+    marks: HashMap<PathBuf, Duration>,
+    /// A section edge being dragged in the section lane: which section, and its start
+    /// (or end).
+    shaping: Option<(usize, bool)>,
+    /// The section lane, where it was last drawn, spanning the whole song.
+    lane: Strip,
     /// Files being made a variation of a song, in the background.
     adding: Option<(PathBuf, Receiver<Result<Variation, String>>)>,
-    /// The region the loop came from: changes to the loop's edges are saved into it, until
-    /// the loop slides away, is cleared, or another region or song plays.
-    bound: Option<Region>,
     wave_error: Option<String>,
     /// How much of the song the detail view shows.
     span: Duration,
@@ -255,6 +266,11 @@ pub struct Riff {
     /// shows while the list moves and a moment after.
     seen_offset: Pixels,
     scrolled_at: Option<std::time::Instant>,
+    /// The session as last saved, and when it was last checked.
+    saved: Session,
+    saved_at: std::time::Instant,
+    /// The playhead as last kept in `resume.json`.
+    kept_at: Duration,
 }
 
 fn cache_file() -> PathBuf {
@@ -271,6 +287,10 @@ fn resume_file() -> PathBuf {
 
 fn variations_file() -> PathBuf {
     state::data_dir().join("variations.json")
+}
+
+fn session_file() -> PathBuf {
+    state::data_dir().join("session.json")
 }
 
 fn regions_file() -> PathBuf {
@@ -351,12 +371,14 @@ impl Riff {
             grid: false,
             regions: Regions::load(&regions_file()),
             naming: None,
-            bound: None,
             variations: Variations::load(&variations_file()),
             variation: 0,
             slow: false,
             speed: 2,
             loops: HashMap::new(),
+            marks: HashMap::new(),
+            shaping: None,
+            lane: Strip::default(),
             resume: Resume::load(&resume_file()),
             kept: std::time::Instant::now(),
             adding: None,
@@ -387,9 +409,13 @@ impl Riff {
             over_track: false,
             seen_offset: Pixels::ZERO,
             scrolled_at: None,
+            saved: Session::default(),
+            saved_at: std::time::Instant::now(),
+            kept_at: Duration::ZERO,
         };
         riff.message = riff.audio.error.clone().map(|e| (e, true));
         riff.reindex(None);
+        riff.restore(Session::load(&session_file()));
         riff.rescan();
         riff
     }
@@ -551,6 +577,9 @@ impl Riff {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.audio.tick();
+        if self.saved_at.elapsed() > SESSION_EVERY {
+            self.save_session();
+        }
         if self.scrolled_at.is_some_and(|at| at.elapsed() > SCROLLBAR_LINGERS) {
             self.scrolled_at = None;
             changed = true;
@@ -814,13 +843,14 @@ impl Riff {
     /// from the top.
     fn play(&mut self, track: Track, pick: bool) {
         self.keep_spot();
+        (self.shaping, self.dragging) = (None, None);
         self.store_resume();
-        self.bound = None;
         self.variation = 0;
         self.muted.clear();
         self.solo = None;
         let spot = self.resume.of(&track.path).cloned().unwrap_or_default();
         self.loops.extend(spot.loops.clone());
+        self.marks.extend(spot.marks.clone());
         self.slow = spot.slow;
         self.speed = spot.speed.min(SPEEDS.len() - 1);
         self.audio.set_speed(if self.slow { SPEEDS[self.speed] } else { 1.0 });
@@ -854,9 +884,66 @@ impl Riff {
         }
     }
 
+    /// What riff shows now, as the next start should show it.
+    fn session(&self) -> Session {
+        Session {
+            playing: self.now.as_ref().map(|n| n.path.clone()),
+            selected: self.selected_path(),
+            practice: self.practice,
+            album: self.album.as_ref().map(|t| t.path.clone()),
+            artist: self.artist.as_ref().map(|t| t.path.clone()),
+            grid: self.grid,
+            span: Some(self.span),
+        }
+    }
+
+    /// Saves the session when it changed, and the paused playhead when it moved (while
+    /// playing, `poll` keeps it every few seconds), so closing the window loses nothing.
+    fn save_session(&mut self) {
+        self.saved_at = std::time::Instant::now();
+        let session = self.session();
+        if session != self.saved {
+            if let Err(e) = session.store(&session_file()) {
+                self.message = Some((format!("couldn't save the session: {e}"), true));
+            }
+            self.saved = session;
+        }
+        if self.now.is_some()
+            && !self.audio.playing()
+            && !self.audio.loading()
+            && self.audio.position() != self.kept_at
+        {
+            self.keep_spot();
+            self.store_resume();
+        }
+    }
+
+    /// Opens as riff was left: the song that was playing, paused where it was (in its
+    /// recording, with its loops), the view, the grid and zoom, and the highlighted song.
+    fn restore(&mut self, session: Session) {
+        let track = |riff: &Self, path: &Option<PathBuf>| {
+            path.as_ref().and_then(|p| riff.by_path.get(p)).map(|&i| riff.tracks[i].clone())
+        };
+        self.grid = session.grid;
+        if let Some(span) = session.span {
+            self.span = span;
+        }
+        if let Some(song) = track(self, &session.playing) {
+            self.play(song, true);
+            self.audio.open_paused();
+        }
+        self.album = track(self, &session.album);
+        self.artist = track(self, &session.artist).filter(|_| self.album.is_none());
+        self.practice = session.practice;
+        self.reindex(session.selected.clone());
+        self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+        self.saved = session;
+    }
+
     /// Notes where the playing song is: its recording, slow-down, playhead and loops.
     fn keep_spot(&mut self) {
         let Some(now) = self.now.clone() else { return };
+        self.kept_at = self.audio.position();
         if let Some(recording) = self.recording() {
             self.loops.insert(recording, self.audio.looping);
         }
@@ -866,12 +953,17 @@ impl Riff {
             .filter_map(|r| self.loops.get(&r).map(|l| (r, *l)))
             .filter(|(_, l)| l.start.is_some() || l.end.is_some())
             .collect();
+        let marks = std::iter::once(now.path.clone())
+            .chain(self.variations.of(&now.path).iter().filter_map(|v| v.files.first().cloned()))
+            .filter_map(|r| self.marks.get(&r).map(|m| (r, *m)))
+            .collect();
         let spot = Spot {
             variation: self.variation,
             slow: self.slow,
             speed: self.speed,
             at: self.audio.position(),
             loops,
+            marks,
         };
         self.resume.keep(&now.path, spot);
         self.kept = std::time::Instant::now();
@@ -954,7 +1046,6 @@ impl Riff {
             Action::AddVariation => self.pick_variation(cx),
             _ => {
                 self.perform(action);
-                self.follow_region(action);
             }
         }
         cx.notify();
@@ -1096,8 +1187,9 @@ impl Riff {
                 (v.files.clone(), variations::default_gains(v), v.label.clone())
             }
         };
-        self.bound = None;
         self.variation = target;
+        // A drag belongs to the recording it started on.
+        (self.shaping, self.dragging) = (None, None);
         let looping = self.recording().and_then(|r| self.loops.get(&r).copied()).unwrap_or_default();
         // A stem muted from the start (the metronome) shows as muted; one recording has
         // no stems to mute.
@@ -1349,6 +1441,7 @@ impl Riff {
             Some(Action::Quit) => {
                 self.keep_spot();
                 self.store_resume();
+                self.save_session();
                 return cx.quit();
             }
             Some(Action::Help) => {
@@ -1445,7 +1538,6 @@ impl Riff {
         }
         if let Some(action) = action {
             self.perform(action);
-            self.follow_region(action);
             cx.notify();
         }
     }
@@ -1477,8 +1569,21 @@ impl Riff {
             },
             Action::ToStart => self.audio.seek(Duration::ZERO),
             Action::FromLoopStart => {
-                let start = self.audio.looping.start.unwrap_or_default();
-                self.audio.play_from(start);
+                self.audio.play_from(crate::audio::replay_from(self.marker(), self.audio.looping));
+            }
+            Action::Marker => {
+                let Some(recording) = self.recording() else { return };
+                let at = self.snap(self.audio.position());
+                match crate::audio::place_marker(self.marker(), at) {
+                    Some(m) => {
+                        self.marks.insert(recording, m);
+                        self.message = Some((format!("marker at {}, o plays from it", ui::clock(m)), false));
+                    }
+                    None => {
+                        self.marks.remove(&recording);
+                        self.message = Some(("marker cleared".into(), false));
+                    }
+                }
             }
             Action::Previous => self.previous_song(),
             Action::Next => {
@@ -1573,15 +1678,16 @@ impl Riff {
                 self.apply_speed();
             }
             Action::Speed(faster) => {
-                // Stepping from off starts at the preset; on, it moves through them.
-                if self.slow {
-                    self.speed = if faster {
-                        (self.speed + 1).min(SPEEDS.len() - 1)
-                    } else {
-                        self.speed.saturating_sub(1)
-                    };
+                // Full speed is the step after the fastest preset: faster from 90% turns
+                // slow-down off, slower from full speed goes to 90%. S jumps to the preset.
+                let top = SPEEDS.len() - 1;
+                match (self.slow, faster) {
+                    (true, true) if self.speed == top => self.slow = false,
+                    (true, true) => self.speed += 1,
+                    (true, false) => self.speed = self.speed.saturating_sub(1),
+                    (false, false) => (self.slow, self.speed) = (true, top),
+                    (false, true) => return,
                 }
-                self.slow = true;
                 self.apply_speed();
             }
             Action::Variation => self.next_variation(),
@@ -1608,7 +1714,6 @@ impl Riff {
                     self.variation = 0;
                     self.muted.clear();
                     self.solo = None;
-                    self.bound = None;
                     let looping = self.loops.get(&now.path).copied().unwrap_or_default();
                     self.audio.switch(std::slice::from_ref(&now.path), &[1.0], Duration::ZERO, looping);
                     self.read_wave(vec![now.path.clone()]);
@@ -1622,8 +1727,8 @@ impl Riff {
             }
             Action::RemoveRegion => {
                 let Some(recording) = self.recording() else { return };
-                if let Some(name) = self.regions.remove(&recording, self.audio.looping) {
-                    self.bound = None;
+                let current = self.regions.current(&recording, self.audio.looping, self.audio.position());
+                if let Some(name) = current.and_then(|i| self.regions.remove(&recording, i)) {
                     // Said first, so a failure to store replaces it rather than hides.
                     self.message = Some((format!("removed {name}"), false));
                     self.store_regions();
@@ -1649,44 +1754,28 @@ impl Riff {
             .unwrap_or_else(|| Region::default_name(start, end));
         self.message = Some((format!("saved {name}"), false));
         let region = Region { name, start, end };
-        self.bound = Some(region.clone());
         self.regions.save(&recording, region);
         self.store_regions();
     }
 
     fn store_regions(&mut self) {
         if let Err(e) = self.regions.store(&regions_file()) {
-            self.message = Some((format!("couldn't save regions: {e}"), true));
+            self.message = Some((format!("couldn't save sections: {e}"), true));
         }
     }
 
-    /// Keeps the bound region in step with the loop after `action`: its new edges are
-    /// saved; sliding away or clearing lets go of it.
-    fn follow_region(&mut self, action: Action) {
-        if matches!(action, Action::Slide(_) | Action::LoopClear) {
-            self.bound = None;
-            return;
-        }
-        let looping = self.audio.looping;
-        let (Some(bound), Some(recording), Some(end)) = (self.bound.clone(), self.recording(), looping.end)
-        else {
-            return;
-        };
-        let start = looping.start.unwrap_or_default();
-        if (bound.start, bound.end) == (start, end) {
-            return;
-        }
-        self.bound = self.regions.reshape(&recording, &bound, start, end);
-        self.store_regions();
-    }
-
-    /// A region as the loop, framed and playing from its start.
+    /// A section as the loop, framed and playing from its start. From then on the loop
+    /// is its own: changing it leaves the section as it is.
     fn play_region(&mut self, region: &Region) {
-        self.bound = Some(region.clone());
         self.audio.looping =
             crate::audio::Loop { start: Some(region.start), end: Some(region.end), off: false };
         self.frame_loop();
         self.audition(Edge::Start);
+    }
+
+    /// The playing recording's marker.
+    fn marker(&self) -> Option<Duration> {
+        self.recording().and_then(|r| self.marks.get(&r).copied())
     }
 
     /// The recording that plays, as regions and loops know it: the song's file, or a
@@ -1973,27 +2062,33 @@ impl Riff {
         }
     }
 
-    /// A click on a strip: grabs a loop edge near it, sets the loop's end with shift,
-    /// and otherwise seeks.
+    /// A click on a strip: grabs a loop edge near it (the loop's only, never a
+    /// section's), sets the loop's end with shift, and otherwise seeks.
     fn strip_down(&mut self, strip: &Strip, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let Some((at, per_px)) = strip.time_at(event.position.x) else { return };
         let looping = self.audio.looping;
         let near = |edge: Option<Duration>| {
             edge.is_some_and(|e| (e.as_secs_f64() - at.as_secs_f64()).abs() <= GRAB as f64 * per_px)
         };
-        if near(looping.end) {
+        // The marker by its flag (the strip's top), so it can be grabbed even on a loop
+        // edge; anywhere else along it only where no loop edge is.
+        let by_flag = f32::from(event.position.y - strip.0.get().0.origin.y) <= FLAG;
+        let marker = self.marker();
+        if near(marker) && (by_flag || !(near(looping.start) || near(looping.end))) {
+            self.dragging = Some((Edge::Marker, strip.clone()));
+        } else if near(looping.end) {
             self.dragging = Some((Edge::End, strip.clone()));
         } else if near(looping.start) {
             self.dragging = Some((Edge::Start, strip.clone()));
         } else if event.modifiers.shift {
             self.audio.looping.set_end(self.snap(at));
-            self.follow_region(Action::LoopEnd);
             self.frame_loop();
             if self.audio.looping.active() {
                 self.audition(Edge::Start);
             }
         } else {
-            self.audio.seek(at);
+            // On the grid the playhead lands on the nearest beat; ⌥ places it freely.
+            self.audio.seek(if event.modifiers.alt { at } else { self.snap(at) });
         }
         cx.notify();
     }
@@ -2015,6 +2110,17 @@ impl Riff {
             }
             return cx.notify();
         }
+        if let Some((i, start)) = self.shaping {
+            if event.pressed_button != Some(MouseButton::Left) {
+                return self.drop_edge(cx);
+            }
+            let (Some(recording), Some((at, _))) = (self.recording(), self.lane.time_at(event.position.x)) else {
+                return;
+            };
+            let at = if event.modifiers.alt { at } else { self.snap(at) };
+            self.shaping = self.regions.move_edge(&recording, i, start, at).map(|i| (i, start));
+            return cx.notify();
+        }
         let Some((edge, strip)) = &self.dragging else { return };
         if event.pressed_button != Some(MouseButton::Left) {
             return self.drop_edge(cx);
@@ -2026,15 +2132,27 @@ impl Riff {
         match edge {
             Edge::Start => self.audio.looping.move_start(at),
             Edge::End => self.audio.looping.move_end(at, song),
+            Edge::Marker => {
+                if let Some(recording) = self.recording() {
+                    self.marks.insert(recording, at);
+                }
+            }
         }
         cx.notify();
     }
 
-    /// Lets go of a dragged edge, and plays around where it landed.
+    /// Lets go of a dragged edge: a section's is saved, the loop's plays around where it
+    /// landed, the marker just stays.
     fn drop_edge(&mut self, cx: &mut Context<Self>) {
+        if self.shaping.take().is_some() {
+            self.store_regions();
+            cx.notify();
+        }
         if let Some((edge, _)) = self.dragging.take() {
-            self.follow_region(Action::NudgeStart(0.));
-            self.audition(edge);
+            // A marker is only placed; o plays from it.
+            if edge != Edge::Marker {
+                self.audition(edge);
+            }
             cx.notify();
         }
     }
@@ -2344,7 +2462,8 @@ impl Riff {
 
         let progress = div()
             .id("progress")
-            .tooltip(self.tip("Click to jump; drag a loop edge; shift-click ends the loop", &[]))
+            .tooltip(self.tip("Click to jump; drag a loop edge or the marker; shift-click ends the loop", &[]))
+            .children(duration.map(|d| edge_grips(looping, self.marker(), Duration::ZERO, d)).into_iter().flatten())
             .relative()
             .h(px(16.))
             .flex()
@@ -2390,6 +2509,16 @@ impl Riff {
                             .rounded_sm()
                             .bg(rgb(t().loops))
                             .opacity(if looping.off { 0.15 } else { 0.45 })
+                    }))
+                    // The marker, where o plays from.
+                    .children(self.marker().map(|m| {
+                        div()
+                            .absolute()
+                            .top(px(-5.))
+                            .left(relative(fraction(m)))
+                            .w(px(2.))
+                            .h(px(14.))
+                            .bg(rgb(t().accent))
                     }))
                     .children([looping.start, looping.end].into_iter().flatten().map(|edge| {
                         div()
@@ -2677,7 +2806,17 @@ impl Riff {
             let down = strip.clone();
             div()
                 .id(id)
-                .tooltip(self.tip("Click to jump; drag a loop edge; shift-click ends the loop", &[]))
+                .tooltip(self.tip("Click to jump; drag a loop edge or the marker; shift-click ends the loop; scroll to zoom", &[]))
+                .children(edge_grips(view.looping, view.marker, view.from, view.to))
+                // The wheel zooms, as - and = do: a mouse notch is about one step, and a
+                // trackpad's many small deltas add up to the same.
+                .on_scroll_wheel(cx.listener(|riff, e: &gpui::ScrollWheelEvent, _, cx| {
+                    let dy = f32::from(e.delta.pixel_delta(px(20.)).y) as f64;
+                    if dy != 0. {
+                        riff.perform(Action::Zoom(keys::ZOOM.powf(-dy / 20.)));
+                        cx.notify();
+                    }
+                }))
                 .relative()
                 .rounded_lg()
                 .bg(rgb(t.surface))
@@ -2699,6 +2838,7 @@ impl Riff {
             contour: true,
             beats: None,
             grid: self.grid,
+            marker: self.marker(),
         };
         div()
             .id("practice")
@@ -2788,6 +2928,7 @@ impl Riff {
                     div()
                         .id(("stem-wave", i))
                         .tooltip(self.tip("Click to jump", &[]))
+                        .children(edge_grips(self.audio.looping, self.marker(), Duration::ZERO, song))
                         .flex_1()
                         .h_full()
                         .relative()
@@ -2813,6 +2954,7 @@ impl Riff {
                                     contour: false,
                                     beats: None,
                                     grid: false,
+                                    marker: self.marker(),
                                 },
                             )
                             .absolute()
@@ -2829,20 +2971,45 @@ impl Riff {
         let t = t();
         let recording = self.recording()?;
         let list = self.regions.of(&recording).to_vec();
-        let current = self.regions.matching(&recording, self.audio.looping).cloned();
+        let current = self.regions.current(&recording, self.audio.looping, self.audio.position());
         let length = song.as_secs_f64().max(1e-3);
         let empty = list.is_empty();
-        let lane = div().flex_1().relative().h(px(26.)).when(empty, |d| {
-            d.flex().items_center().px_2().text_xs().text_color(rgb(t.dim)).child("No regions yet: set a loop, then save it")
-        });
+        let strip = self.lane.clone();
+        let lane = div()
+            .flex_1()
+            .relative()
+            .h(px(26.))
+            .child(canvas(move |bounds, _, _| strip.set(bounds, Duration::ZERO, song), |_, _, _, _| {}).absolute().size_full())
+            .when(empty, |d| {
+                d.flex().items_center().px_2().text_xs().text_color(rgb(t.dim)).child("No sections yet: set a loop, then save it with r")
+            });
+        // A section's edge, grabbed to drag it (snapping to beats on the grid, ⌥ freely).
+        let handle = |i: usize, start: bool| {
+            div()
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(px(6.))
+                .when(start, |d| d.left_0())
+                .when(!start, |d| d.right_0())
+                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |riff, _, _, cx| {
+                        cx.stop_propagation();
+                        riff.shaping = Some((i, start));
+                        cx.notify();
+                    }),
+                )
+        };
         let lane = lane.children(list.into_iter().enumerate().map(|(i, region)| {
-            let lit = current.as_ref() == Some(&region);
+            let lit = current == Some(i);
             let left = (region.start.as_secs_f64() / length) as f32;
             let wide = ((region.end - region.start).as_secs_f64() / length) as f32;
             let name = region.name.clone();
             div()
                 .id(("region", i))
-                .tooltip(self.tip(format!("Play {}", region.name), &[Action::Region(false), Action::Region(true)]))
+                .tooltip(self.tip(format!("Loop {}; drag its edges to change it", region.name), &[Action::Region(false), Action::Region(true)]))
                 .absolute()
                 .top_0()
                 .h_full()
@@ -2853,13 +3020,15 @@ impl Riff {
                 .items_center()
                 .overflow_hidden()
                 .rounded_sm()
-                .bg(tint(t.loops, if lit { 0x60 } else { 0x26 }))
+                .bg(tint(t.sections, if lit { 0x60 } else { 0x26 }))
                 .border_l_2()
-                .border_color(tint(t.loops, 0xff))
+                .border_color(tint(t.sections, 0xff))
                 .cursor_pointer()
                 .text_xs()
                 .text_color(rgb(if lit { t.text } else { t.dim }))
                 .child(div().truncate().child(name))
+                .child(handle(i, true))
+                .child(handle(i, false))
                 .on_click(cx.listener(move |riff, _, _, cx| {
                     riff.play_region(&region);
                     cx.notify();
@@ -2870,13 +3039,13 @@ impl Riff {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(pill().child(self.tool("region-prev", "region-prev", "Previous region", Action::Region(false), false, cx)))
+                .child(pill().child(self.tool("region-prev", "region-prev", "Loop the previous section", Action::Region(false), false, cx)))
                 .child(lane)
                 .child(
                     pill()
-                        .child(self.tool("region-next", "region-next", "Next region", Action::Region(true), false, cx))
-                        .child(self.tool("region-save", "bookmark-plus", "Save the loop as a region", Action::SaveRegion, false, cx))
-                        .child(self.tool("region-delete", "bookmark-minus", "Delete the loop's region", Action::RemoveRegion, false, cx)),
+                        .child(self.tool("region-next", "region-next", "Loop the next section", Action::Region(true), false, cx))
+                        .child(self.tool("region-save", "bookmark-plus", "Save the loop as a section, or rename its section", Action::SaveRegion, false, cx))
+                        .child(self.tool("region-delete", "bookmark-minus", "Delete the section playing", Action::RemoveRegion, false, cx)),
                 )
                 .into_any_element(),
         )
@@ -2974,7 +3143,8 @@ impl Riff {
             )
             .child(
                 pill()
-                    .child(self.tool("loop-play", "loop-play", "Play from the loop start", Action::FromLoopStart, false, cx))
+                    .child(self.tool("marker", "flag", "Marker here, again to clear it", Action::Marker, self.marker().is_some(), cx))
+                    .child(self.tool("loop-play", "loop-play", "Play from the marker, or the loop start", Action::FromLoopStart, false, cx))
                     .child(self.tool("bar-loop", "repeat", "Loop on or off, keeping its edges", Action::LoopSwitch, looping.looping(), cx))
                     .child(self.tool("loop-clear", "loop-clear", "Clear the loop", Action::LoopClear, false, cx)),
             )
@@ -3135,8 +3305,8 @@ impl Riff {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(ui::icon("bookmark-plus", 16., t.loops))
-                            .child(div().text_color(rgb(t.text)).child(if renaming { "Rename this region" } else { "Name this region" }))
+                            .child(ui::icon("bookmark-plus", 16., t.sections))
+                            .child(div().text_color(rgb(t.text)).child(if renaming { "Rename this section" } else { "Name this section" }))
                             .child(div().flex_1())
                             .child(div().font_family(MONO).text_xs().text_color(rgb(t.loops)).child(where_.clone())),
                     )
@@ -3419,6 +3589,8 @@ struct Painting {
     /// Beat ticks behind the waveform, brighter while the grid is on.
     beats: Option<Rc<Beats>>,
     grid: bool,
+    /// Where `o` plays from, drawn as a flag.
+    marker: Option<Duration>,
 }
 
 fn tint(color: u32, alpha: u8) -> gpui::Rgba {
@@ -3536,9 +3708,40 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
             for at in [p.looping.start, p.looping.end].into_iter().flatten() {
                 soft(window, x_of(at) - 1., x_of(at) + 1., 0., h, tint(t.loops, edge));
             }
+            if let Some(m) = p.marker.filter(|m| *m >= p.from && *m <= p.to) {
+                let x = x_of(m);
+                soft(window, x - 1., x + 1., 0., h, tint(t.accent, 0xd0));
+                window.paint_quad(fill(rect(x - 1., 0., 8., 6.), tint(t.accent, 0xff)));
+            }
             soft(window, x_of(p.at), x_of(p.at) + 1., 0., h, tint(t.text, 0xff));
         },
     )
+}
+
+/// Grips over the loop's edges and the marker on a strip showing `from` to `to`, as wide as a click
+/// that grabs an edge: there the cursor becomes a resize arrow. The strip under them
+/// still takes the press.
+fn edge_grips(
+    looping: crate::audio::Loop,
+    marker: Option<Duration>,
+    from: Duration,
+    to: Duration,
+) -> impl Iterator<Item = Div> {
+    let span = (to.saturating_sub(from)).as_secs_f64();
+    [looping.start, looping.end, marker]
+        .into_iter()
+        .flatten()
+        .filter(move |&e| span > 0. && e >= from && e <= to)
+        .map(move |e| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(relative(((e - from).as_secs_f64() / span) as f32))
+                .ml(px(-GRAB))
+                .w(px(2. * GRAB))
+                .cursor(gpui::CursorStyle::ResizeLeftRight)
+        })
 }
 
 /// A dimmed layer over the whole window, holding a sheet in its middle.

@@ -1,6 +1,9 @@
-//! Regions: loops saved under a name, per song (`r` saves, `n` `N` jump, `x` deletes).
-//! Kept in `regions.json` in the data folder, keyed by the song's path, so nothing is
-//! written next to the music.
+//! Sections of a song (called regions in the code and the data file): named stretches,
+//! saved per recording (`r` saves the loop as one, `n` `N` play the next or previous,
+//! `x` deletes). A section is not the loop: playing one sets the loop to it, and after
+//! that the two are apart, so the loop can shrink inside a section or leave it without
+//! changing it. Sections change by dragging their edges. Kept in `regions.json` in the
+//! data folder, keyed by the recording's path, so nothing is written next to the music.
 
 use crate::audio::Loop;
 use serde::{Deserialize, Serialize};
@@ -10,6 +13,8 @@ use std::time::Duration;
 
 /// A loop this close to a region's edges is that region.
 const SAME: Duration = Duration::from_millis(5);
+/// A section dragged shorter stops at this.
+const MIN_LENGTH: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {
@@ -52,23 +57,45 @@ impl Regions {
         list.insert(at, region);
     }
 
-    /// Moves a region (found by its stretch) to new edges, keeping its name and the
-    /// song order. Returns the region as it is now.
-    pub fn reshape(&mut self, song: &Path, from: &Region, start: Duration, end: Duration) -> Option<Region> {
-        let list = self.0.get_mut(song)?;
-        let i = list.iter().position(|r| r.is(from.start, from.end))?;
-        let mut region = list.remove(i);
-        (region.start, region.end) = (start, end);
-        self.save(song, region.clone());
-        Some(region)
+    /// The section in play: the one the loop is, or else the shortest one holding the
+    /// playhead (a solo inside a verse is the solo). Its place in the list.
+    pub fn current(&self, song: &Path, looping: Loop, at: Duration) -> Option<usize> {
+        let list = self.of(song);
+        if let (Some(end), start) = (looping.end, looping.start.unwrap_or_default())
+            && let Some(i) = list.iter().position(|r| r.is(start, end))
+        {
+            return Some(i);
+        }
+        (0..list.len())
+            .filter(|&i| list[i].start <= at && at < list[i].end)
+            .min_by_key(|&i| list[i].end - list[i].start)
     }
 
-    /// Removes the region a loop is. Returns its name.
-    pub fn remove(&mut self, song: &Path, looping: Loop) -> Option<String> {
-        let name = self.matching(song, looping)?.name.clone();
-        let (start, end) = (looping.start.unwrap_or_default(), looping.end?);
+    /// Moves section `i`'s start (or end) to `at`, keeping it at least `MIN_LENGTH` long
+    /// and the list in song order. Returns where the section is in the list now.
+    pub fn move_edge(&mut self, song: &Path, i: usize, start: bool, at: Duration) -> Option<usize> {
         let list = self.0.get_mut(song)?;
-        list.retain(|r| !r.is(start, end));
+        if i >= list.len() {
+            return None;
+        }
+        let mut region = list.remove(i);
+        if start {
+            region.start = at.min(region.end.saturating_sub(MIN_LENGTH));
+        } else {
+            region.end = at.max(region.start + MIN_LENGTH);
+        }
+        let at = list.partition_point(|r| r.start <= region.start);
+        list.insert(at, region);
+        Some(at)
+    }
+
+    /// Removes section `i`. Returns its name.
+    pub fn remove(&mut self, song: &Path, i: usize) -> Option<String> {
+        let list = self.0.get_mut(song)?;
+        if i >= list.len() {
+            return None;
+        }
+        let name = list.remove(i).name;
         if list.is_empty() {
             self.0.remove(song);
         }
@@ -151,26 +178,41 @@ mod tests {
     }
 
     #[test]
-    fn a_reshaped_region_keeps_its_name_and_place_in_order() {
+    fn a_dragged_edge_keeps_the_name_the_order_and_a_length() {
         let song = Path::new("/m/song.mp3");
         let mut r = Regions::default();
         r.save(song, region("Verse", 10.0, 20.0));
         r.save(song, region("Solo", 30.0, 40.0));
-        let solo = r.of(song)[1].clone();
-        let moved = r.reshape(song, &solo, s(5.0), s(9.5)).unwrap();
-        assert_eq!(moved, region("Solo", 5.0, 9.5));
+        assert_eq!(r.move_edge(song, 1, true, s(5.0)), Some(0));
         let names: Vec<&str> = r.of(song).iter().map(|x| x.name.as_str()).collect();
         assert_eq!(names, ["Solo", "Verse"]);
-        assert!(r.reshape(song, &solo, s(1.0), s(2.0)).is_none());
+        assert_eq!(r.of(song)[0], region("Solo", 5.0, 40.0));
+        r.move_edge(song, 0, false, s(1.0));
+        assert_eq!(r.of(song)[0], region("Solo", 5.0, 5.1));
+        assert_eq!(r.move_edge(song, 7, true, s(1.0)), None);
     }
 
     #[test]
-    fn removing_takes_the_loops_region_only() {
+    fn the_current_section_is_the_loops_or_the_tightest_around_the_playhead() {
+        let song = Path::new("/m/song.mp3");
+        let mut r = Regions::default();
+        r.save(song, region("Verse", 10.0, 40.0));
+        r.save(song, region("Lick", 20.0, 24.0));
+        r.save(song, region("Chorus", 40.0, 60.0));
+        let none = Loop::default();
+        assert_eq!(r.current(song, looped(40.0, 60.0), s(15.0)), Some(2));
+        assert_eq!(r.current(song, looped(21.0, 22.0), s(21.5)), Some(1));
+        assert_eq!(r.current(song, none, s(12.0)), Some(0));
+        assert_eq!(r.current(song, none, s(70.0)), None);
+    }
+
+    #[test]
+    fn removing_takes_one_section() {
         let song = Path::new("/m/song.mp3");
         let mut r = Regions::default();
         r.save(song, region("A", 0.0, 10.0));
-        assert_eq!(r.remove(song, looped(0.0, 9.0)), None);
-        assert_eq!(r.remove(song, looped(0.0, 10.0)), Some("A".into()));
+        assert_eq!(r.remove(song, 3), None);
+        assert_eq!(r.remove(song, 0), Some("A".into()));
         assert_eq!(r, Regions::default());
     }
 

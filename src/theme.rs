@@ -20,6 +20,8 @@ pub struct Theme {
     pub error: u32,
     /// The loop: a colour of its own, so it never blends into the accent or waveform.
     pub loops: u32,
+    /// Sections: a colour apart from the loop's too, since a loop can sit on a section.
+    pub sections: u32,
 }
 
 pub const DEFAULT_NAME: &str = "Gold";
@@ -38,6 +40,7 @@ pub fn gold() -> Theme {
         faint: 0x3f392f,
         error: 0xe0563f,
         loops: 0x9fbf6e,
+        sections: 0x7aa2c8,
     }
 }
 
@@ -102,6 +105,11 @@ pub fn from_zed(theme: &Value) -> Option<Theme> {
         .filter_map(|k| colour(&style[*k], bg))
         .find(|&c| [accent, dim, bg].iter().all(|&other| apart(c, other)))
         .unwrap_or(fallback.loops);
+    let sections = ["terminal.ansi.blue", "terminal.ansi.magenta", "terminal.ansi.cyan", "terminal.ansi.yellow", "terminal.ansi.green"]
+        .iter()
+        .filter_map(|k| colour(&style[*k], bg))
+        .find(|&c| [accent, dim, bg, loops].iter().all(|&other| apart(c, other)))
+        .unwrap_or(fallback.sections);
     Some(Theme {
         name,
         bg,
@@ -117,6 +125,7 @@ pub fn from_zed(theme: &Value) -> Option<Theme> {
         faint: pick(&["border.variant", "border"], fallback.faint),
         error: pick(&["error"], fallback.error),
         loops,
+        sections,
     })
 }
 
@@ -252,6 +261,19 @@ mod tests {
         theme["style"]["terminal.ansi.cyan"] = json!("#e0af68");
         assert_eq!(from_zed(&theme).unwrap().loops, 0xe0af68);
         assert_eq!(from_zed(&tokyo()).unwrap().loops, gold().loops);
+    }
+
+    #[test]
+    fn sections_take_a_colour_apart_from_the_loop_and_the_accent() {
+        let mut theme = tokyo();
+        theme["style"]["terminal.ansi.cyan"] = json!("#7dcfff"); // the accent itself
+        theme["style"]["terminal.ansi.magenta"] = json!("#bb9af7"); // the loop's
+        theme["style"]["terminal.ansi.blue"] = json!("#9d7cd8"); // a purple like the loop's
+        theme["style"]["terminal.ansi.yellow"] = json!("#e0af68");
+        let t = from_zed(&theme).unwrap();
+        assert_eq!(t.loops, 0xbb9af7);
+        assert_eq!(t.sections, 0xe0af68);
+        assert!(apart(gold().sections, gold().loops));
     }
 
     #[test]

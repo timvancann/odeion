@@ -1,7 +1,7 @@
 # Working in this repo
 
 Riff is Tim's practice player: find a song in his music folder, play it, and practise
-it: loops to the sample, a waveform with beats, saved regions, slow-down, and other
+it: loops to the sample, a marker, a waveform with beats, named sections, slow-down, and other
 recordings of the song (backing tracks, stem sets) to switch between. It began as a way
 into Transcribe! (whose file finding is painful) and grew into the practice tool, by
 Tim's choice; Transcribe! is still a button away for deeper work. Practice features
@@ -41,8 +41,14 @@ and draws:
   aligned at +1.907 s, his Moises stems at +0.047 s (encoder delay).
 - `resume.rs`: where each song was left (`resume.json`): its recording (song or
   variation), slow-down, playhead and each recording's loop.
-- `regions.rs`: loops saved under a name per song (`regions.json` in the data folder):
-  order, renaming the same stretch, next and previous, removal.
+- `session.rs`: what riff showed when it closed (`session.json`): the playing song,
+  the highlighted one, practice, album or artist view, grid and zoom. Riff opens that
+  way, the song paused where it was (its recording, loops and playhead come from
+  `resume.json`), never playing on its own. Saved within a second of a change and on
+  ⌘Q, since closing the window skips the quit path.
+- `regions.rs`: sections (still "regions" in the code and `regions.json`): named
+  stretches per recording, in order; renaming the same stretch, dragging an edge,
+  which one is current, next and previous, removal.
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
   app that last reported a song, not as key presses, so this is the only way in.
 - `state.rs`: paths, settings, favourites, opening a song in Transcribe!.
@@ -82,7 +88,7 @@ key to both or the test fails.
   anywhere to search", where Space could not pause during a search.
 - **Vim keys are on by default** (a settings row turns them off): `j k`, `gg G`,
   `⌃U ⌃D`, `zz` to the playing song, `h l` seek, `H L` previous and next song, `^` back
-  to the start, `o` play from the loop start, `f`/`m` favourite, `a` album, `A` artist, `i` search, `t`
+  to the start, `f` favourite, `a` album, `A` artist, `i` search, `t`
   Transcribe!, `s` shuffle, `?` keys, `dd` removes a folder in settings. No counts,
   by choice.
 - **The ⌘ shortcuts always work**: ⌘P, ⌘F, ⌘A, ⇧⌘A (artist view), ⌘T (the *highlighted* song), ⌘S,
@@ -98,7 +104,9 @@ key to both or the test fails.
   end. The rules live on `audio::Loop`.
 - **`P` toggles the practice view**: the list gives way to the song's loudness contour
   (with the shown stretch boxed) over a large RMS waveform that frames the loop, or
-  follows the playhead without one. `- =` zoom (⌘- ⌘= too). It is redrawn every
+  follows the playhead without one. `- =` zoom (⌘- ⌘= too, and the
+  wheel over either waveform). Over a loop edge the cursor becomes a resize arrow
+  (`edge_grips`, which only set the cursor; the strip under them takes the press). It is redrawn every
   frame while playing, the playhead smoothed between the player's position updates. Both take clicks and drags like the
   progress bar. The waveform is read for every song that starts, shown or not, and kept
   in memory only. Peaks are not drawn: on loud masters they all reach the top and hide
@@ -106,12 +114,14 @@ key to both or the test fails.
   only grows if the loop stops fitting. Loops have their own theme colour, `loops`: the
   first terminal colour (cyan, magenta, green, blue) that stands apart from the accent
   and text, since some themes' accent *is* their cyan.
+  Sections take the next one that also stands apart from the loop's (`sections`; soft
+  blue in Gold), so a loop sitting on a section reads as a different thing.
 - **Songs resume where they were left**: recording, slow-down and loops always; the
   playhead only when Tim picks the song himself (a song following on in a list starts
   at the top), and not when it was left within 5 s of the end. Slow-down is per song.
   Kept on leaving a song, switching recording or speed, every 5 s of playing, and ⌘Q.
-- **Slow-down**: `S` on and off, `,` `.` step through 50 to 90% (from 70%, and turn it
-  on); also the 50 to 90 buttons on the now-playing card (the lit one again turns it
+- **Slow-down**: `S` on and off, `,` `.` step through 50, 60, 70, 80, 90% and full speed
+  (`.` at 90% turns slow-down off, `,` at full speed goes to 90%; `S` jumps to the preset); also the 50 to 90 buttons on the now-playing card (the lit one again turns it
   off). Pitch is kept: Signalsmith
   Stretch at its full preset (Tim compared it with SoundTouch, "night and day"; the
   cheaper preset saves nothing worth it at 0.5% of a core). It sits after the loop and
@@ -122,18 +132,27 @@ key to both or the test fails.
 - **`b` toggles the beat grid** (the practice view marks beats with small chevrons at
   its top and bottom edges, faint until the grid is on, and shows the local tempo). On the grid `[ ]` and shift-click snap to the nearest beat, `{ } ( )`
   move an edge a whole beat, `< >` slide in beats, `h l` / `← →` step by
-  beats (back restarts the beat you're in first), dragging snaps (⌥ drags freely).
+  beats (back restarts the beat you're in first), dragging snaps (⌥ drags freely), and so does a click that moves the playhead (⌥-click
+  doesn't).
   Off, everything is as before; songs without a steady beat should stay off.
-- **Regions**: `r` saves the loop as a region and asks a name in a dialog (Enter saves,
-  an empty name saves one saying where it is, Esc cancels; on a loop that is already a region it renames), `n` `N`
-  play the next and previous region as the loop, `x` deletes the loop's region. A loop
-  played from (or saved as) a region stays bound to it: edge changes are saved into the
-  region, until the loop slides away (`< >`), is cleared, or another region or song plays. The
-  practice view shows them as named blocks above the overview; a click plays one.
+- **Sections and the loop are separate things** (Tim, 2026-10-05: they were too tied
+  together). A section is a named, saved stretch of the song; the loop is the one
+  unnamed stretch that repeats. Playing a section (a click, `n` `N`) sets the loop to
+  it, and from then on they're apart: the loop can shrink inside the section or move
+  off it without changing it. Sections change only by dragging their edges in the
+  section lane (snapping on the grid, ⌥ freely). `r` saves the loop as a section in a
+  dialog (Enter saves, an empty name saves one saying where it is, Esc cancels; when
+  the loop is exactly a section it renames that one). `x` deletes the section in play:
+  the loop's, else the shortest one around the playhead, which is also the one lit.
+- **The marker**: `m` drops it at the playhead (on a beat with the grid), `m` again
+  clears it from anywhere, and it drags like a loop edge (snapping, ⌥ freely; on a loop
+  edge, grab it by its flag at the strip's top). Dropping it plays nothing. `o` plays from the marker, or from the loop start without one. One
+  per recording, remembered like the loop, drawn as a gold flag on the waveforms and
+  the progress bar. `m` and `o` work with vim keys off too; favourite lost `m`.
 - **Variations**: drop files or a folder on a song (or the practice view), or `V` to
   pick; `v` cycles the song and its variations, keeping the position where they line
   up, `X` removes the playing one. Linked files leave the song list; songs with
-  variations show `+N`. Each recording has regions of its own (keyed by its first
+  variations show `+N`. Each recording has sections and a marker of its own (keyed by its first
   file) and remembers its own loop: switching puts this one's away and brings the
   next one's back. Tim's choice, over sharing them across aligned recordings.
   Everything plays through one `audio::Mix`, a single file being a mix of one, so a
@@ -147,7 +166,7 @@ key to both or the test fails.
   from `keys::keys_for`, which reads the ⌘? sheet through the real keymap, so they stay
   right if keys are ever remapped; never write a key into a tooltip by hand. Icons live
   in `assets/icons/`: Lucide's where one fits, riff's own (loop edges, widen, narrow,
-  slide, beats, regions) drawn in the same stroke style from the loop's brackets. The
+  slide, beats, sections) drawn in the same stroke style from the loop's brackets. The
   design is the "Riff controls and icons" canvas.
 - GPUI apps get no menu bar, so ⌘Q, ⌘M (minimise), ⌃⌘F (full screen) and every other
   ⌘ shortcut are handled by hand, and none collide with system menu items. A real menu

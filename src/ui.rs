@@ -38,7 +38,7 @@ macro_rules! icons {
 }
 
 icons!(
-    "play", "pause", "repeat", "external-link", "music", "search", "star", "folder", "x", "plus",
+    "play", "pause", "repeat", "external-link", "flag", "music", "search", "star", "folder", "x", "plus",
     "palette", "check", "skip-back", "skip-forward", "shuffle", "keyboard", "gauge", "audio-waveform", "settings-2",
     "zoom-in", "zoom-out", "layers", "layers-plus", "volume-2", "volume-x", "headphones",
     "bookmark-plus", "bookmark-minus", "loop-start", "loop-end", "widen-start", "narrow-start",

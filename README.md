@@ -25,7 +25,8 @@ one in view and each a key away from muted.
 - **Finds songs instantly.** Search a library of thousands as you type. Tags, covers and
   lengths are cached, so riff opens straight away.
 - **Loops to the sample.** Set a loop with `[` and `]`, nudge its edges by ear, slide it
-  phrase by phrase, and save it as a named region to come back to.
+  phrase by phrase. Name the parts of a song as sections and loop any of them in a
+  keystroke, or drop a marker to play from with `o`.
 - **Shows the music.** Press `P` for the practice view: a waveform that scrolls with the
   song, with every beat marked.
 - **Follows the beat.** Turn on the beat grid and loops snap to beats, even on old
@@ -66,6 +67,8 @@ you can add as many as you like and pick a colour theme. Any theme installed in
 | `Space` | play or pause |
 | `[` `]` | set the loop's start and end |
 | `{ } ( )` | widen or narrow the loop |
+| `m`, `o` | drop a marker, play from it |
+| `r`, `n` `N` | save a section, loop the next or previous |
 | `P` | practice view |
 | `S`, `,` `.` | slow-down on or off, slower or faster |
 | `v` | next recording: the song, a backing track, stems |
@@ -78,5 +81,5 @@ settings.
 
 ## Where things live
 
-Your music stays where it is. Riff keeps its cache, regions, variations and settings in
+Your music stays where it is. Riff keeps its cache, sections, variations and settings in
 `~/Library/Application Support/riff/`, and never writes next to your songs.

@@ -558,13 +558,14 @@ impl Audio {
                     self.keep_loop();
                     let player = Player::connect_new(sink.mixer());
                     self.shared.speed.store(self.speed.to_bits(), Ordering::Relaxed);
+                    // Paused before anything is added, so not a sample slips out.
+                    if std::mem::take(&mut self.start_paused) {
+                        player.pause();
+                    }
                     let looped = Looped::new(song, self.shared.clone());
                     player.append(Stretched::new(looped, self.shared.clone()));
                     if let Some(at) = self.start_at.take() {
                         let _ = player.try_seek(at);
-                    }
-                    if std::mem::take(&mut self.start_paused) {
-                        player.pause();
                     }
                     self.player = Some(player);
                 }
@@ -653,6 +654,11 @@ impl Audio {
         }
     }
 
+    /// The recording being opened starts paused, at its start point, ready for Space.
+    pub fn open_paused(&mut self) {
+        self.start_paused = true;
+    }
+
     pub fn pause(&self) {
         if let Some(p) = &self.player {
             p.pause();
@@ -678,8 +684,34 @@ impl Audio {
     }
 }
 
+/// `m` at `at`: drops the marker there, or clears it, wherever it is (dragging moves it).
+pub fn place_marker(marker: Option<Duration>, at: Duration) -> Option<Duration> {
+    match marker {
+        Some(_) => None,
+        None => Some(at),
+    }
+}
+
+/// Where `o` plays from: the marker when there is one, else the loop's start, else the
+/// top.
+pub fn replay_from(marker: Option<Duration>, looping: Loop) -> Duration {
+    marker.or(looping.start).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_marker_is_dropped_and_then_cleared_from_anywhere() {
+        let s = Duration::from_secs_f64;
+        assert_eq!(place_marker(None, s(12.0)), Some(s(12.0)));
+        assert_eq!(place_marker(Some(s(12.0)), s(30.0)), None);
+        assert_eq!(place_marker(Some(s(12.0)), s(12.2)), None);
+        let looping = Loop { start: Some(s(40.0)), end: Some(s(50.0)), off: false };
+        assert_eq!(replay_from(Some(s(12.0)), looping), s(12.0));
+        assert_eq!(replay_from(None, looping), s(40.0));
+        assert_eq!(replay_from(None, Loop::default()), Duration::ZERO);
+    }
+
     use super::*;
 
     fn s(secs: u64) -> Duration {

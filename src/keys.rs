@@ -27,7 +27,10 @@ pub enum Action {
     Toggle,
     Seek(f64),
     ToStart,
+    /// Plays from the marker, or the loop's start without one.
     FromLoopStart,
+    /// Drops the marker at the playhead, or clears it there.
+    Marker,
     Previous,
     Next,
     Shuffle,
@@ -141,6 +144,8 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
         match (p.key, p.shift) {
             ("b", false) => return Some(Grid),
             ("r", false) => return Some(SaveRegion),
+            ("m", false) => return Some(Marker),
+            ("o", false) => return Some(FromLoopStart),
             ("n", false) => return Some(Region(true)),
             ("n", true) => return Some(Region(false)),
             ("x", false) => return Some(RemoveRegion),
@@ -192,10 +197,9 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
         ("h", true, _) => Previous,
         ("l", true, _) => Next,
         ("^", ..) => ToStart,
-        ("o", false, false) => FromLoopStart,
         ("/", ..) => Search,
         ("?", ..) => Help,
-        ("f" | "m", false, false) => Favorite,
+        ("f", false, false) => Favorite,
         ("a", false, false) => Album,
         ("a", true, _) => Artist,
         ("i", false, false) => Search,
@@ -273,7 +277,8 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("Space", "", "pause or resume"),
             ("← →", "h l", "back or forward 5 seconds"),
             ("", "^", "back to the start"),
-            ("", "o", "play from the loop start"),
+            ("o", "", "play from the marker, or the loop start"),
+            ("m", "", "marker here, again to clear it"),
             ("⌘← ⌘→", "H L", "previous or next song"),
             ("⌘S", "s", "shuffle on or off"),
         ],
@@ -287,9 +292,9 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("{ }", "", "widen at the start or end"),
             ("( )", "", "narrow at the start or end"),
             ("< >", "", "slide back or on by its length"),
-            ("r", "", "save it as a region, named"),
-            ("n N", "", "next or previous region"),
-            ("x", "", "delete its region"),
+            ("r", "", "save it as a section, or rename its section"),
+            ("n N", "", "loop the next or previous section"),
+            ("x", "", "delete the section playing"),
         ],
     ),
     (
@@ -299,7 +304,7 @@ pub const SHEET: &[(&str, &[Line])] = &[
             ("- =", "", "zoom out or in"),
             ("b", "", "beat grid: loops and steps follow the beats"),
             ("S", "", "slow down on or off, pitch kept"),
-            (", .", "", "slower or faster: 50 to 90%"),
+            (", .", "", "slower or faster: 50 to 90%, then full speed"),
             ("v", "", "next recording: the song, its variations"),
             ("V", "", "add a variation (or drop files on a song)"),
             ("X", "", "remove the playing variation"),
@@ -310,7 +315,7 @@ pub const SHEET: &[(&str, &[Line])] = &[
     (
         "Songs",
         &[
-            ("⌘F", "f m", "favourite or not"),
+            ("⌘F", "f", "favourite or not"),
             ("⌘A", "a", "only this album, again to leave"),
             ("⇧⌘A", "A", "only this artist, again to leave"),
             ("⌘T", "t", "highlighted song to Transcribe!"),
@@ -371,7 +376,8 @@ mod tests {
     #[test]
     fn vim_and_cmd_keys_agree() {
         assert_eq!(resolve("H", true), resolve("⌘←", true));
-        assert_eq!(resolve("f", true), resolve("m", true));
+        assert_eq!(resolve("m", false), Some(Action::Marker));
+        assert_eq!(resolve("o", false), Some(Action::FromLoopStart));
         assert_eq!(resolve("/", true), resolve("⌘P", true));
         assert_eq!(resolve("gg", true), Some(Action::Top));
         assert_eq!(resolve("G", true), Some(Action::Bottom));

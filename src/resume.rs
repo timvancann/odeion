@@ -1,5 +1,5 @@
 //! Where each song was left: which recording played (the song or a variation), the
-//! slow-down, the playhead, and each recording's loop. Picking the song again picks up
+//! slow-down, the playhead, and each recording's loop and marker. Picking the song again picks up
 //! there. Kept in `resume.json` in the data folder.
 
 use crate::audio::Loop;
@@ -24,6 +24,8 @@ pub struct Spot {
     pub at: Duration,
     /// Each recording's loop, by the recording's first file.
     pub loops: HashMap<PathBuf, Loop>,
+    /// Each recording's marker, where `o` plays from.
+    pub marks: HashMap<PathBuf, Duration>,
 }
 
 impl Spot {
@@ -89,7 +91,8 @@ mod tests {
         let mut r = Resume::default();
         let mut loops = HashMap::new();
         loops.insert(PathBuf::from("/d/stems-Bass.mp3"), Loop { start: Some(s(10)), end: Some(s(14)), off: true });
-        r.keep(Path::new("/m/song.mp3"), Spot { variation: 2, slow: true, speed: 1, at: s(42), loops });
+        let marks = HashMap::from([(PathBuf::from("/m/song.mp3"), s(31))]);
+        r.keep(Path::new("/m/song.mp3"), Spot { variation: 2, slow: true, speed: 1, at: s(42), loops, marks });
         r.store(&file).unwrap();
         assert_eq!(Resume::load(&file), r);
         assert_eq!(Resume::load(&file).of(Path::new("/m/song.mp3")).unwrap().variation, 2);

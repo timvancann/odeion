@@ -7,6 +7,7 @@ mod playlist;
 mod regions;
 mod resume;
 mod scan;
+mod session;
 mod state;
 mod theme;
 mod ui;
