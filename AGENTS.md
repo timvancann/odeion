@@ -28,8 +28,8 @@ and draws:
   album, favourites, search results or library; the run of rows between headers).
 - `keys.rs`: the keymap per mode and the ⌘? sheet, see Keyboard.
 - `menu.rs`: the right-click menus: their entries and moving through them by key.
-- `speed.rs`: the speed in whole percent, 25 to 110, and the slowed speed a song keeps
-  while it plays at full speed.
+- `speed.rs`: the speed in whole percent, 25 to 110, and the pitch in cents, up to an
+  octave either way; both kept by a song while it plays as recorded.
 - `trainer.rs`: the speed trainer: from, to, step, every N repeats, turned into a
   speed from how often the loop has come round.
 - `wave.rs`: the practice view's waveform: read on 8 threads when a song starts (each
@@ -153,7 +153,12 @@ they fail.
   Stretch at its full preset (Tim compared it with SoundTouch, "night and day"; the
   cheaper preset saves nothing worth it at 0.5% of a core). It sits after the loop and
   the stem mix (`audio::Stretched`), so loops, stems and beats stay in song time; at
-  exactly 100% samples pass straight through. It reports what it holds back (~0.1 s) so the playhead
+  exactly 100% and no pitch shift samples pass straight through.
+- **Pitch**, per song, apart from the speed: `k j` a semitone, `K J` 5 cents, up to an
+  octave either way, through the same stretcher (`set_transpose_factor_semitones`). The
+  practice toolbar has − value + by semitones; the wheel over it moves 5 cents and a
+  right-click gives cents and "as recorded". `s` puts speed and pitch back to as
+  recorded and again brings both back. A pitch change doesn't stop the trainer. It reports what it holds back (~0.1 s) so the playhead
   shows what's heard, and a soft limiter keeps its rare peaks (up to 1.8) under full
   scale.
 - **The speed trainer** (`t` or the toolbar button; `T` or the speed menu for its
@@ -255,8 +260,8 @@ commit signing is off for this repo.
 `docs/plans/` holds agreed plans; build from them step by step. **Plan 01** (two modes,
 library and practice, with a keymap that stays on Tim's Glove80 base layer, then
 volume, speed, pitch, undo, loop extras, bars and notes) is the current direction. Steps 1
-(modes, keymap, right-click menus), 2 (volume, stem levels, output) and 3 (speed and
-the trainer) are built; step 4 (pitch) is next.
+(modes, keymap, right-click menus), 2 (volume, stem levels, output), 3 (speed and the
+trainer) and 4 (pitch) are built; step 5 (undo) is next.
 
 ## Possible features
 

@@ -90,12 +90,16 @@ pub enum Action {
     /// Minimise the window, or make it full screen (no menu bar does it for riff).
     Minimize,
     FullScreen,
-    /// Full speed, and again back to the song's kept speed.
+    /// Speed and pitch as recorded, and again back to the song's kept ones.
     Slow,
     /// 5% slower (false) or faster (true), from 25 to 110%.
     Speed(bool),
     /// Play at this percent; from the speed menu, no key.
     SetSpeed(u16),
+    /// The pitch up (above 0) or down by this many cents: a semitone or 5 cents.
+    Pitch(i16),
+    /// The pitch at this many cents; from the pitch menu, no key.
+    SetPitch(i16),
     /// The speed trainer on or off: the loop speeds up as it repeats.
     Trainer,
     /// The trainer's settings sheet.
@@ -282,6 +286,10 @@ fn practice(p: Press, first: Option<char>, pending: &mut Option<char>) -> Option
         ("g", false) => Grid,
         ("s", false) => Slow,
         ("t", false) => Trainer,
+        ("k", false) => Pitch(100),
+        ("j", false) => Pitch(-100),
+        ("k", true) => Pitch(5),
+        ("j", true) => Pitch(-5),
         ("t", true) => TrainerSettings,
         (",", _) => Speed(false),
         (".", _) => Speed(true),
@@ -456,7 +464,9 @@ pub const SHEET: &[Group] = &[
             ("h l", "", "back or forward 5 seconds, a beat on the grid"),
             ("g", "", "beat grid: loops and steps follow the beats"),
             (", .", "", "slower or faster by 5%, 25 to 110%, pitch kept"),
-            ("s", "", "full speed, again back to the slowed speed"),
+            ("k j", "", "pitch up or down a semitone, speed kept"),
+            ("K J", "", "pitch up or down 5 cents"),
+            ("s", "", "speed and pitch as recorded, again back"),
             ("t", "", "speed trainer: the loop speeds up as it repeats"),
             ("T", "", "the trainer's settings"),
             ("- =", "", "zoom out or in"),

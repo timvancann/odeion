@@ -19,6 +19,8 @@ pub enum Target {
     Stem(usize),
     /// The speed controls.
     Speed,
+    /// The pitch controls.
+    Pitch,
 }
 
 pub struct Menu {
@@ -90,6 +92,20 @@ impl Menu {
                 ("100%", Action::SetSpeed(100)),
                 ("110%", Action::SetSpeed(110)),
                 ("Trainer settings…", Action::TrainerSettings),
+            ],
+        )
+    }
+
+    /// On the pitch controls: fine steps, and back to as recorded.
+    pub fn pitch() -> Menu {
+        Menu::new(
+            Target::Pitch,
+            vec![
+                ("Up a semitone", Action::Pitch(100)),
+                ("Down a semitone", Action::Pitch(-100)),
+                ("Up 5 cents", Action::Pitch(5)),
+                ("Down 5 cents", Action::Pitch(-5)),
+                ("As recorded", Action::SetPitch(0)),
             ],
         )
     }

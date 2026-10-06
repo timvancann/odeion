@@ -969,6 +969,7 @@ impl Riff {
         self.speed = spot.pace();
         self.training = None;
         self.audio.set_speed(self.speed.factor());
+        self.audio.set_pitch(self.speed.pitch());
         let at = if pick { spot.start(track.seconds.map(Duration::from_secs)) } else { Duration::ZERO };
         let variations = self.variations.of(&track.path).len();
         self.audio.play(std::slice::from_ref(&track.path), &[1.0]);
@@ -1162,6 +1163,50 @@ impl Riff {
             .child(self.tool("faster", "plus", "5% faster, pitch kept", Action::Speed(true), false, cx))
     }
 
+    /// The pitch: down and up a semitone, and what plays now, lit when shifted. The
+    /// wheel over it moves 5 cents; right-click for cents and back to as recorded.
+    fn pitch_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let cents = self.speed.pitch();
+        let on = cents != 0;
+        pill()
+            .id("pitch")
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|riff, e: &MouseDownEvent, _, cx| {
+                    riff.menu = Some((Menu::pitch(), e.position));
+                    cx.notify();
+                }),
+            )
+            .on_scroll_wheel(cx.listener(|riff, e: &gpui::ScrollWheelEvent, _, cx| {
+                let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
+                if dy != 0. {
+                    riff.act(Action::Pitch(if dy < 0. { 5 } else { -5 }), cx);
+                }
+            }))
+            .child(self.tool("pitch-down", "minus", "Down a semitone, speed kept", Action::Pitch(-100), false, cx))
+            .child(
+                div()
+                    .id("pitch-now")
+                    .h(px(28.))
+                    .min_w(px(64.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .rounded_md()
+                    .font_family(MONO)
+                    .text_xs()
+                    .when(on, |d| d.bg(rgb(t.accent_soft)))
+                    .text_color(rgb(if on { t.accent } else { t.dim }))
+                    .tooltip(self.tip("Pitch: scroll for 5 cents; right-click for more", &[Action::Pitch(5), Action::Pitch(-5)]))
+                    .child(ui::icon("music", 12., if on { t.accent } else { t.dim }))
+                    .child(crate::speed::pitch_label(cents)),
+            )
+            .child(self.tool("pitch-up", "plus", "Up a semitone, speed kept", Action::Pitch(100), false, cx))
+    }
+
     /// The master volume: an icon and a bar filled to the level, dragged or scrolled.
     fn volume_slider(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
@@ -1291,10 +1336,14 @@ impl Riff {
     /// so a slider drag doesn't write the file at every step.
     fn apply_speed(&mut self) {
         self.audio.set_speed(self.speed.factor());
+        self.audio.set_pitch(self.speed.pitch());
+        let pitch = crate::speed::pitch_label(self.speed.pitch());
         self.message = Some((
-            match self.speed.now() {
-                100 => "full speed".to_string(),
-                p => format!("{p}% speed, pitch kept"),
+            match (self.speed.now(), self.speed.pitch()) {
+                (100, 0) => "as recorded".to_string(),
+                (p, 0) => format!("{p}% speed, pitch kept"),
+                (100, _) => format!("pitch {pitch}, speed kept"),
+                (p, _) => format!("{p}% speed, pitch {pitch}"),
             },
             false,
         ));
@@ -1955,13 +2004,18 @@ impl Riff {
                 }
             }
             // A hand on the speed stops the trainer.
-            Action::Slow | Action::Speed(_) | Action::SetSpeed(_) => {
-                self.training = None;
+            Action::Slow | Action::Speed(_) | Action::SetSpeed(_) | Action::Pitch(_) | Action::SetPitch(_) => {
                 match action {
                     Action::Slow => self.speed.toggle(),
                     Action::Speed(faster) => self.speed.step(faster),
                     Action::SetSpeed(percent) => self.speed.set(percent),
+                    Action::Pitch(by) => self.speed.shift(by),
+                    Action::SetPitch(cents) => self.speed.set_pitch(cents),
                     _ => {}
+                }
+                // The trainer keeps going through a change of pitch, not of speed.
+                if !matches!(action, Action::Pitch(_) | Action::SetPitch(_)) {
+                    self.training = None;
                 }
                 self.apply_speed();
                 self.keep_levels(Slider::Speed);
@@ -2865,7 +2919,11 @@ impl Riff {
                 "{} / {}{}",
                 ui::clock(position),
                 duration.map_or("–".to_string(), ui::clock),
-                if self.speed.on { format!(" at {}%", self.speed.now()) } else { String::new() }
+                match (self.speed.now(), self.speed.pitch()) {
+                    (100, 0) => String::new(),
+                    (p, 0) => format!(" at {p}%"),
+                    (p, c) => format!(" at {p}%, {}", crate::speed::pitch_label(c)),
+                }
             )
         };
         let loop_label = match (looping.start, looping.end) {
@@ -3299,8 +3357,11 @@ impl Riff {
         if self.grid {
             about.push_str(if beats.is_some() { ", grid on" } else { ", grid on (finding beats…)" });
         }
-        if self.speed.on {
+        if self.speed.now() != 100 {
             about.push_str(&format!(", at {}% speed", self.speed.now()));
+        }
+        if self.speed.pitch() != 0 {
+            about.push_str(&format!(", pitch {}", crate::speed::pitch_label(self.speed.pitch())));
         }
         let toolbar = self.practice_toolbar(about, cx);
         let lane = self.region_lane(song.unwrap_or(self.span), cx);
@@ -3636,6 +3697,7 @@ impl Riff {
                     }),
             )
             .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(about))
+            .child(self.pitch_control(cx))
             // Any speed from 25 to 110%, the trainer beside it. Right-click for presets.
             .child(
                 pill()

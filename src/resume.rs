@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn old_slow_down_presets_read_as_percentages() {
         let old: Spot = serde_json::from_str(r#"{"variation": 0, "slow": true, "speed": 3, "at": {"secs": 5, "nanos": 0}}"#).unwrap();
-        assert_eq!(old.pace(), Speed { percent: 80, on: true });
+        assert_eq!(old.pace(), Speed { percent: 80, cents: 0, on: true });
         assert_eq!(Spot::default().pace(), Speed::default());
         // Written anew, only the percentage is kept.
         let json = serde_json::to_string(&Spot { pace: Some(old.pace()), ..old }).unwrap();
@@ -115,7 +115,7 @@ mod tests {
         loops.insert(PathBuf::from("/d/stems-Bass.mp3"), Loop { start: Some(s(10)), end: Some(s(14)), off: true });
         let marks = HashMap::from([(PathBuf::from("/m/song.mp3"), s(31))]);
         let levels = HashMap::from([(PathBuf::from("/d/stems-Bass.mp3"), vec![1.0, 0.5, 0.25])]);
-        let pace = Some(Speed { percent: 65, on: true });
+        let pace = Some(Speed { percent: 65, cents: -150, on: true });
         r.keep(Path::new("/m/song.mp3"), Spot { variation: 2, pace, at: s(42), loops, marks, levels, ..Spot::default() });
         r.store(&file).unwrap();
         assert_eq!(Resume::load(&file), r);

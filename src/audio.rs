@@ -221,9 +221,10 @@ fn soft_limit(x: f32) -> f32 {
 /// Output frames the slow-down makes at a time.
 const BLOCK: usize = 512;
 
-/// The song slowed down or sped up without changing pitch (Signalsmith Stretch, a phase
-/// vocoder, at its full-quality preset: half a percent of a core). At exactly 100% it
-/// stays out of the way: samples pass through untouched, with no delay. It comes after the loop, so
+/// The song slowed down or sped up without changing pitch, and its pitch moved without
+/// changing speed (Signalsmith Stretch, a phase vocoder, at its full-quality preset:
+/// half a percent of a core). At exactly 100% and no pitch shift it stays out of the
+/// way: samples pass through untouched, with no delay. It comes after the loop, so
 /// loops keep to the sample in the song's time.
 struct Stretched<S> {
     inner: S,
@@ -238,6 +239,8 @@ struct Stretched<S> {
     carry: f64,
     /// Whether the last sample came through the stretcher.
     stretching: bool,
+    /// The pitch shift the stretcher has, in semitones.
+    transposed: f32,
 }
 
 impl<S: Source> Stretched<S> {
@@ -255,6 +258,7 @@ impl<S: Source> Stretched<S> {
             input: Vec::new(),
             carry: 0.0,
             stretching: false,
+            transposed: 0.0,
         }
     }
 
@@ -272,7 +276,8 @@ impl<S: Source> Iterator for Stretched<S> {
 
     fn next(&mut self) -> Option<rodio::Sample> {
         let speed = f32::from_bits(self.shared.speed.load(Ordering::Relaxed)) as f64;
-        if (speed - 1.0).abs() < 1e-4 {
+        let pitch = f32::from_bits(self.shared.pitch.load(Ordering::Relaxed));
+        if (speed - 1.0).abs() < 1e-4 && pitch == 0.0 {
             if self.stretching {
                 // Back to full speed: what the stretcher held back is dropped.
                 self.stretching = false;
@@ -284,6 +289,10 @@ impl<S: Source> Iterator for Stretched<S> {
         if !self.stretching {
             self.stretching = true;
             self.restart();
+        }
+        if pitch != self.transposed {
+            self.stretch.set_transpose_factor_semitones(pitch, None);
+            self.transposed = pitch;
         }
         if self.at >= self.out.len() {
             let wanted = BLOCK as f64 * speed + self.carry;
@@ -445,6 +454,8 @@ struct Shared {
     played: AtomicU64,
     /// Playback speed (f32 bits): 1 plays as recorded, below slows down.
     speed: AtomicU32,
+    /// Pitch shift in semitones (f32 bits): 0 as recorded.
+    pitch: AtomicU32,
     /// Frames the slow-down holds back: played but not heard yet.
     delay: AtomicU64,
     /// Times the loop has jumped back to its start, for the speed trainer.
@@ -460,6 +471,7 @@ impl Default for Shared {
             end: AtomicU64::new(NONE),
             played: AtomicU64::new(0),
             speed: AtomicU32::new(1.0f32.to_bits()),
+            pitch: AtomicU32::new(0.0f32.to_bits()),
             delay: AtomicU64::new(0),
             wraps: AtomicU64::new(0),
         }
@@ -547,6 +559,8 @@ pub struct Audio {
     output: Option<String>,
     /// The device chosen in settings, by id; none follows the system's.
     pub chosen: Option<String>,
+    /// Pitch shift in semitones, kept across songs like the speed.
+    pitch: f32,
     /// From 0 (silent) to 1 (as recorded).
     volume: f32,
     player: Option<Player>,
@@ -580,6 +594,7 @@ impl Audio {
             output,
             chosen,
             volume,
+            pitch: 0.0,
             player: None,
             loading: None,
             start_at: None,
@@ -639,6 +654,12 @@ impl Audio {
 
     pub fn speed(&self) -> f32 {
         self.speed
+    }
+
+    /// Moves the pitch by `cents` from now on, speed unchanged.
+    pub fn set_pitch(&mut self, cents: i16) {
+        self.pitch = cents as f32 / 100.0;
+        self.shared.pitch.store(self.pitch.to_bits(), Ordering::Relaxed);
     }
 
     /// How often the loop has jumped back to its start since the song opened.
@@ -707,6 +728,7 @@ impl Audio {
                     let player = Player::connect_new(sink.mixer());
                     player.set_volume(self.volume);
                     self.shared.speed.store(self.speed.to_bits(), Ordering::Relaxed);
+                    self.shared.pitch.store(self.pitch.to_bits(), Ordering::Relaxed);
                     // Paused before anything is added, so not a sample slips out.
                     if std::mem::take(&mut self.start_paused) {
                         player.pause();
@@ -1077,6 +1099,7 @@ mod tests {
             output: None,
             chosen: None,
             volume: 1.0,
+            pitch: 0.0,
             player: None,
             loading: None,
             files: Vec::new(),
@@ -1167,6 +1190,15 @@ mod tests {
         shared.speed.store(0.99f32.to_bits(), Ordering::Relaxed);
         let mut song = Stretched::new(Counting { at: 0, frames: 4000 }, shared.clone());
         song.next();
+        assert!(shared.delay.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn a_pitch_shift_alone_goes_through_the_stretcher_at_full_length() {
+        let shared = Arc::new(Shared::default());
+        shared.pitch.store(2.0f32.to_bits(), Ordering::Relaxed);
+        let heard = Stretched::new(Counting { at: 0, frames: 4000 }, shared.clone()).count() / 2;
+        assert!((3900..=4300).contains(&heard), "{heard} frames");
         assert!(shared.delay.load(Ordering::Relaxed) > 0);
     }
 
