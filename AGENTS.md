@@ -204,6 +204,12 @@ recordings). Only open one when he isn't typing, or ask first.
 Before committing: `cargo test && cargo build --release`, no warnings. Work on `main`;
 commit signing is off for this repo.
 
+## Plans
+
+`docs/plans/` holds agreed plans; build from them step by step. **Plan 01** (two modes,
+library and practice, with a keymap that stays on Tim's Glove80 base layer, then
+volume, speed, pitch, undo, loop extras, bars and notes) is the current direction.
+
 ## Possible features
 
 Ideas Tim liked but hasn't asked for yet. Check with him before building one.
