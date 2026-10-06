@@ -94,6 +94,10 @@ pub enum Action {
     Slow,
     /// The next slower (false) or faster (true) slow-down preset; turns slow-down on.
     Speed(bool),
+    /// The volume up (true) or down a step.
+    Volume(bool),
+    /// Stem n's level, in percent; from its menu, no key.
+    Level(usize, u8),
     /// Mute or unmute stem n (from 0) of a stem set.
     Mute(usize),
     /// Solo stem n, or end the solo.
@@ -124,7 +128,8 @@ pub fn press(mode: Mode, p: Press, vim: bool, pending: &mut Option<char>) -> Opt
     }
 }
 
-/// Keys that work in every mode, even while typing a search: ⌘ shortcuts and ← →.
+/// Keys that work in every mode, even while typing a search: ⌘ shortcuts, ← → and the
+/// volume.
 pub fn anywhere(p: Press) -> Option<Action> {
     use Action::*;
     Some(match (p.key, p.cmd, p.ctrl) {
@@ -138,6 +143,8 @@ pub fn anywhere(p: Press) -> Option<Action> {
         ("s", true, _) => Shuffle,
         ("left" | "h", true, _) => Previous,
         ("right" | "l", true, _) => Next,
+        ("up", false, false) if p.alt => Volume(true),
+        ("down", false, false) if p.alt => Volume(false),
         ("left", false, false) => Seek(-SEEK),
         ("right", false, false) => Seek(SEEK),
         ("?", true, _) => Help,
@@ -369,6 +376,7 @@ pub const SHEET: &[Group] = &[
             ("0", "", "back to the start"),
             ("m", "", "marker here, again to clear it"),
             ("o", "", "play from the marker, or the loop start"),
+            ("⌥↑ ⌥↓", "", "volume up or down"),
         ],
     },
     Group {
@@ -415,6 +423,7 @@ pub const SHEET: &[Group] = &[
             ("↑ ↓ ⌃J ⌃K", "", "move"),
             ("PgUp PgDn", "", "move 10"),
             ("Esc ⌘P", "", "stop typing, keep the results"),
+            ("⌥↑ ⌥↓", "", "volume up or down"),
             ("⌘⌫", "", "clear the search"),
             ("⌘?", "", "these keys"),
         ],
@@ -575,6 +584,10 @@ mod tests {
         assert_eq!(resolve("Space", Search, true), None);
         assert_eq!(resolve("m", Library, false), Some(Action::Marker));
         assert_eq!(resolve("0", Practice, false), Some(Action::ToStart));
+        // ⌥↑ is the volume everywhere; plain ↑ moves in the list.
+        assert_eq!(resolve("⌥↑", Search, false), Some(Action::Volume(true)));
+        assert_eq!(resolve("⌥↓", Practice, false), Some(Action::Volume(false)));
+        assert_eq!(resolve("↑", Library, false), Some(Action::Move(-1)));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Where each song was left: which recording played (the song or a variation), the
-//! slow-down, the playhead, and each recording's loop and marker. Picking the song again picks up
-//! there. Kept in `resume.json` in the data folder.
+//! slow-down, the playhead, and each recording's loop, marker and stem levels. Picking
+//! the song again picks up there. Kept in `resume.json` in the data folder.
 
 use crate::audio::Loop;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,8 @@ pub struct Spot {
     pub loops: HashMap<PathBuf, Loop>,
     /// Each recording's marker, where `o` plays from.
     pub marks: HashMap<PathBuf, Duration>,
+    /// Each stem set's levels, by its first file; full ones aren't kept.
+    pub levels: HashMap<PathBuf, Vec<f32>>,
 }
 
 impl Spot {
@@ -92,7 +94,8 @@ mod tests {
         let mut loops = HashMap::new();
         loops.insert(PathBuf::from("/d/stems-Bass.mp3"), Loop { start: Some(s(10)), end: Some(s(14)), off: true });
         let marks = HashMap::from([(PathBuf::from("/m/song.mp3"), s(31))]);
-        r.keep(Path::new("/m/song.mp3"), Spot { variation: 2, slow: true, speed: 1, at: s(42), loops, marks });
+        let levels = HashMap::from([(PathBuf::from("/d/stems-Bass.mp3"), vec![1.0, 0.5, 0.25])]);
+        r.keep(Path::new("/m/song.mp3"), Spot { variation: 2, slow: true, speed: 1, at: s(42), loops, marks, levels });
         r.store(&file).unwrap();
         assert_eq!(Resume::load(&file), r);
         assert_eq!(Resume::load(&file).of(Path::new("/m/song.mp3")).unwrap().variation, 2);

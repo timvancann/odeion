@@ -15,6 +15,8 @@ pub enum Target {
     Section(usize),
     /// A song, by its row in the list.
     Song(usize),
+    /// A stem of the playing stem set.
+    Stem(usize),
 }
 
 pub struct Menu {
@@ -73,6 +75,20 @@ impl Menu {
         )
     }
 
+    /// On stem `i`: its level, solo and mute, saying what a toggle will do.
+    pub fn stem(i: usize, muted: bool, soloed: bool) -> Menu {
+        Menu::new(
+            Target::Stem(i),
+            vec![
+                ("Level 100%", Action::Level(i, 100)),
+                ("Level 50%", Action::Level(i, 50)),
+                ("Level 25%", Action::Level(i, 25)),
+                (if soloed { "End the solo" } else { "Solo" }, Action::Solo(i)),
+                (if muted { "Unmute" } else { "Mute" }, Action::Mute(i)),
+            ],
+        )
+    }
+
     /// A key while the menu is open: `j k` and the arrows move, Enter or Space chooses,
     /// Esc closes. Every other key is swallowed.
     pub fn key(&mut self, key: &str) -> Option<Outcome> {
@@ -112,6 +128,10 @@ mod tests {
         assert_eq!(Menu::waveform(Duration::from_secs(3)).target, Target::Moment(Duration::from_secs(3)));
         assert_eq!(Menu::section(2).target, Target::Section(2));
         assert_eq!(Menu::song(7, false, false, false).target, Target::Song(7));
+        // A stem's entries name the stem, so they work from anywhere.
+        let stem = Menu::stem(3, false, false);
+        assert_eq!(stem.target, Target::Stem(3));
+        assert!(stem.entries.iter().all(|(_, a)| matches!(a, Action::Level(3, _) | Action::Solo(3) | Action::Mute(3))));
     }
 
     #[test]

@@ -1,7 +1,10 @@
-//! Playback: one song at a time, seeking, and an A/B loop.
+//! Playback: one song at a time, seeking, and an A/B loop. Also the volume, the stems'
+//! levels, and which output device plays: the one chosen in settings while it is
+//! connected, otherwise the system's, followed when it changes.
 
+use rodio::cpal::traits::HostTrait;
 use rodio::source::SeekError;
-use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source};
+use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, DeviceTrait, MixerDeviceSink, Player, SampleRate, Source};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -337,6 +340,98 @@ impl<S: Source> Source for Stretched<S> {
     }
 }
 
+/// ⌥↑ and ⌥↓ change the volume by this much.
+pub const VOLUME_STEP: f32 = 0.05;
+
+/// The volume a step up or down from `volume`, on the 5% grid, from silent to full.
+pub fn step_volume(volume: f32, up: bool) -> f32 {
+    let steps = (volume / VOLUME_STEP).round() + if up { 1.0 } else { -1.0 };
+    (steps * VOLUME_STEP).clamp(0.0, 1.0)
+}
+
+/// A level from a slider: how far along it the pointer is, as a whole percent.
+pub fn level_at(fraction: f32) -> f32 {
+    (fraction.clamp(0.0, 1.0) * 100.0).round() / 100.0
+}
+
+/// Each stem's gain: its level, the soloed stem alone, the muted ones silent.
+pub fn stem_gains(levels: &[f32], muted: &[bool], solo: Option<usize>) -> Vec<f32> {
+    (0..muted.len())
+        .map(|i| {
+            let heard = match solo {
+                Some(s) => s == i,
+                None => !muted[i],
+            };
+            if heard { levels.get(i).copied().unwrap_or(1.0) } else { 0.0 }
+        })
+        .collect()
+}
+
+/// An output device: its id, stable across runs and reconnections, and its name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Output {
+    pub id: String,
+    pub name: String,
+}
+
+fn output(device: &rodio::Device) -> Option<Output> {
+    let id = device.id().ok()?.to_string();
+    let name = device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| id.clone());
+    Some(Output { id, name })
+}
+
+/// The output devices connected now, for the picker. Slow (half a second here): cpal
+/// asks each device which formats it plays, which also disturbed playback when done
+/// every second. Only when the picker opens, never on a timer.
+pub fn outputs() -> Vec<Output> {
+    let host = rodio::cpal::default_host();
+    host.output_devices().map(|d| d.filter_map(|d| output(&d)).collect()).unwrap_or_default()
+}
+
+/// The system's output device now, with its name.
+pub fn system_output() -> Option<Output> {
+    rodio::cpal::default_host().default_output_device().and_then(|d| output(&d))
+}
+
+/// A connected device's name, by its id.
+pub fn name_of(id: &str) -> Option<String> {
+    device(id).and_then(|d| output(&d)).map(|o| o.name)
+}
+
+/// The id of the system's output device: one cheap property read, fine every second.
+fn system_id() -> Option<String> {
+    let device = rodio::cpal::default_host().default_output_device()?;
+    device.id().ok().map(|id| id.to_string())
+}
+
+/// A connected device by its id, comparing ids only: no formats asked, so cheap enough
+/// to check every second.
+fn device(id: &str) -> Option<rodio::Device> {
+    let mut devices = rodio::cpal::default_host().devices().ok()?;
+    devices.find(|d| d.id().is_ok_and(|d| d.to_string() == id))
+}
+
+/// The device to play through: the chosen one while it is connected, otherwise the
+/// system's.
+pub fn wanted(chosen: Option<&str>, chosen_connected: bool, system: Option<String>) -> Option<String> {
+    chosen.filter(|_| chosen_connected).map(str::to_string).or(system)
+}
+
+/// Opens the device with id `want`, or the system's when that fails. Returns the id of
+/// what opened.
+fn open(want: Option<&str>) -> Option<(MixerDeviceSink, Option<String>)> {
+    let chosen = want.and_then(|id| {
+        let found = device(id)?;
+        DeviceSinkBuilder::from_device(found).and_then(|b| b.open_stream()).ok()
+    });
+    let (mut sink, id) = match chosen {
+        Some(sink) => (sink, want.map(str::to_string)),
+        None => (DeviceSinkBuilder::open_default_sink().ok()?, system_id()),
+    };
+    sink.log_on_drop(false);
+    Some((sink, id))
+}
+
 fn gains(of: &[f32]) -> Arc<Vec<AtomicU32>> {
     Arc::new(of.iter().map(|g| AtomicU32::new(g.to_bits())).collect())
 }
@@ -444,6 +539,12 @@ impl<S: Source> Source for Looped<S> {
 pub struct Audio {
     /// None when there is no output device; everything else still works, silently.
     sink: Option<MixerDeviceSink>,
+    /// The id of the device `sink` plays through.
+    output: Option<String>,
+    /// The device chosen in settings, by id; none follows the system's.
+    pub chosen: Option<String>,
+    /// From 0 (silent) to 1 (as recorded).
+    volume: f32,
     player: Option<Player>,
     loading: Option<Receiver<Result<Song, String>>>,
     /// What plays: one file, or the stems of a set.
@@ -465,16 +566,16 @@ pub struct Audio {
 }
 
 impl Audio {
-    pub fn new() -> Audio {
-        let sink = DeviceSinkBuilder::open_default_sink()
-            .map(|mut s| {
-                s.log_on_drop(false);
-                s
-            })
-            .ok();
+    pub fn new(volume: f32, chosen: Option<String>) -> Audio {
+        let connected = chosen.as_deref().is_some_and(|id| device(id).is_some());
+        let want = wanted(chosen.as_deref(), connected, system_id());
+        let (sink, output) = open(want.as_deref()).map_or((None, None), |(s, id)| (Some(s), id));
         Audio {
             error: sink.is_none().then(|| "no audio output".to_string()),
             sink,
+            output,
+            chosen,
+            volume,
             player: None,
             loading: None,
             start_at: None,
@@ -536,6 +637,44 @@ impl Audio {
         self.speed
     }
 
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        if let Some(p) = &self.player {
+            p.set_volume(self.volume);
+        }
+    }
+
+    /// Moves to the device that should play, when that is not the one playing: the
+    /// chosen one was connected or unplugged, or the system's changed. What plays
+    /// carries on from the same moment, playing or paused as it was. Returns the
+    /// device's name when it moved.
+    pub fn follow_output(&mut self) -> Option<String> {
+        let connected = self.chosen.as_deref().is_some_and(|id| device(id).is_some());
+        let want = wanted(self.chosen.as_deref(), connected, system_id())?;
+        if self.output.as_ref() == Some(&want) {
+            return None;
+        }
+        let (at, playing, looping) = (self.position(), self.playing(), self.looping);
+        let at = if self.ended() { Duration::ZERO } else { at };
+        let now: Vec<f32> = self.gains.iter().map(|g| f32::from_bits(g.load(Ordering::Relaxed))).collect();
+        // The player goes before its device does.
+        self.player = None;
+        self.sink = None;
+        let (sink, opened) = open(Some(&want)).map_or((None, None), |(s, id)| (Some(s), id));
+        (self.sink, self.output) = (sink, opened);
+        self.error = self.sink.is_none().then(|| "no audio output".to_string());
+        if !self.files.is_empty() && self.loading.is_none() {
+            self.switch(&self.files.clone(), &now, at, looping);
+            self.start_paused = !playing;
+        }
+        let name = self.output.as_deref().and_then(device).and_then(|d| output(&d)).map(|o| o.name);
+        Some(name.unwrap_or_else(|| "the system's output".into()))
+    }
+
     /// The stems' gains, from now on.
     pub fn set_gains(&self, now: &[f32]) {
         for (gain, g) in self.gains.iter().zip(now) {
@@ -557,6 +696,7 @@ impl Audio {
                     self.shared = Arc::default();
                     self.keep_loop();
                     let player = Player::connect_new(sink.mixer());
+                    player.set_volume(self.volume);
                     self.shared.speed.store(self.speed.to_bits(), Ordering::Relaxed);
                     // Paused before anything is added, so not a sample slips out.
                     if std::mem::take(&mut self.start_paused) {
@@ -891,10 +1031,43 @@ mod tests {
     }
 
     #[test]
+    fn volume_steps_on_a_5_percent_grid_from_silent_to_full() {
+        assert_eq!(step_volume(1.0, true), 1.0);
+        assert!((step_volume(1.0, false) - 0.95).abs() < 1e-6);
+        assert!((step_volume(0.42, true) - 0.45).abs() < 1e-6);
+        assert_eq!(step_volume(0.02, false), 0.0);
+        assert_eq!(level_at(1.4), 1.0);
+        assert_eq!(level_at(0.333), 0.33);
+        assert_eq!(level_at(-0.2), 0.0);
+    }
+
+    #[test]
+    fn stems_play_at_their_level_unless_muted_or_another_is_soloed() {
+        let levels = [1.0, 0.5, 0.25];
+        assert_eq!(stem_gains(&levels, &[false, false, true], None), [1.0, 0.5, 0.0]);
+        // Solo plays a stem at its own level, even a muted one.
+        assert_eq!(stem_gains(&levels, &[false, true, false], Some(1)), [0.0, 0.5, 0.0]);
+        // Levels not known yet are full.
+        assert_eq!(stem_gains(&[], &[false, false], None), [1.0, 1.0]);
+    }
+
+    #[test]
+    fn the_chosen_output_plays_while_connected_else_the_systems() {
+        let id = |s: &str| Some(s.to_string());
+        assert_eq!(wanted(Some("headphones"), true, id("speakers")), id("headphones"));
+        assert_eq!(wanted(Some("interface"), false, id("speakers")), id("speakers"));
+        assert_eq!(wanted(None, false, id("headphones")), id("headphones"));
+        assert_eq!(wanted(None, false, None), None);
+    }
+
+    #[test]
     fn a_seek_hands_the_new_loop_over_first() {
         // No output device: the loop handover happens all the same.
         let mut audio = Audio {
             sink: None,
+            output: None,
+            chosen: None,
+            volume: 1.0,
             player: None,
             loading: None,
             files: Vec::new(),

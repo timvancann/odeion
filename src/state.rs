@@ -21,8 +21,8 @@ pub fn data_dir() -> PathBuf {
     home().join("Library/Application Support/riff")
 }
 
-/// What ⌘, changes: the folders to scan and the colour theme, by name. Also where the
-/// window was left.
+/// What ⌘, changes: the folders to scan, the colour theme by name, vim keys and the
+/// output device. Also where the window was left, and the volume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -31,6 +31,10 @@ pub struct Settings {
     pub window: Option<Placement>,
     /// Bare letters as vim commands outside search (`keys.rs`).
     pub vim: bool,
+    /// The master volume, from 0 to 1.
+    pub volume: f32,
+    /// The output device chosen, by id; none plays through the system's.
+    pub output: Option<String>,
 }
 
 /// The window's place: which display (by its UUID) and where on it, in points from the
@@ -51,6 +55,8 @@ impl Default for Settings {
             theme: crate::theme::DEFAULT_NAME.to_string(),
             window: None,
             vim: true,
+            volume: 1.0,
+            output: None,
         }
     }
 }
@@ -172,11 +178,16 @@ mod tests {
             theme: "Tokyo Night".into(),
             window: Some(Placement { display: "abc".into(), x: 10., y: 20., width: 900., height: 800. }),
             vim: false,
+            volume: 0.6,
+            output: Some("coreaudio:headphones".into()),
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s);
         std::fs::write(&file, br#"{"theme": "Tokyo Night"}"#).unwrap();
         assert_eq!(Settings::load(&file).folders, Settings::default().folders);
+        // Settings from before volume and output play at full, through the system's.
+        assert_eq!(Settings::load(&file).volume, 1.0);
+        assert_eq!(Settings::load(&file).output, None);
         let _ = std::fs::remove_file(&file);
     }
 }

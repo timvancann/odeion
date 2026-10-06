@@ -59,13 +59,33 @@ const SAVE_EVERY: usize = 250;
 
 
 /// The ⌘, sheet: the highlighted row (each folder, then "add folder", the theme, vim
-/// keys), and the theme picker when it is open.
+/// keys, the output), and the theme picker when it is open.
 #[derive(Default)]
 struct Prefs {
     row: usize,
     picker: Option<Picker>,
     /// The first `d` of `dd` was pressed.
     delete: bool,
+    /// The system's output and the chosen device's name when the sheet opened; asking
+    /// every frame would be wasted.
+    system: Option<crate::audio::Output>,
+    chosen: Option<String>,
+    /// The output picker, when open: the highlighted entry (0 the system's, then each
+    /// device), the devices once listed, and the listing under way. Listing takes half
+    /// a second, so it happens on a thread.
+    choosing: Option<usize>,
+    outputs: Vec<crate::audio::Output>,
+    listing: Option<Receiver<Vec<crate::audio::Output>>>,
+}
+
+impl Prefs {
+    fn new(chosen: Option<&str>) -> Prefs {
+        Prefs {
+            system: crate::audio::system_output(),
+            chosen: chosen.and_then(crate::audio::name_of),
+            ..Prefs::default()
+        }
+    }
 }
 
 /// Browsing themes, as in Jasmijn: typing filters, moving previews, Enter keeps, Esc
@@ -147,6 +167,13 @@ impl Render for Tip {
     }
 }
 
+/// A level that drags like a slider: the master volume, or a stem's.
+#[derive(Clone, Copy, PartialEq)]
+enum Slider {
+    Volume,
+    Stem(usize),
+}
+
 /// A loop edge, being placed or dragged.
 #[derive(Clone, Copy, PartialEq)]
 enum Edge {
@@ -195,6 +222,10 @@ pub struct Riff {
     stem_waves: Vec<Rc<Wave>>,
     /// Which stems are muted, and the one soloed.
     muted: Vec<bool>,
+    /// Each stem set's levels, by its first file, like `loops`.
+    levels: HashMap<PathBuf, Vec<f32>>,
+    /// A level being dragged, and where its slider was drawn.
+    sliding: Option<(Slider, Rc<Cell<Bounds<Pixels>>>)>,
     solo: Option<usize>,
     /// The playing song's beats, found in the background like the waveform.
     beats: Option<(PathBuf, Rc<Beats>)>,
@@ -339,6 +370,7 @@ impl Riff {
         let mut tracks = scan::load_cache(&cache_file());
         library::sort(&mut tracks);
         let settings = Settings::load(&settings_file());
+        let audio = Audio::new(settings.volume, settings.output.clone());
         if settings.theme != theme::DEFAULT_NAME
             && let Some(t) = theme::available(&theme::zed_dirs())
                 .into_iter()
@@ -371,6 +403,8 @@ impl Riff {
             reading: None,
             stem_waves: Vec::new(),
             muted: Vec::new(),
+            levels: HashMap::new(),
+            sliding: None,
             solo: None,
             beats: None,
             finding: None,
@@ -398,7 +432,7 @@ impl Riff {
             rows: Vec::new(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
-            audio: Audio::new(),
+            audio,
             now: None,
             favorites: Favorites::load(&favorites_file()),
             album: None,
@@ -507,6 +541,35 @@ impl Riff {
         }
     }
 
+    /// Opens the output picker, listing the devices on a thread.
+    fn open_outputs(&mut self) {
+        let Some(prefs) = &mut self.prefs else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::audio::outputs());
+        });
+        (prefs.choosing, prefs.listing) = (Some(0), Some(rx));
+    }
+
+    /// Plays through entry `i` of the picker (0 the system's), and keeps it.
+    fn choose_output(&mut self, i: usize) {
+        let Some(prefs) = &mut self.prefs else { return };
+        let Some(chosen) = (match i {
+            0 => Some(None),
+            i => prefs.outputs.get(i - 1).map(|o| Some(o.clone())),
+        }) else {
+            return;
+        };
+        prefs.choosing = None;
+        prefs.chosen = chosen.as_ref().map(|o| o.name.clone());
+        self.settings.output = chosen.map(|o| o.id);
+        self.audio.chosen = self.settings.output.clone();
+        self.save_settings();
+        if let Some(name) = self.audio.follow_output() {
+            self.message = Some((format!("playing through {name}"), false));
+        }
+    }
+
     fn toggle_vim(&mut self) {
         self.settings.vim = !self.settings.vim;
         self.pending = None;
@@ -558,12 +621,24 @@ impl Riff {
             }
             return;
         }
+        if let Some(at) = prefs.choosing {
+            let last = prefs.outputs.len();
+            match k.key.as_str() {
+                "escape" => prefs.choosing = None,
+                // Nothing to pick until the devices are listed.
+                "enter" | "space" if prefs.listing.is_none() => self.choose_output(at),
+                _ if up => prefs.choosing = Some(at.saturating_sub(1)),
+                _ if down => prefs.choosing = Some((at + 1).min(last)),
+                _ => {}
+            }
+            return;
+        }
         let folders = self.settings.folders.len();
         let row = prefs.row;
         match k.key.as_str() {
             "escape" => self.close_prefs(),
             _ if up => prefs.row = row.saturating_sub(1),
-            _ if down => prefs.row = (row + 1).min(folders + 2),
+            _ if down => prefs.row = (row + 1).min(folders + 3),
             _ if dd && row < folders => {
                 self.remove_folder(row);
                 if let Some(prefs) = &mut self.prefs {
@@ -578,14 +653,30 @@ impl Riff {
             }
             "enter" | "space" if row == folders + 1 => self.open_picker(),
             "enter" | "space" if row == folders + 2 => self.toggle_vim(),
+            "enter" | "space" if row == folders + 3 => self.open_outputs(),
             _ => {}
         }
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.audio.tick();
+        if let Some(prefs) = &mut self.prefs
+            && let Some(outputs) = prefs.listing.as_ref().and_then(|rx| rx.try_recv().ok())
+        {
+            // The picker opens on what plays now.
+            let now = self.settings.output.as_ref().and_then(|id| outputs.iter().position(|o| &o.id == id));
+            prefs.choosing = Some(now.map_or(0, |i| i + 1));
+            (prefs.outputs, prefs.listing) = (outputs, None);
+            changed = true;
+        }
         if self.saved_at.elapsed() > SESSION_EVERY {
             self.save_session();
+            // The output device is checked as often: headphones plugged in, AirPods
+            // connecting, or a device chosen in settings coming back.
+            if let Some(name) = self.audio.follow_output() {
+                self.message = Some((format!("playing through {name}"), false));
+                changed = true;
+            }
         }
         if self.scrolled_at.is_some_and(|at| at.elapsed() > SCROLLBAR_LINGERS) {
             self.scrolled_at = None;
@@ -858,6 +949,7 @@ impl Riff {
         let spot = self.resume.of(&track.path).cloned().unwrap_or_default();
         self.loops.extend(spot.loops.clone());
         self.marks.extend(spot.marks.clone());
+        self.levels.extend(spot.levels.clone());
         self.slow = spot.slow;
         self.speed = spot.speed.min(SPEEDS.len() - 1);
         self.audio.set_speed(if self.slow { SPEEDS[self.speed] } else { 1.0 });
@@ -964,6 +1056,14 @@ impl Riff {
             .chain(self.variations.of(&now.path).iter().filter_map(|v| v.files.first().cloned()))
             .filter_map(|r| self.marks.get(&r).map(|m| (r, *m)))
             .collect();
+        let levels = self
+            .variations
+            .of(&now.path)
+            .iter()
+            .filter_map(|v| v.files.first())
+            .filter_map(|r| self.levels.get(r).map(|l| (r.clone(), l.clone())))
+            .filter(|(_, l)| l.iter().any(|l| *l != 1.0))
+            .collect();
         let spot = Spot {
             variation: self.variation,
             slow: self.slow,
@@ -971,6 +1071,7 @@ impl Riff {
             at: self.audio.position(),
             loops,
             marks,
+            levels,
         };
         self.resume.keep(&now.path, spot);
         self.kept = std::time::Instant::now();
@@ -1040,6 +1141,29 @@ impl Riff {
             }))
     }
 
+    /// The master volume: an icon and a bar filled to the level, dragged or scrolled.
+    fn volume_slider(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let volume = self.audio.volume();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(28.))
+            .px_2()
+            .rounded_md()
+            .bg(rgb(t.raised))
+            .child(ui::icon(if volume == 0.0 { "volume-x" } else { "volume-2" }, 16., t.dim))
+            .child(
+                self.level_area("volume", Slider::Volume, gpui::rgb(t.accent), cx)
+                    .tooltip(self.tip(format!("Volume {:.0}%: drag or scroll", volume * 100.), &[Action::Volume(true), Action::Volume(false)]))
+                    .w(px(72.))
+                    .h(px(10.))
+                    .rounded_full()
+                    .bg(rgb(t.faint)),
+            )
+    }
+
     /// The title bar's switch between library and practice mode, the current one lit.
     fn mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
@@ -1082,7 +1206,7 @@ impl Riff {
                 if self.prefs.is_some() {
                     self.close_prefs();
                 } else {
-                    self.prefs = Some(Prefs::default());
+                    self.prefs = Some(Prefs::new(self.settings.output.as_deref()));
                 }
             }
             Action::AddVariation => {
@@ -1154,14 +1278,100 @@ impl Riff {
         ));
     }
 
-    /// Each stem's gain: the soloed one alone, otherwise all but the muted.
+    /// Each stem's gain: its level, the soloed one alone, the muted ones silent.
     fn gains(&self) -> Vec<f32> {
-        (0..self.muted.len())
-            .map(|i| match self.solo {
-                Some(s) => (s == i) as u8 as f32,
-                None => (!self.muted[i]) as u8 as f32,
-            })
-            .collect()
+        crate::audio::stem_gains(&self.stem_levels(), &self.muted, self.solo)
+    }
+
+    /// The playing stem set's levels.
+    fn stem_levels(&self) -> Vec<f32> {
+        self.recording().and_then(|r| self.levels.get(&r).cloned()).unwrap_or_default()
+    }
+
+    /// Sets a level: the volume, or a stem's (heard at once, kept by `keep_levels`).
+    fn set_level(&mut self, slider: Slider, level: f32) {
+        match slider {
+            Slider::Volume => {
+                self.audio.set_volume(level);
+                self.settings.volume = self.audio.volume();
+                self.message = Some((format!("volume {:.0}%", self.audio.volume() * 100.), false));
+            }
+            Slider::Stem(i) if i < self.muted.len() => {
+                let (Some(recording), n) = (self.recording(), self.muted.len()) else { return };
+                let levels = self.levels.entry(recording).or_insert_with(|| vec![1.0; n]);
+                levels.resize(n, 1.0);
+                levels[i] = level.clamp(0.0, 1.0);
+                self.audio.set_gains(&self.gains());
+            }
+            Slider::Stem(_) => {}
+        }
+    }
+
+    /// Keeps the levels: the volume in settings, a stem set's with the song.
+    fn keep_levels(&mut self, slider: Slider) {
+        match slider {
+            Slider::Volume => self.save_settings(),
+            Slider::Stem(_) => {
+                self.keep_spot();
+                self.store_resume();
+            }
+        }
+    }
+
+    /// The level a slider shows.
+    fn level(&self, slider: Slider) -> f32 {
+        match slider {
+            Slider::Volume => self.audio.volume(),
+            Slider::Stem(i) => self.stem_levels().get(i).copied().unwrap_or(1.0),
+        }
+    }
+
+    /// A slider's level from the pointer's place along it.
+    fn slide(&mut self, slider: Slider, bounds: Bounds<Pixels>, x: Pixels) {
+        let width = f32::from(bounds.size.width);
+        if width > 0. {
+            self.set_level(slider, crate::audio::level_at(f32::from(x - bounds.origin.x) / width));
+        }
+    }
+
+    /// An area that sets `slider`'s level: a drag across it, or the wheel over it. Its
+    /// level shows as a fill from the left; the caller sizes it and adds what it shows.
+    fn level_area(&self, id: impl Into<gpui::ElementId>, slider: Slider, fill: gpui::Rgba, cx: &mut Context<Self>) -> Stateful<Div> {
+        let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::default();
+        let (drawn, pressed) = (bounds.clone(), bounds);
+        div()
+            .id(id)
+            .relative()
+            .overflow_hidden()
+            .cursor(gpui::CursorStyle::ResizeLeftRight)
+            .child(canvas(move |b, _, _| drawn.set(b), |_, _, _, _| {}).absolute().size_full())
+            .child(div().absolute().top_0().left_0().h_full().w(relative(self.level(slider))).bg(fill))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    riff.slide(slider, pressed.get(), e.position.x);
+                    riff.sliding = Some((slider, pressed.clone()));
+                    cx.notify();
+                }),
+            )
+            .on_scroll_wheel(cx.listener(move |riff, e: &gpui::ScrollWheelEvent, _, cx| {
+                let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
+                if dy != 0. {
+                    // A notch is a 5% step, as ⌥↑ ⌥↓ are for the volume.
+                    let level = riff.level(slider) - dy / 20. * crate::audio::VOLUME_STEP;
+                    riff.set_level(slider, crate::audio::level_at(level));
+                    riff.keep_levels(slider);
+                    cx.notify();
+                }
+            }))
+    }
+
+    /// Lets go of a level being dragged, keeping it.
+    fn drop_slider(&mut self) -> bool {
+        let Some((slider, _)) = self.sliding.take() else { return false };
+        self.keep_levels(slider);
+        true
     }
 
     /// The playing variation, if one is on rather than the song itself.
@@ -1241,6 +1451,8 @@ impl Riff {
         // no stems to mute.
         self.muted = if files.len() > 1 { gains.iter().map(|g| *g == 0.0).collect() } else { Vec::new() };
         self.solo = None;
+        // Each stem at the level it was left at.
+        let gains = if files.len() > 1 { self.gains() } else { gains };
         self.audio.switch(&files, &gains, at, looping);
         if looping.active() {
             self.frame_loop();
@@ -1519,7 +1731,7 @@ impl Riff {
                 if self.prefs.is_some() {
                     self.close_prefs();
                 } else {
-                    self.prefs = Some(Prefs::default());
+                    self.prefs = Some(Prefs::new(self.settings.output.as_deref()));
                 }
                 cx.notify();
                 return;
@@ -1724,6 +1936,14 @@ impl Riff {
                 self.audio.set_gains(&self.gains());
             }
             Action::Mute(_) | Action::Solo(_) => {}
+            Action::Level(i, percent) => {
+                self.set_level(Slider::Stem(i), percent as f32 / 100.);
+                self.keep_levels(Slider::Stem(i));
+            }
+            Action::Volume(up) => {
+                self.set_level(Slider::Volume, crate::audio::step_volume(self.audio.volume(), up));
+                self.keep_levels(Slider::Volume);
+            }
             // Needs the context for the file dialog, so it is handled in `act`.
             Action::AddVariation => {}
             Action::RemoveVariation => {
@@ -2215,6 +2435,14 @@ impl Riff {
     }
 
     fn drag(&mut self, event: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some((slider, bounds)) = self.sliding.clone() {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.slide(slider, bounds.get(), event.position.x);
+            } else {
+                self.drop_slider();
+            }
+            return cx.notify();
+        }
         if let Some(grab) = self.grab {
             if event.pressed_button == Some(MouseButton::Left) {
                 self.drag_thumb(event.position.y - grab);
@@ -2754,7 +2982,8 @@ impl Riff {
                     .items_center()
                     .gap_3()
                     .child(progress.flex_1())
-                    .child(self.speed_buttons(cx)),
+                    .child(self.speed_buttons(cx))
+                    .child(self.volume_slider(cx)),
             )
             .child(
                 div()
@@ -3117,20 +3346,43 @@ impl Riff {
                 .h(px(30.))
                 .child(
                     div()
+                        .id(("stem", i))
                         .w(px(190.))
                         .flex_none()
                         .flex()
                         .gap_1()
-                        .pl_2()
                         .pr_1()
                         .h_full()
                         .items_center()
                         .rounded_md()
+                        .overflow_hidden()
                         .bg(rgb(t.surface))
                         .text_xs()
                         .text_color(rgb(if heard { t.text } else { t.dim }))
-                        .child(div().w(px(14.)).font_family(MONO).text_color(rgb(t.dim)).child((i + 1).to_string()))
-                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                                riff.menu = Some((Menu::stem(i, muted, soloed), e.position));
+                                cx.notify();
+                            }),
+                        )
+                        // The number and name are the level's slider, filled to it.
+                        .child(
+                            self.level_area(("stem-level", i), Slider::Stem(i), tint(t.loops, 0x30), cx)
+                                .tooltip(self.tip(
+                                    format!("{name} at {:.0}%: drag or scroll to change; right-click for more", self.level(Slider::Stem(i)) * 100.),
+                                    &[],
+                                ))
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .pl_2()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().w(px(14.)).font_family(MONO).text_color(rgb(t.dim)).child((i + 1).to_string()))
+                                .child(div().flex_1().min_w_0().truncate().child(name.clone())),
+                        )
                         .child(self.tool(
                             ("mute", i),
                             if muted { "volume-x" } else { "volume-2" },
@@ -3773,7 +4025,36 @@ impl Riff {
                 }),
             ),
         );
+        let system = prefs.system.as_ref().map_or("none".to_string(), |o| o.name.clone());
+        let output = match (&self.settings.output, &prefs.chosen) {
+            (None, _) => format!("The system's output, now {system}"),
+            (Some(_), Some(name)) => name.clone(),
+            (Some(_), None) => format!("A device not connected now; playing through {system}"),
+        };
+        body = body.child(title("Output"));
+        body = match prefs.choosing {
+            None => body.child(
+                row(("output", 0), lit(folders.len() + 3), "headphones", output).on_click(cx.listener(|riff, _, _, cx| {
+                    riff.open_outputs();
+                    cx.notify();
+                })),
+            ),
+            Some(_) if prefs.listing.is_some() => body.child(row(("output", 0), false, "headphones", "Listing devices…".into())),
+            Some(at) => {
+                let entries = std::iter::once((format!("The system's output, now {system}"), None))
+                    .chain(prefs.outputs.iter().map(|o| (o.name.clone(), Some(o.id.clone()))));
+                body.children(entries.enumerate().map(|(i, (name, id))| {
+                    row(("pick-output", i), i == at, "headphones", name)
+                        .children((id == self.settings.output).then(|| ui::icon("check", 14., t.dim)))
+                        .on_click(cx.listener(move |riff, _, _, cx| {
+                            riff.choose_output(i);
+                            cx.notify();
+                        }))
+                }))
+            }
+        };
         let hint = match (prefs.picker.is_some(), self.settings.vim) {
+            _ if prefs.choosing.is_some() => "↑↓ move   Enter plays through it   Esc closes",
             (true, _) => "↑↓ preview   Enter keeps   Esc restores",
             (false, true) => "j k move   Enter choose   dd remove folder   Esc close",
             (false, false) => "↑↓ move   Enter choose   ⌫ remove folder   Esc close",
@@ -4069,7 +4350,7 @@ impl Render for Riff {
             .on_mouse_move(cx.listener(Self::drag))
             .on_mouse_up(MouseButton::Left, cx.listener(|riff, _, _, cx| {
                 // `|`, not `||`: both drags end, whichever was on.
-                if riff.scrubbing.take().is_some() | riff.grab.take().is_some() {
+                if riff.scrubbing.take().is_some() | riff.grab.take().is_some() | riff.drop_slider() {
                     cx.notify();
                 }
                 riff.drop_edge(cx)

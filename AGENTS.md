@@ -21,7 +21,9 @@ and draws:
 - `audio.rs`: playback via rodio, and the A/B `Loop` rules. The loop is kept inside
   the audio stream (`Looped`), to the sample, and that wrapper also keeps the playing
   position, since rodio's player can't see a jump made inside it. Checking from the
-  window every 40 ms let the music run up to 40 ms past the loop's end.
+  window every 40 ms let the music run up to 40 ms past the loop's end. Also the
+  volume, the stems' levels (`stem_gains`) and the output device (`wanted`, followed
+  by `Audio::follow_output`).
 - `playlist.rs`: next, previous and shuffle over the list a song was started from (the
   album, favourites, search results or library; the run of rows between headers).
 - `keys.rs`: the keymap per mode and the ⌘? sheet, see Keyboard.
@@ -175,10 +177,24 @@ they fail.
   next one's back. Tim's choice, over sharing them across aligned recordings.
   Everything plays through one `audio::Mix`, a single file being a mix of one, so a
   stem set's `1`–`9` mute and `⌥1`–`⌥9` solo are instant; the practice view adds a
-  lane per stem. A metronome stem starts muted.
+  lane per stem. A metronome stem starts muted. Each stem has a level: drag across its
+  number and name (filled to the level) or scroll over them, or its right-click menu
+  (100, 50, 25%, solo, mute). Levels are kept per stem set with the song's resume spot;
+  mute and solo aren't kept.
+- **Volume**: ⌥↑ ⌥↓ in 5% steps in every mode, and the slider beside the speed buttons
+  (drag or scroll), from silent to full, no boost. Kept in settings.
+- **The output follows the system**: every second riff asks which device should play
+  (the one chosen in settings while it is connected, otherwise the system's) and, when
+  that changed, reopens the output and carries on from the same moment, playing or
+  paused. Opening the stems again takes a moment, so a switch isn't seamless. That
+  check compares device ids only (about 35 µs). Never list devices with
+  `output_devices()` on a timer: cpal asks every device which formats it plays, about
+  half a second here, and doing that every second made playback drop out.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), the
   theme picker, which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
-  Esc restores), and vim keys on or off.
+  Esc restores), vim keys on or off, and the output: Enter or a click opens a picker
+  (the system's output, then each device, listed on a thread when it opens), ↑↓ or
+  `j k` move, Enter or a click plays through it, Esc closes.
 - **Every action has a button too**, built with `Riff::tool` (an icon, a tooltip and
   the action, done through `Riff::act` exactly as its key would). Tooltips list keys
   from `keys::keys_for`, which reads the ⌘? sheet through the real keymap, so they stay
@@ -226,8 +242,9 @@ commit signing is off for this repo.
 
 `docs/plans/` holds agreed plans; build from them step by step. **Plan 01** (two modes,
 library and practice, with a keymap that stays on Tim's Glove80 base layer, then
-volume, speed, pitch, undo, loop extras, bars and notes) is the current direction. Step 1
-(modes, keymap, right-click menus) is built; step 2 (volume and output) is next.
+volume, speed, pitch, undo, loop extras, bars and notes) is the current direction. Steps 1
+(modes, keymap, right-click menus) and 2 (volume, stem levels, output) are built;
+step 3 (speed and the trainer) is next.
 
 ## Possible features
 
