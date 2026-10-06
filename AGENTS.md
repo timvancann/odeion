@@ -24,7 +24,8 @@ and draws:
   window every 40 ms let the music run up to 40 ms past the loop's end.
 - `playlist.rs`: next, previous and shuffle over the list a song was started from (the
   album, favourites, search results or library; the run of rows between headers).
-- `keys.rs`: the keymap and the ⌘? sheet, see Keyboard.
+- `keys.rs`: the keymap per mode and the ⌘? sheet, see Keyboard.
+- `menu.rs`: the right-click menus: their entries and moving through them by key.
 - `wave.rs`: the practice view's waveform: read on 8 threads when a song starts (each
   placed by packet timestamps, with a second of decoder warm-up), summarised to one
   column per pixel, and which stretch the detail view shows.
@@ -78,31 +79,48 @@ folder holding it. The Drive folder is laid out `Artist/Album/NN Title.ext`, abo
 
 ## Keyboard
 
-Keyboard first, every control also clickable. The keymap is Tim's, settled by trying it.
-`keys.rs` holds it: a key becomes an `Action`, `view.rs` performs it, and `SHEET` beside
-the map is the ⌘? sheet. A test checks every key on the sheet does something, so add a
-key to both or the test fails.
+Keyboard first, every control also clickable. The keymap is Tim's, settled by trying it
+(plan 01 has the reasoning). `keys.rs` holds it: a key becomes an `Action` through the
+current mode's map, `view.rs` performs it, and `SHEET` beside the map is the ⌘? sheet,
+each group listing the modes it shows in. Tests check every key on the sheet does
+something in its modes and no key is listed twice in a mode, so add a key to both or
+they fail.
 
-- **Search is a mode** (⌘P or `/`). Typing goes to the query only while searching;
-  outside it bare keys are commands, even with results showing. This replaced "type
-  anywhere to search", where Space could not pause during a search.
-- **Vim keys are on by default** (a settings row turns them off): `j k`, `gg G`,
-  `⌃U ⌃D`, `zz` to the playing song, `h l` seek, `H L` previous and next song, `^` back
-  to the start, `f` favourite, `a` album, `A` artist, `i` search, `t`
-  Transcribe!, `s` shuffle, `?` keys, `dd` removes a folder in settings. No counts,
-  by choice.
+- **Modes, like vim**: the library (finding and playing songs; riff opens here unless
+  it was left in practice), search inside it, and practice (the practice view; the mode
+  *is* the view). `p` or Tab enters practice, Esc, `p` or Tab leaves; the title bar's
+  Library / Practice switch does the same. The ⌘? sheet and every tooltip show the
+  current mode's keys. Every primary key sits on the base layer of Tim's Glove80 (shift
+  counts); brackets, braces and parentheses take two hands there, so they're off the
+  sheet. A test checks the practice sheet.
+- **Everywhere outside typing**: Space pauses, `← →` seek, `0` back to the start, `m`
+  and `o` the marker.
+- **Search is a mode** (⌘P, or `/` `i`). Typing goes to the query only while
+  searching; outside it bare keys are commands, even with results showing. This
+  replaced "type anywhere to search", where Space could not pause during a search.
+- **Vim keys in the library, on by default** (a settings row turns them off): `j k`,
+  `gg G`, `⌃U ⌃D`, `zz` to the playing song, `h l` seek, `H L` previous and next song,
+  `f` favourite, `a` album, `A` artist, `i` search, `t` Transcribe!, `s` shuffle, `?`
+  keys, `dd` removes a folder in settings. No counts, by choice. Practice keys are the
+  mode's own and work either way.
 - **The ⌘ shortcuts always work**: ⌘P, ⌘F, ⌘A, ⇧⌘A (artist view), ⌘T (the *highlighted* song), ⌘S,
   ⌘← ⌘→ or ⌘H ⌘L previous and next, ⌘, settings, ⌘? keys, ⌘Q. ⌘H is free because
-  there is no menu bar to hide the app with. ⌃J ⌃K and arrows move; plain ← → seek.
-- **Loop keys always work**: `[ ]` set the edges at the playhead, `\` clears, `|` switches
-  looping off and on keeping the edges (the loop button too, once both are set; placing
-  an edge switches it back on), `{ }`
-  widen the loop by 50 ms at the start or end and `( )` narrow it, `< >` slide the loop by its own length
-  (phrase by phrase). Halving and doubling were tried and removed: Tim never used them.
-  Every change plays around the edge it
-  moved, to be judged by ear. On the progress bar, drag an edge or shift-click for the
-  end. The rules live on `audio::Loop`.
-- **`P` toggles the practice view**: the list gives way to the song's loudness contour
+  there is no menu bar to hide the app with. In the library ⌃J ⌃K and arrows move.
+- **Loop keys are practice keys**: `a` `b` set the edges at the playhead (`[ ]` quietly
+  too), `\` switches looping off and on keeping the edges (the loop button too, once
+  both are set; placing an edge switches it back on), `|` clears. Widening or narrowing
+  by 50 ms and sliding the loop by its own length (phrase by phrase) are buttons on
+  the loop bar only, by Tim's choice: `h l` move the playhead and `a` or `b` again puts
+  the edge there. Halving and doubling were tried and removed: Tim never used them.
+  Every change plays around the edge it moved, to be judged by ear. On the progress
+  bar, drag an edge or shift-click for the end. The rules live on `audio::Loop`.
+- **Right-click menus** (`menu.rs`): on a waveform (loop starts or ends here, marker
+  here, all at the moment clicked), a section (loop it, rename, delete) and a song row
+  (favourite, album, artist, Transcribe!, add a variation; the row is highlighted).
+  Each entry is an `Action` showing its keys, done on what was clicked rather than at
+  the playhead. They open at the pointer, take `j k` / ↑ ↓ and Enter, and close on Esc
+  or a click elsewhere, which does nothing else.
+- **The practice view**: the list gives way to the song's loudness contour
   (with the shown stretch boxed) over a large RMS waveform that frames the loop, or
   follows the playhead without one. `- =` zoom (⌘- ⌘= too, and the
   wheel over either waveform). Over a loop edge the cursor becomes a resize arrow
@@ -120,8 +138,8 @@ key to both or the test fails.
   playhead only when Tim picks the song himself (a song following on in a list starts
   at the top), and not when it was left within 5 s of the end. Slow-down is per song.
   Kept on leaving a song, switching recording or speed, every 5 s of playing, and ⌘Q.
-- **Slow-down**: `S` on and off, `,` `.` step through 50, 60, 70, 80, 90% and full speed
-  (`.` at 90% turns slow-down off, `,` at full speed goes to 90%; `S` jumps to the preset); also the 50 to 90 buttons on the now-playing card (the lit one again turns it
+- **Slow-down**: `s` on and off in practice, `,` `.` step through 50, 60, 70, 80, 90% and full speed
+  (`.` at 90% turns slow-down off, `,` at full speed goes to 90%; `s` jumps to the preset); also the 50 to 90 buttons on the now-playing card (the lit one again turns it
   off). Pitch is kept: Signalsmith
   Stretch at its full preset (Tim compared it with SoundTouch, "night and day"; the
   cheaper preset saves nothing worth it at 0.5% of a core). It sits after the loop and
@@ -129,9 +147,9 @@ key to both or the test fails.
   samples pass straight through. It reports what it holds back (~0.1 s) so the playhead
   shows what's heard, and a soft limiter keeps its rare peaks (up to 1.8) under full
   scale.
-- **`b` toggles the beat grid** (the practice view marks beats with small chevrons at
-  its top and bottom edges, faint until the grid is on, and shows the local tempo). On the grid `[ ]` and shift-click snap to the nearest beat, `{ } ( )`
-  move an edge a whole beat, `< >` slide in beats, `h l` / `← →` step by
+- **`g` toggles the beat grid** (the practice view marks beats with small chevrons at
+  its top and bottom edges, faint until the grid is on, and shows the local tempo). On the grid `a b` and shift-click snap to the nearest beat, the widen and narrow buttons
+  move an edge a whole beat, the slide buttons slide in beats, `h l` / `← →` step by
   beats (back restarts the beat you're in first), dragging snaps (⌥ drags freely), and so does a click that moves the playhead (⌥-click
   doesn't).
   Off, everything is as before; songs without a steady beat should stay off.
@@ -142,13 +160,13 @@ key to both or the test fails.
   off it without changing it. Sections change only by dragging their edges in the
   section lane (snapping on the grid, ⌥ freely). `r` saves the loop as a section in a
   dialog (Enter saves, an empty name saves one saying where it is, Esc cancels; when
-  the loop is exactly a section it renames that one). `x` deletes the section in play:
+  the loop is exactly a section it renames that one). `dd` deletes the section in play:
   the loop's, else the shortest one around the playhead, which is also the one lit.
 - **The marker**: `m` drops it at the playhead (on a beat with the grid), `m` again
   clears it from anywhere, and it drags like a loop edge (snapping, ⌥ freely; on a loop
   edge, grab it by its flag at the strip's top). Dropping it plays nothing. `o` plays from the marker, or from the loop start without one. One
   per recording, remembered like the loop, drawn as a gold flag on the waveforms and
-  the progress bar. `m` and `o` work with vim keys off too; favourite lost `m`.
+  the progress bar. `m` and `o` work in both modes, with vim keys off too.
 - **Variations**: drop files or a folder on a song (or the practice view), or `V` to
   pick; `v` cycles the song and its variations, keeping the position where they line
   up, `X` removes the playing one. Linked files leave the song list; songs with
@@ -208,7 +226,8 @@ commit signing is off for this repo.
 
 `docs/plans/` holds agreed plans; build from them step by step. **Plan 01** (two modes,
 library and practice, with a keymap that stays on Tim's Glove80 base layer, then
-volume, speed, pitch, undo, loop extras, bars and notes) is the current direction.
+volume, speed, pitch, undo, loop extras, bars and notes) is the current direction. Step 1
+(modes, keymap, right-click menus) is built; step 2 (volume and output) is next.
 
 ## Possible features
 

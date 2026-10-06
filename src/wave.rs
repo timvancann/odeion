@@ -1,4 +1,4 @@
-//! The waveform for the practice view (`P`): read in the background whenever a song
+//! The waveform for the practice view (`p`): read in the background whenever a song
 //! starts, kept in memory for that song only, and summarised to one column per pixel
 //! at any zoom.
 

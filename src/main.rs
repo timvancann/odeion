@@ -2,6 +2,7 @@ mod audio;
 mod beats;
 mod keys;
 mod library;
+mod menu;
 mod media;
 mod playlist;
 mod regions;

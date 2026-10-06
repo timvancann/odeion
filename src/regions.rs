@@ -1,8 +1,8 @@
 //! Sections of a song (called regions in the code and the data file): named stretches,
 //! saved per recording (`r` saves the loop as one, `n` `N` play the next or previous,
-//! `x` deletes). A section is not the loop: playing one sets the loop to it, and after
-//! that the two are apart, so the loop can shrink inside a section or leave it without
-//! changing it. Sections change by dragging their edges. Kept in `regions.json` in the
+//! `dd` deletes, or a section's right-click menu). A section is not the loop: playing
+//! one sets the loop to it, and after that the two are apart, so the loop can shrink
+//! inside a section or leave it without changing it. Sections change by dragging their edges. Kept in `regions.json` in the
 //! data folder, keyed by the recording's path, so nothing is written next to the music.
 
 use crate::audio::Loop;
@@ -89,6 +89,17 @@ impl Regions {
         Some(at)
     }
 
+    /// Renames section `i`; an empty name gives it one saying where it is. Returns the
+    /// name it got.
+    pub fn rename(&mut self, song: &Path, i: usize, name: &str) -> Option<String> {
+        let region = self.0.get_mut(song)?.get_mut(i)?;
+        region.name = match name.trim() {
+            "" => Region::default_name(region.start, region.end),
+            name => name.to_string(),
+        };
+        Some(region.name.clone())
+    }
+
     /// Removes section `i`. Returns its name.
     pub fn remove(&mut self, song: &Path, i: usize) -> Option<String> {
         let list = self.0.get_mut(song)?;
@@ -161,6 +172,17 @@ mod tests {
         assert_eq!(r.of(song).len(), 3);
         assert_eq!(r.matching(song, looped(90.0, 110.0)).unwrap().name, "Outro solo");
         assert!(r.of(Path::new("/m/other.mp3")).is_empty());
+    }
+
+    #[test]
+    fn a_section_renamed_keeps_its_stretch_and_an_empty_name_says_where() {
+        let song = Path::new("/m/song.mp3");
+        let mut r = Regions::default();
+        r.save(song, region("Verse", 10.0, 20.0));
+        assert_eq!(r.rename(song, 0, " Chorus "), Some("Chorus".into()));
+        assert_eq!(r.of(song)[0], region("Chorus", 10.0, 20.0));
+        assert_eq!(r.rename(song, 0, ""), Some(Region::default_name(s(10.0), s(20.0))));
+        assert_eq!(r.rename(song, 1, "Gone"), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Beats: where they fall in a song, and the grid rules built on them (`b` in the
+//! Beats: where they fall in a song, and the grid rules built on them (`g` in the
 //! practice view). Found in the background when a song starts, like the waveform.
 //!
 //! Old rock was rarely played to a click, so there is no fixed tempo here: each beat is

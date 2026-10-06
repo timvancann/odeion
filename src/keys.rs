@@ -1,16 +1,29 @@
 //! What each key does, and the ⌘? sheet that lists them, side by side so they can't
 //! disagree. Pure: `view.rs` turns a keystroke into a `Press` and performs the `Action`.
 //!
-//! Outside search, bare keys are commands. Vim keys (letters, `/`, `^`, `?`) can be
-//! turned off in settings; the ⌘ shortcuts, arrows and loop keys always work.
+//! Riff has modes, like vim. The library is for finding and playing songs, search is
+//! its sub-mode where keys type, and practice is the waveform with the loop, sections
+//! and stems. A key means what the current mode's map says, after the few keys that
+//! work everywhere. Vim keys (letters, `/`, `?`) in the library can be turned off in
+//! settings; practice keys are the mode's own and always work.
 
-/// Nudging a loop edge moves it this far.
+/// The loop bar's widen and narrow buttons move an edge this far.
 pub const NUDGE: f64 = 0.05;
 /// Each zoom step shows this many times more or less.
 pub const ZOOM: f64 = 1.5;
 /// ⌃D and ⌃U move this many rows.
 pub const HALF_PAGE: isize = 6;
 const SEEK: f64 = 5.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Finding and playing songs. Riff opens here.
+    Library,
+    /// Typing a search, within the library.
+    Search,
+    /// The practice view: the waveform, the loop, sections and stems.
+    Practice,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -19,8 +32,9 @@ pub enum Action {
     Bottom,
     /// Highlight the playing song.
     ToPlaying,
+    /// Search on or off: Esc in search stops typing and keeps the results.
     Search,
-    /// Esc outside search: clear the search and leave the album.
+    /// Esc in the library: clear the search and leave the album.
     Clear,
     ClearSearch,
     Play,
@@ -47,10 +61,13 @@ pub enum Action {
     LoopClear,
     /// Looping on or off, keeping the edges.
     LoopSwitch,
+    /// Widen (below 0) or narrow the loop at its start; buttons only.
     NudgeStart(f64),
+    /// Widen (above 0) or narrow the loop at its end; buttons only.
     NudgeEnd(f64),
+    /// Slide the loop on (true) or back by its length; buttons only.
     Slide(bool),
-    /// The practice view with the waveform, on or off.
+    /// Practice mode on or off.
     Practice,
     /// Zoom the practice view: below 1 closer in, above 1 further out.
     Zoom(f64),
@@ -60,7 +77,9 @@ pub enum Action {
     SaveRegion,
     /// The next (true) or previous region, as the loop.
     Region(bool),
-    /// Delete the region the loop is.
+    /// The section in play as the loop; from a section's menu, that section. No key.
+    LoopRegion,
+    /// Delete the region in play.
     RemoveRegion,
     /// The playing song's next recording: the song, then each variation.
     Variation,
@@ -92,14 +111,23 @@ pub struct Press<'a> {
     pub alt: bool,
 }
 
-/// Keys that work everywhere, searching or not: ⌘ and ⌃ shortcuts, arrows, paging.
+/// What a key does in `mode`. `pending` holds the first key of `gg`, `zz` and `dd`.
+pub fn press(mode: Mode, p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action> {
+    let first = pending.take();
+    if let Some(action) = anywhere(p) {
+        return Some(action);
+    }
+    match mode {
+        Mode::Search => search(p),
+        Mode::Library => outside(p).or_else(|| library(p, vim, first, pending)),
+        Mode::Practice => outside(p).or_else(|| practice(p, first, pending)),
+    }
+}
+
+/// Keys that work in every mode, even while typing a search: ⌘ shortcuts and ← →.
 pub fn anywhere(p: Press) -> Option<Action> {
     use Action::*;
     Some(match (p.key, p.cmd, p.ctrl) {
-        ("j", false, true) | ("down", false, false) => Move(1),
-        ("k", false, true) | ("up", false, false) => Move(-1),
-        ("pagedown", ..) => Move(10),
-        ("pageup", ..) => Move(-10),
         ("p", true, _) => Search,
         ("m", true, false) => Minimize,
         ("f", true, true) => FullScreen,
@@ -115,66 +143,62 @@ pub fn anywhere(p: Press) -> Option<Action> {
         ("?", true, _) => Help,
         ("/", true, _) if p.shift => Help,
         (",", true, _) => Settings,
-        ("=" | "+", true, _) => Zoom(1.0 / ZOOM),
-        ("-", true, _) => Zoom(ZOOM),
         ("q", true, _) => Quit,
-        ("backspace", true, _) => ClearSearch,
         _ => return None,
     })
 }
 
-/// Keys outside search. `pending` holds the first key of `gg` and `zz`.
-pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action> {
+/// Bare keys that work in the library and in practice, though not while typing.
+fn outside(p: Press) -> Option<Action> {
+    if p.cmd || p.ctrl || p.alt {
+        return None;
+    }
+    Some(match (p.key, p.shift) {
+        ("space", _) => Action::Toggle,
+        ("0", false) => Action::ToStart,
+        ("m", false) => Action::Marker,
+        ("o", false) => Action::FromLoopStart,
+        _ => return None,
+    })
+}
+
+/// Moving through the list, in the library and while searching.
+fn moving(p: Press) -> Option<Action> {
+    use Action::Move;
+    Some(match (p.key, p.cmd, p.ctrl, p.alt) {
+        ("j", false, true, _) | ("down", false, false, false) => Move(1),
+        ("k", false, true, _) | ("up", false, false, false) => Move(-1),
+        ("pagedown", false, ..) => Move(10),
+        ("pageup", false, ..) => Move(-10),
+        _ => return None,
+    })
+}
+
+fn search(p: Press) -> Option<Action> {
+    if let Some(action) = moving(p) {
+        return Some(action);
+    }
+    Some(match (p.key, p.cmd) {
+        ("enter", false) => Action::Play,
+        // Stops typing, keeping the results; Esc again in the library clears them.
+        ("escape", _) => Action::Search,
+        ("backspace", true) => Action::ClearSearch,
+        _ => return None,
+    })
+}
+
+fn library(p: Press, vim: bool, first: Option<char>, pending: &mut Option<char>) -> Option<Action> {
     use Action::*;
-    let first = pending.take();
-    if let Some(action) = anywhere(p) {
+    if let Some(action) = moving(p) {
         return Some(action);
     }
     if p.cmd {
-        return None;
+        return (p.key == "backspace").then_some(ClearSearch);
     }
-    if p.key == "p" && p.shift && !p.ctrl {
-        return Some(Practice);
-    }
-    // Stems by number: 1 to 9 mute, ⌥ solos. Shift would collide with ( and ^.
-    if let Some(n) = p.key.parse::<usize>().ok().filter(|n| (1..=9).contains(n) && !p.ctrl) {
-        return Some(if p.alt { Solo(n - 1) } else { Mute(n - 1) });
-    }
-    if !p.ctrl {
-        match (p.key, p.shift) {
-            ("b", false) => return Some(Grid),
-            ("r", false) => return Some(SaveRegion),
-            ("m", false) => return Some(Marker),
-            ("o", false) => return Some(FromLoopStart),
-            ("n", false) => return Some(Region(true)),
-            ("n", true) => return Some(Region(false)),
-            ("x", false) => return Some(RemoveRegion),
-            ("s", true) => return Some(Slow),
-            (",", false) => return Some(Speed(false)),
-            (".", false) => return Some(Speed(true)),
-            ("v", false) => return Some(Variation),
-            ("v", true) => return Some(AddVariation),
-            ("x", true) => return Some(RemoveVariation),
-            _ => {}
-        }
-    }
-    let always = match p.key {
-        "enter" => Some(Play),
-        "escape" => Some(Clear),
-        "space" => Some(Toggle),
-        "[" => Some(LoopStart),
-        "]" => Some(LoopEnd),
-        "\\" => Some(LoopClear),
-        "|" => Some(LoopSwitch),
-        // Braces widen the loop, parentheses narrow it, each at the edge on its side.
-        "{" => Some(NudgeStart(-NUDGE)),
-        "}" => Some(NudgeEnd(NUDGE)),
-        "(" => Some(NudgeStart(NUDGE)),
-        ")" => Some(NudgeEnd(-NUDGE)),
-        "<" => Some(Slide(false)),
-        ">" => Some(Slide(true)),
-        "-" => Some(Zoom(ZOOM)),
-        "=" => Some(Zoom(1.0 / ZOOM)),
+    let always = match (p.key, p.shift, p.ctrl) {
+        ("enter", false, false) => Some(Play),
+        ("escape", ..) => Some(Clear),
+        ("tab", false, false) | ("p", false, false) => Some(Practice),
         _ => None,
     };
     if always.is_some() || !vim {
@@ -196,7 +220,6 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
         ("l", false, false) => Seek(SEEK),
         ("h", true, _) => Previous,
         ("l", true, _) => Next,
-        ("^", ..) => ToStart,
         ("/", ..) => Search,
         ("?", ..) => Help,
         ("f", false, false) => Favorite,
@@ -209,14 +232,67 @@ pub fn normal(p: Press, vim: bool, pending: &mut Option<char>) -> Option<Action>
     })
 }
 
-/// What a keycap on the sheet does ("⌘←", "G", "⌃⌘F", "gg"), read through the same
-/// keymap as a real key press, so the sheet and tooltips can't drift from it.
-pub fn resolve(cap: &str, vim: bool) -> Option<Action> {
-    if cap == "gg" || cap == "zz" {
+/// Practice keys sit on the Glove80's base layer (shift counts as base). Brackets are
+/// kept as quiet aliases for the loop edges, off the sheet.
+fn practice(p: Press, first: Option<char>, pending: &mut Option<char>) -> Option<Action> {
+    use Action::*;
+    if p.cmd {
+        return match p.key {
+            "=" | "+" => Some(Zoom(1.0 / ZOOM)),
+            "-" => Some(Zoom(ZOOM)),
+            _ => None,
+        };
+    }
+    if p.ctrl {
+        return None;
+    }
+    // Stems by number: 1 to 9 mute, ⌥ solos.
+    if let Some(n) = p.key.parse::<usize>().ok().filter(|n| (1..=9).contains(n)) {
+        return Some(if p.alt { Solo(n - 1) } else { Mute(n - 1) });
+    }
+    Some(match (p.key, p.shift) {
+        ("escape" | "tab", _) | ("p", false) => Practice,
+        ("a", false) | ("[", _) => LoopStart,
+        ("b", false) | ("]", _) => LoopEnd,
+        ("\\", _) => LoopSwitch,
+        ("|", _) => LoopClear,
+        ("r", false) => SaveRegion,
+        ("n", false) => Region(true),
+        ("n", true) => Region(false),
+        ("d", false) if first == Some('d') => RemoveRegion,
+        ("d", false) => {
+            *pending = Some('d');
+            return None;
+        }
+        ("h", false) => Seek(-SEEK),
+        ("l", false) => Seek(SEEK),
+        ("g", false) => Grid,
+        ("s", false) => Slow,
+        (",", _) => Speed(false),
+        (".", _) => Speed(true),
+        ("-", _) => Zoom(ZOOM),
+        ("=", _) => Zoom(1.0 / ZOOM),
+        ("v", false) => Variation,
+        ("v", true) => AddVariation,
+        ("x", true) => RemoveVariation,
+        ("?", _) => Help,
+        _ => return None,
+    })
+}
+
+/// What a keycap on the sheet does in `mode` ("⌘←", "G", "⌃⌘F", "gg"), read through the
+/// same keymap as a real key press, so the sheet and tooltips can't drift from it.
+pub fn resolve(cap: &str, mode: Mode, vim: bool) -> Option<Action> {
+    // Two of the same letter, like `gg` or `dd`: pressed twice.
+    let mut letters = cap.chars();
+    if let (Some(a), Some(b), None) = (letters.next(), letters.next(), letters.next())
+        && a == b
+        && a.is_ascii_lowercase()
+    {
         let mut pending = None;
         let press = Press { key: &cap[..1], ..Press::default() };
-        normal(press, vim, &mut pending);
-        return normal(press, vim, &mut pending);
+        self::press(mode, press, vim, &mut pending);
+        return self::press(mode, press, vim, &mut pending);
     }
     // Modifiers in any order: "⌃⌘F" as macOS writes it.
     let (mut cmd, mut ctrl, mut alt, mut shift, mut rest) = (false, false, false, false, cap);
@@ -242,6 +318,7 @@ pub fn resolve(cap: &str, vim: bool) -> Option<Action> {
         "Enter" => "enter",
         "Space" => "space",
         "Esc" => "escape",
+        "Tab" => "tab",
         "PgUp" => "pageup",
         "PgDn" => "pagedown",
         other => other,
@@ -249,151 +326,282 @@ pub fn resolve(cap: &str, vim: bool) -> Option<Action> {
     let upper = named.len() == 1 && named.chars().all(|c| c.is_ascii_uppercase());
     let key = if upper || ctrl || cmd { named.to_lowercase() } else { named.to_string() };
     let press = Press { key: &key, cmd, ctrl, shift: shift || (upper && !ctrl && !cmd), alt };
-    normal(press, vim, &mut None)
+    self::press(mode, press, vim, &mut None)
 }
 
-/// The keys for an action, as the sheet writes them: for tooltips. Vim keys only while
-/// vim keys are on.
-pub fn keys_for(action: Action, vim: bool) -> Vec<&'static str> {
-    SHEET
-        .iter()
-        .flat_map(|(_, lines)| lines.iter())
+/// The keys for an action in `mode`, as the sheet writes them: for tooltips and menus.
+/// Vim keys only while vim keys are on.
+pub fn keys_for(action: Action, mode: Mode, vim: bool) -> Vec<&'static str> {
+    sheet(mode)
+        .flat_map(|g| g.lines.iter())
         .flat_map(|(keys, vim_keys, _)| {
             keys.split_whitespace().chain(vim_keys.split_whitespace().filter(move |_| vim))
         })
-        .filter(|cap| resolve(cap, vim) == Some(action))
+        .filter(|cap| resolve(cap, mode, vim) == Some(action))
         .collect()
 }
 
 /// One line of the ⌘? sheet: the keys that always work, the vim keys, and what they do.
 pub type Line = (&'static str, &'static str, &'static str);
 
+/// A group of lines on the ⌘? sheet, and the modes whose sheet shows it.
+pub struct Group {
+    pub title: &'static str,
+    pub modes: &'static [Mode],
+    pub lines: &'static [Line],
+}
+
+/// The groups the ⌘? sheet shows in `mode`.
+pub fn sheet(mode: Mode) -> impl Iterator<Item = &'static Group> {
+    SHEET.iter().filter(move |g| g.modes.contains(&mode))
+}
+
+use Mode::{Library, Practice, Search};
+
 /// Every shortcut, as the ⌘? sheet lists them, one keycap per space-separated key.
-pub const SHEET: &[(&str, &[Line])] = &[
-    (
-        "Playing",
-        &[
-            ("Enter", "", "play the highlighted song"),
+pub const SHEET: &[Group] = &[
+    Group {
+        title: "Playing",
+        modes: &[Library, Practice],
+        lines: &[
             ("Space", "", "pause or resume"),
-            ("← →", "h l", "back or forward 5 seconds"),
-            ("", "^", "back to the start"),
-            ("o", "", "play from the marker, or the loop start"),
+            ("← →", "", "back or forward 5 seconds, a beat on the grid"),
+            ("0", "", "back to the start"),
             ("m", "", "marker here, again to clear it"),
+            ("o", "", "play from the marker, or the loop start"),
+        ],
+    },
+    Group {
+        title: "Library",
+        modes: &[Library],
+        lines: &[
+            ("Enter", "", "play the highlighted song"),
+            ("", "h l", "back or forward 5 seconds"),
             ("⌘← ⌘→", "H L", "previous or next song"),
             ("⌘S", "s", "shuffle on or off"),
+            ("p Tab", "", "practice mode"),
+            ("⌘?", "?", "these keys"),
         ],
-    ),
-    (
-        "Loop",
-        &[
-            ("[ ]", "", "loop starts or ends here"),
-            ("\\", "", "clear the loop"),
-            ("|", "", "loop on or off, keeping its edges"),
-            ("{ }", "", "widen at the start or end"),
-            ("( )", "", "narrow at the start or end"),
-            ("< >", "", "slide back or on by its length"),
-            ("r", "", "save it as a section, or rename its section"),
-            ("n N", "", "loop the next or previous section"),
-            ("x", "", "delete the section playing"),
-        ],
-    ),
-    (
-        "Practice",
-        &[
-            ("P", "", "the waveform, on or off"),
-            ("- =", "", "zoom out or in"),
-            ("b", "", "beat grid: loops and steps follow the beats"),
-            ("S", "", "slow down on or off, pitch kept"),
-            (", .", "", "slower or faster: 50 to 90%, then full speed"),
-            ("v", "", "next recording: the song, its variations"),
-            ("V", "", "add a variation (or drop files on a song)"),
-            ("X", "", "remove the playing variation"),
-            ("1 2 3", "", "mute stem 1, 2, 3 (up to 9)"),
-            ("⌥1 ⌥2", "", "solo stem 1, 2 (again to end it)"),
-        ],
-    ),
-    (
-        "Songs",
-        &[
+    },
+    Group {
+        title: "Songs",
+        modes: &[Library],
+        lines: &[
             ("⌘F", "f", "favourite or not"),
             ("⌘A", "a", "only this album, again to leave"),
             ("⇧⌘A", "A", "only this artist, again to leave"),
             ("⌘T", "t", "highlighted song to Transcribe!"),
         ],
-    ),
-    (
-        "Finding",
-        &[
-            ("⌘P", "/ i", "search on or off"),
+    },
+    Group {
+        title: "Finding",
+        modes: &[Library],
+        lines: &[
+            ("⌘P", "/ i", "search"),
             ("↑ ↓ ⌃J ⌃K", "j k", "move"),
             ("", "gg G", "top or bottom"),
             ("", "⌃U ⌃D", "half a page"),
             ("PgUp PgDn", "", "move 10"),
             ("", "zz", "to the playing song"),
-            ("Esc", "", "stop searching, again to clear"),
+            ("Esc", "", "clear the search, leave the album or artist"),
             ("⌘⌫", "", "clear the search"),
         ],
-    ),
-    (
-        "App",
-        &[
+    },
+    Group {
+        title: "Searching",
+        modes: &[Search],
+        lines: &[
+            ("Enter", "", "play the highlighted song"),
+            ("↑ ↓ ⌃J ⌃K", "", "move"),
+            ("PgUp PgDn", "", "move 10"),
+            ("Esc ⌘P", "", "stop typing, keep the results"),
+            ("⌘⌫", "", "clear the search"),
+            ("⌘?", "", "these keys"),
+        ],
+    },
+    Group {
+        title: "Loop",
+        modes: &[Practice],
+        lines: &[
+            ("a b", "", "loop starts or ends here"),
+            ("\\", "", "loop on or off, keeping its edges"),
+            ("|", "", "clear the loop"),
+            ("r", "", "save it as a section, or rename its section"),
+            ("n N", "", "loop the next or previous section"),
+            ("dd", "", "delete the section in play"),
+        ],
+    },
+    Group {
+        title: "Practice",
+        modes: &[Practice],
+        lines: &[
+            ("Esc p Tab", "", "back to the library"),
+            ("h l", "", "back or forward 5 seconds, a beat on the grid"),
+            ("g", "", "beat grid: loops and steps follow the beats"),
+            ("s", "", "slow down on or off, pitch kept"),
+            (", .", "", "slower or faster: 50 to 90%, then full speed"),
+            ("- =", "", "zoom out or in"),
+            ("v", "", "next recording: the song, its variations"),
+            ("V", "", "add a variation (or drop files on the waveform)"),
+            ("X", "", "remove the playing variation"),
+            ("1 2 3", "", "mute stem 1, 2, 3 (up to 9)"),
+            ("⌥1 ⌥2", "", "solo stem 1, 2 (again to end it)"),
+            ("⌘? ?", "", "these keys"),
+        ],
+    },
+    Group {
+        title: "Songs",
+        modes: &[Search, Practice],
+        lines: &[
+            ("⌘← ⌘→", "", "previous or next song"),
+            ("⌘S", "", "shuffle on or off"),
+            ("⌘F", "", "favourite or not"),
+            ("⌘A", "", "only this album"),
+            ("⇧⌘A", "", "only this artist"),
+            ("⌘T", "", "highlighted song to Transcribe!"),
+        ],
+    },
+    Group {
+        title: "App",
+        modes: &[Library, Search, Practice],
+        lines: &[
             ("⌘,", "", "settings"),
-            ("⌘?", "?", "these keys"),
             ("⌘M", "", "minimise"),
             ("⌃⌘F", "", "full screen"),
             ("⌘Q", "", "quit"),
         ],
-    ),
+    },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const MODES: [Mode; 3] = [Library, Search, Practice];
+
+    fn caps(mode: Mode, vim: bool) -> Vec<&'static str> {
+        sheet(mode)
+            .flat_map(|g| g.lines.iter())
+            .flat_map(|(keys, vim_keys, _)| {
+                keys.split_whitespace().chain(vim_keys.split_whitespace().filter(move |_| vim))
+            })
+            .collect()
+    }
+
     #[test]
-    fn every_key_on_the_sheet_does_something() {
-        for (_, lines) in SHEET {
-            for (keys, vim_keys, what) in *lines {
-                for cap in keys.split_whitespace() {
-                    assert!(resolve(cap, false).is_some(), "{cap} ({what}) does nothing");
-                }
-                for cap in vim_keys.split_whitespace() {
-                    assert!(resolve(cap, true).is_some(), "{cap} ({what}) does nothing in vim");
+    fn every_key_on_the_sheet_does_something_in_its_modes() {
+        for group in SHEET {
+            for &mode in group.modes {
+                for (keys, vim_keys, what) in group.lines {
+                    for cap in keys.split_whitespace() {
+                        assert!(resolve(cap, mode, false).is_some(), "{cap} ({what}) does nothing in {mode:?}");
+                        assert!(resolve(cap, mode, true).is_some(), "{cap} ({what}) does nothing in {mode:?} with vim");
+                    }
+                    for cap in vim_keys.split_whitespace() {
+                        assert!(resolve(cap, mode, true).is_some(), "{cap} ({what}) does nothing in {mode:?}");
+                    }
                 }
             }
         }
     }
 
     #[test]
-    fn tooltips_find_every_key_for_an_action() {
-        assert_eq!(keys_for(Action::Previous, true), ["⌘←", "H"]);
-        assert_eq!(keys_for(Action::Previous, false), ["⌘←"]);
-        assert_eq!(keys_for(Action::Toggle, false), ["Space"]);
-        assert_eq!(keys_for(Action::FullScreen, false), ["⌃⌘F"]);
-        assert!(keys_for(Action::Quit, false).contains(&"⌘Q"));
+    fn no_key_is_on_a_modes_sheet_twice() {
+        for mode in MODES {
+            for vim in [false, true] {
+                let mut seen = std::collections::HashSet::new();
+                for cap in caps(mode, vim) {
+                    assert!(seen.insert(cap), "{cap} is listed twice in {mode:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tooltips_find_every_key_for_an_action_in_the_mode() {
+        assert_eq!(keys_for(Action::Previous, Library, true), ["⌘←", "H"]);
+        assert_eq!(keys_for(Action::Previous, Library, false), ["⌘←"]);
+        assert_eq!(keys_for(Action::Previous, Practice, true), ["⌘←"]);
+        assert_eq!(keys_for(Action::Toggle, Library, false), ["Space"]);
+        assert_eq!(keys_for(Action::FullScreen, Search, false), ["⌃⌘F"]);
+        assert_eq!(keys_for(Action::Practice, Library, false), ["p", "Tab"]);
+        assert_eq!(keys_for(Action::Practice, Practice, false), ["Esc", "p", "Tab"]);
+        assert_eq!(keys_for(Action::RemoveRegion, Practice, false), ["dd"]);
+        assert!(keys_for(Action::LoopStart, Library, true).is_empty());
+        assert!(keys_for(Action::Quit, Practice, false).contains(&"⌘Q"));
+    }
+
+    #[test]
+    fn practice_keys_stay_on_the_base_layer() {
+        let base = |c: char| c.is_ascii_alphanumeric() || "`-=\\;',./<>_+:?|".contains(c);
+        for group in sheet(Practice) {
+            for (keys, _, what) in group.lines {
+                for cap in keys.split_whitespace().filter(|c| !c.contains(['⌘', '⌥', '⌃', '⇧'])) {
+                    let named = ["Esc", "Tab", "Space", "←", "→"].contains(&cap);
+                    assert!(named || cap.chars().all(base), "{cap} ({what}) is off the base layer");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn practice_keys_work_with_vim_off() {
+        assert_eq!(resolve("a", Practice, false), Some(Action::LoopStart));
+        assert_eq!(resolve("b", Practice, false), Some(Action::LoopEnd));
+        assert_eq!(resolve("\\", Practice, false), Some(Action::LoopSwitch));
+        assert_eq!(resolve("|", Practice, false), Some(Action::LoopClear));
+        assert_eq!(resolve("g", Practice, false), Some(Action::Grid));
+        assert_eq!(resolve("s", Practice, false), Some(Action::Slow));
+        assert_eq!(resolve("dd", Practice, false), Some(Action::RemoveRegion));
+        // Quiet aliases, off the sheet.
+        assert_eq!(resolve("[", Practice, false), Some(Action::LoopStart));
+        assert_eq!(resolve("]", Practice, false), Some(Action::LoopEnd));
+    }
+
+    #[test]
+    fn the_same_key_means_what_its_mode_says() {
+        assert_eq!(resolve("a", Library, true), Some(Action::Album));
+        assert_eq!(resolve("a", Practice, true), Some(Action::LoopStart));
+        assert_eq!(resolve("s", Library, true), Some(Action::Shuffle));
+        assert_eq!(resolve("s", Practice, true), Some(Action::Slow));
+        assert_eq!(resolve("Esc", Library, true), Some(Action::Clear));
+        assert_eq!(resolve("Esc", Search, true), Some(Action::Search));
+        assert_eq!(resolve("Esc", Practice, true), Some(Action::Practice));
+        // Loop keys are practice keys.
+        assert_eq!(resolve("[", Library, true), None);
+        assert_eq!(resolve("b", Library, true), None);
+        // While searching, bare keys type.
+        assert_eq!(resolve("m", Search, true), None);
+        assert_eq!(resolve("Space", Search, true), None);
+        assert_eq!(resolve("m", Library, false), Some(Action::Marker));
+        assert_eq!(resolve("0", Practice, false), Some(Action::ToStart));
+    }
+
+    #[test]
+    fn nudge_and_slide_have_no_keys() {
+        for mode in MODES {
+            for cap in ["{", "}", "(", ")", "<", ">"] {
+                assert_eq!(resolve(cap, mode, true), None, "{cap} in {mode:?}");
+            }
+        }
     }
 
     #[test]
     fn vim_and_cmd_keys_agree() {
-        assert_eq!(resolve("H", true), resolve("⌘←", true));
-        assert_eq!(resolve("m", false), Some(Action::Marker));
-        assert_eq!(resolve("o", false), Some(Action::FromLoopStart));
-        assert_eq!(resolve("/", true), resolve("⌘P", true));
-        assert_eq!(resolve("gg", true), Some(Action::Top));
-        assert_eq!(resolve("G", true), Some(Action::Bottom));
-        assert_eq!(resolve("A", true), resolve("⇧⌘A", true));
-        assert_eq!(resolve("i", true), Some(Action::Search));
+        assert_eq!(resolve("H", Library, true), resolve("⌘←", Library, true));
+        assert_eq!(resolve("/", Library, true), resolve("⌘P", Library, true));
+        assert_eq!(resolve("gg", Library, true), Some(Action::Top));
+        assert_eq!(resolve("G", Library, true), Some(Action::Bottom));
+        assert_eq!(resolve("A", Library, true), resolve("⇧⌘A", Library, true));
+        assert_eq!(resolve("i", Library, true), Some(Action::Search));
     }
 
     #[test]
-    fn without_vim_letters_do_nothing_but_loop_keys_still_work() {
-        assert_eq!(resolve("j", false), None);
-        assert_eq!(resolve("gg", false), None);
-        assert_eq!(resolve("{", false), Some(Action::NudgeStart(-NUDGE)));
-        assert_eq!(resolve("}", false), Some(Action::NudgeEnd(NUDGE)));
-        assert_eq!(resolve("(", false), Some(Action::NudgeStart(NUDGE)));
-        assert_eq!(resolve(")", false), Some(Action::NudgeEnd(-NUDGE)));
-        assert_eq!(resolve("⌘F", false), Some(Action::Favorite));
+    fn without_vim_library_letters_do_nothing() {
+        assert_eq!(resolve("j", Library, false), None);
+        assert_eq!(resolve("gg", Library, false), None);
+        assert_eq!(resolve("⌘F", Library, false), Some(Action::Favorite));
+        assert_eq!(resolve("p", Library, false), Some(Action::Practice));
     }
 
     #[test]
@@ -401,9 +609,20 @@ mod tests {
         let mut pending = None;
         let g = Press { key: "g", ..Press::default() };
         let j = Press { key: "j", ..Press::default() };
-        assert_eq!(normal(g, true, &mut pending), None);
-        assert_eq!(normal(j, true, &mut pending), Some(Action::Move(1)));
-        assert_eq!(normal(g, true, &mut pending), None);
-        assert_eq!(normal(g, true, &mut pending), Some(Action::Top));
+        assert_eq!(press(Library, g, true, &mut pending), None);
+        assert_eq!(press(Library, j, true, &mut pending), Some(Action::Move(1)));
+        assert_eq!(press(Library, g, true, &mut pending), None);
+        assert_eq!(press(Library, g, true, &mut pending), Some(Action::Top));
+    }
+
+    #[test]
+    fn a_lone_d_in_practice_waits_for_the_second() {
+        let mut pending = None;
+        let d = Press { key: "d", ..Press::default() };
+        let g = Press { key: "g", ..Press::default() };
+        assert_eq!(press(Practice, d, false, &mut pending), None);
+        assert_eq!(press(Practice, g, false, &mut pending), Some(Action::Grid));
+        assert_eq!(press(Practice, d, false, &mut pending), None);
+        assert_eq!(press(Practice, d, false, &mut pending), Some(Action::RemoveRegion));
     }
 }
