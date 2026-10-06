@@ -221,9 +221,9 @@ fn soft_limit(x: f32) -> f32 {
 /// Output frames the slow-down makes at a time.
 const BLOCK: usize = 512;
 
-/// The song slowed down without changing pitch (Signalsmith Stretch, a phase vocoder,
-/// at its full-quality preset: half a percent of a core). At full speed it stays out of
-/// the way: samples pass through untouched, with no delay. It comes after the loop, so
+/// The song slowed down or sped up without changing pitch (Signalsmith Stretch, a phase
+/// vocoder, at its full-quality preset: half a percent of a core). At exactly 100% it
+/// stays out of the way: samples pass through untouched, with no delay. It comes after the loop, so
 /// loops keep to the sample in the song's time.
 struct Stretched<S> {
     inner: S,
@@ -272,7 +272,7 @@ impl<S: Source> Iterator for Stretched<S> {
 
     fn next(&mut self) -> Option<rodio::Sample> {
         let speed = f32::from_bits(self.shared.speed.load(Ordering::Relaxed)) as f64;
-        if speed >= 0.999 {
+        if (speed - 1.0).abs() < 1e-4 {
             if self.stretching {
                 // Back to full speed: what the stretcher held back is dropped.
                 self.stretching = false;
@@ -447,6 +447,8 @@ struct Shared {
     speed: AtomicU32,
     /// Frames the slow-down holds back: played but not heard yet.
     delay: AtomicU64,
+    /// Times the loop has jumped back to its start, for the speed trainer.
+    wraps: AtomicU64,
 }
 
 const NONE: u64 = u64::MAX;
@@ -459,6 +461,7 @@ impl Default for Shared {
             played: AtomicU64::new(0),
             speed: AtomicU32::new(1.0f32.to_bits()),
             delay: AtomicU64::new(0),
+            wraps: AtomicU64::new(0),
         }
     }
 }
@@ -497,6 +500,7 @@ impl<S: Source> Iterator for Looped<S> {
                 let to = Duration::from_secs_f64(start as f64 / self.rate as f64);
                 if self.inner.try_seek(to).is_ok() {
                     self.shared.played.store(start, Ordering::Relaxed);
+                    self.shared.wraps.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -635,6 +639,11 @@ impl Audio {
 
     pub fn speed(&self) -> f32 {
         self.speed
+    }
+
+    /// How often the loop has jumped back to its start since the song opened.
+    pub fn wraps(&self) -> u64 {
+        self.shared.wraps.load(Ordering::Relaxed)
     }
 
     pub fn volume(&self) -> f32 {
@@ -1145,6 +1154,20 @@ mod tests {
         song.try_seek(Duration::ZERO).unwrap();
         assert_eq!(song.next(), Some(0.0));
         assert_eq!(shared.delay.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn sped_up_the_song_is_over_sooner_and_only_exactly_100_passes_through() {
+        let shared = Arc::new(Shared::default());
+        shared.speed.store(1.1f32.to_bits(), Ordering::Relaxed);
+        let heard = Stretched::new(Counting { at: 0, frames: 4400 }, shared.clone()).count() / 2;
+        // 4,400 frames at 110% take about 4,000; blocks round it up.
+        assert!((3900..=4300).contains(&heard), "{heard} frames");
+        // 99% is slowed, not passed through as full speed was before 25 to 110%.
+        shared.speed.store(0.99f32.to_bits(), Ordering::Relaxed);
+        let mut song = Stretched::new(Counting { at: 0, frames: 4000 }, shared.clone());
+        song.next();
+        assert!(shared.delay.load(Ordering::Relaxed) > 0);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! the song again picks up there. Kept in `resume.json` in the data folder.
 
 use crate::audio::Loop;
+use crate::speed::Speed;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,9 +18,13 @@ const NEAR_THE_END: Duration = Duration::from_secs(5);
 pub struct Spot {
     /// 0 for the song itself, n for its n-th variation.
     pub variation: usize,
+    /// How fast it played, and the slowed speed kept while at full speed.
+    pub pace: Option<Speed>,
+    /// Before percentages: slow-down on or off, and which preset. Read, never written.
+    #[serde(skip_serializing)]
     pub slow: bool,
-    /// Which slow-down preset.
-    pub speed: usize,
+    #[serde(skip_serializing)]
+    pub speed: Option<usize>,
     /// The playhead, in the playing recording's own time.
     pub at: Duration,
     /// Each recording's loop, by the recording's first file.
@@ -31,6 +36,11 @@ pub struct Spot {
 }
 
 impl Spot {
+    /// The song's speed: as kept, from an old preset, or the first slowed speed.
+    pub fn pace(&self) -> Speed {
+        self.pace.or_else(|| self.speed.map(|p| Speed::from_preset(self.slow, p))).unwrap_or_default()
+    }
+
     /// Where to start: the remembered playhead, or the top when that was near the end.
     pub fn start(&self, length: Option<Duration>) -> Duration {
         match length {
@@ -88,6 +98,16 @@ mod tests {
     }
 
     #[test]
+    fn old_slow_down_presets_read_as_percentages() {
+        let old: Spot = serde_json::from_str(r#"{"variation": 0, "slow": true, "speed": 3, "at": {"secs": 5, "nanos": 0}}"#).unwrap();
+        assert_eq!(old.pace(), Speed { percent: 80, on: true });
+        assert_eq!(Spot::default().pace(), Speed::default());
+        // Written anew, only the percentage is kept.
+        let json = serde_json::to_string(&Spot { pace: Some(old.pace()), ..old }).unwrap();
+        assert!(!json.contains("\"slow\"") && json.contains("\"pace\""));
+    }
+
+    #[test]
     fn where_songs_were_left_survives_a_save() {
         let file = std::env::temp_dir().join(format!("riff-resume-{}.json", std::process::id()));
         let mut r = Resume::default();
@@ -95,7 +115,8 @@ mod tests {
         loops.insert(PathBuf::from("/d/stems-Bass.mp3"), Loop { start: Some(s(10)), end: Some(s(14)), off: true });
         let marks = HashMap::from([(PathBuf::from("/m/song.mp3"), s(31))]);
         let levels = HashMap::from([(PathBuf::from("/d/stems-Bass.mp3"), vec![1.0, 0.5, 0.25])]);
-        r.keep(Path::new("/m/song.mp3"), Spot { variation: 2, slow: true, speed: 1, at: s(42), loops, marks, levels });
+        let pace = Some(Speed { percent: 65, on: true });
+        r.keep(Path::new("/m/song.mp3"), Spot { variation: 2, pace, at: s(42), loops, marks, levels, ..Spot::default() });
         r.store(&file).unwrap();
         assert_eq!(Resume::load(&file), r);
         assert_eq!(Resume::load(&file).of(Path::new("/m/song.mp3")).unwrap().variation, 2);

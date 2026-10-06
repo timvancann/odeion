@@ -43,7 +43,7 @@ icons!(
     "zoom-in", "zoom-out", "layers", "layers-plus", "volume-2", "volume-x", "headphones",
     "bookmark-plus", "bookmark-minus", "loop-start", "loop-end", "widen-start", "narrow-start",
     "narrow-end", "widen-end", "slide-back", "slide-on", "loop-play", "loop-clear", "beats",
-    "region-prev", "region-next", "disc",
+    "region-prev", "region-next", "disc", "minus", "trending-up",
 );
 
 impl AssetSource for Assets {

@@ -17,6 +17,8 @@ pub enum Target {
     Song(usize),
     /// A stem of the playing stem set.
     Stem(usize),
+    /// The speed controls.
+    Speed,
 }
 
 pub struct Menu {
@@ -71,6 +73,23 @@ impl Menu {
                 (if artist { "Back from the artist" } else { "Only this artist" }, Action::Artist),
                 ("Open in Transcribe!", Action::Transcribe),
                 ("Add a variation…", Action::AddVariation),
+            ],
+        )
+    }
+
+    /// On the speed controls: presets, and the trainer's settings.
+    pub fn speed() -> Menu {
+        Menu::new(
+            Target::Speed,
+            vec![
+                ("50%", Action::SetSpeed(50)),
+                ("60%", Action::SetSpeed(60)),
+                ("70%", Action::SetSpeed(70)),
+                ("80%", Action::SetSpeed(80)),
+                ("90%", Action::SetSpeed(90)),
+                ("100%", Action::SetSpeed(100)),
+                ("110%", Action::SetSpeed(110)),
+                ("Trainer settings…", Action::TrainerSettings),
             ],
         )
     }

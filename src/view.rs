@@ -41,9 +41,6 @@ const TITLEBAR: f32 = 32.;
 const SEEK: f64 = 5.0;
 /// Placing a loop's end plays this much before it.
 const LEAD_IN: Duration = Duration::from_millis(1500);
-/// The slow-down's speeds; 100% is slow-down off.
-const SPEEDS: [f32; 5] = [0.5, 0.6, 0.7, 0.8, 0.9];
-const SPEED_LABELS: [&str; 5] = ["50%", "60%", "70%", "80%", "90%"];
 /// How much the practice view shows around the playhead before any zooming.
 const SPAN: Duration = Duration::from_secs(10);
 /// A press this close to a strip's top grabs the marker by its flag.
@@ -172,6 +169,8 @@ impl Render for Tip {
 enum Slider {
     Volume,
     Stem(usize),
+    /// The speed, from 25 to 110%.
+    Speed,
 }
 
 /// A loop edge, being placed or dragged.
@@ -242,9 +241,12 @@ pub struct Riff {
     /// itself, n its n-th variation.
     variations: Variations,
     variation: usize,
-    /// Slow-down: whether it is on, and which of `SPEEDS` it plays at (starting at 70%).
-    slow: bool,
-    speed: usize,
+    /// How fast the playing song plays, and the slowed speed it keeps.
+    speed: crate::speed::Speed,
+    /// The speed trainer, when on: the loop's wraps when it started.
+    training: Option<u64>,
+    /// The trainer's settings sheet, when open: the highlighted setting.
+    trainer_sheet: Option<usize>,
     /// Where each song was left, and when the playing one's was last kept.
     resume: Resume,
     kept: std::time::Instant,
@@ -414,8 +416,9 @@ impl Riff {
             renaming: None,
             variations: Variations::load(&variations_file()),
             variation: 0,
-            slow: false,
-            speed: 2,
+            speed: Default::default(),
+            training: None,
+            trainer_sheet: None,
             loops: HashMap::new(),
             marks: HashMap::new(),
             shaping: None,
@@ -660,6 +663,19 @@ impl Riff {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.audio.tick();
+        // The trainer: the speed for how often the loop has come round since it began.
+        if let Some(base) = self.training {
+            let wraps = self.audio.wraps();
+            // A recording opened anew counts from zero again.
+            let base = if wraps < base { 0 } else { base };
+            self.training = Some(base);
+            let percent = self.settings.trainer.percent(wraps - base);
+            if percent != self.speed.now() {
+                self.speed.set(percent);
+                self.apply_speed();
+                changed = true;
+            }
+        }
         if let Some(prefs) = &mut self.prefs
             && let Some(outputs) = prefs.listing.as_ref().and_then(|rx| rx.try_recv().ok())
         {
@@ -950,9 +966,9 @@ impl Riff {
         self.loops.extend(spot.loops.clone());
         self.marks.extend(spot.marks.clone());
         self.levels.extend(spot.levels.clone());
-        self.slow = spot.slow;
-        self.speed = spot.speed.min(SPEEDS.len() - 1);
-        self.audio.set_speed(if self.slow { SPEEDS[self.speed] } else { 1.0 });
+        self.speed = spot.pace();
+        self.training = None;
+        self.audio.set_speed(self.speed.factor());
         let at = if pick { spot.start(track.seconds.map(Duration::from_secs)) } else { Duration::ZERO };
         let variations = self.variations.of(&track.path).len();
         self.audio.play(std::slice::from_ref(&track.path), &[1.0]);
@@ -1066,12 +1082,12 @@ impl Riff {
             .collect();
         let spot = Spot {
             variation: self.variation,
-            slow: self.slow,
-            speed: self.speed,
+            pace: Some(self.speed),
             at: self.audio.position(),
             loops,
             marks,
             levels,
+            ..Spot::default()
         };
         self.resume.keep(&now.path, spot);
         self.kept = std::time::Instant::now();
@@ -1096,11 +1112,14 @@ impl Riff {
         self.stem_waves.clear();
     }
 
-    /// The slow-down presets as a row of buttons, the one playing lit. A click picks one;
-    /// clicking the lit one turns slow-down off, back to full speed.
-    fn speed_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The speed: slower and faster by 5%, and what plays now, lit when it isn't full
+    /// speed (a click there is `s`). Right-click for presets and the trainer.
+    fn speed_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
+        let on = self.speed.on;
+        let label = if self.training.is_some() { format!("{}% trainer", self.speed.now()) } else { format!("{}%", self.speed.now()) };
         div()
+            .id("speed")
             .flex()
             .items_center()
             .h(px(36.))
@@ -1108,37 +1127,39 @@ impl Riff {
             .gap(px(2.))
             .rounded_md()
             .bg(rgb(t.raised))
-            .child(div().px_1().child(ui::icon("gauge", 16., if self.slow { t.accent } else { t.dim })))
-            .children(SPEED_LABELS.iter().enumerate().map(|(i, label)| {
-                let lit = self.slow && self.speed == i;
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|riff, e: &MouseDownEvent, _, cx| {
+                    riff.menu = Some((Menu::speed(), e.position));
+                    cx.notify();
+                }),
+            )
+            .child(div().px_1().child(ui::icon("gauge", 16., if on { t.accent } else { t.dim })))
+            .child(self.tool("slower", "minus", "5% slower, pitch kept", Action::Speed(false), false, cx))
+            .child(
                 div()
-                    .id(("speed", i))
-                    .tooltip(self.tip(
-                        format!("{label} speed, pitch kept; click again for full speed"),
-                        &[Action::Speed(false), Action::Speed(true), Action::Slow],
-                    ))
+                    .id("speed-now")
                     .h_full()
+                    .min_w(px(44.))
                     .px_2()
                     .flex()
                     .items_center()
+                    .justify_center()
                     .rounded_sm()
                     .font_family(MONO)
                     .text_xs()
                     .cursor_pointer()
-                    .when(lit, |d| d.bg(rgb(t.accent_soft)))
+                    .when(on, |d| d.bg(rgb(t.accent_soft)))
                     .hover(|d| d.bg(rgb(t.faint)))
-                    .text_color(rgb(if lit { t.accent } else { t.dim }))
-                    .child(label.trim_end_matches('%').to_string())
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        if riff.slow && riff.speed == i {
-                            riff.slow = false;
-                        } else {
-                            (riff.slow, riff.speed) = (true, i);
-                        }
-                        riff.apply_speed();
-                        cx.notify();
-                    }))
-            }))
+                    .text_color(rgb(if on { t.accent } else { t.dim }))
+                    .tooltip(self.tip(
+                        format!("Full speed, again back to {}%; right-click for presets and the trainer", self.speed.percent),
+                        &[Action::Slow],
+                    ))
+                    .child(label)
+                    .on_click(cx.listener(|riff, _, _, cx| riff.act(Action::Slow, cx))),
+            )
+            .child(self.tool("faster", "plus", "5% faster, pitch kept", Action::Speed(true), false, cx))
     }
 
     /// The master volume: an icon and a bar filled to the level, dragged or scrolled.
@@ -1266,14 +1287,15 @@ impl Riff {
         move |_, cx| cx.new(|_| Tip { what: what.clone(), keys: keys.clone() }).into()
     }
 
-    /// Hands the speed to the audio: a preset when slow-down is on, otherwise as recorded.
+    /// Hands the speed to the audio and says it. Kept with the song by `keep_levels`,
+    /// so a slider drag doesn't write the file at every step.
     fn apply_speed(&mut self) {
-        let speed = if self.slow { SPEEDS[self.speed] } else { 1.0 };
-        self.audio.set_speed(speed);
-        self.keep_spot();
-        self.store_resume();
+        self.audio.set_speed(self.speed.factor());
         self.message = Some((
-            if self.slow { format!("slowed to {:.0}%, pitch kept", speed * 100.) } else { "full speed".into() },
+            match self.speed.now() {
+                100 => "full speed".to_string(),
+                p => format!("{p}% speed, pitch kept"),
+            },
             false,
         ));
     }
@@ -1304,6 +1326,13 @@ impl Riff {
                 self.audio.set_gains(&self.gains());
             }
             Slider::Stem(_) => {}
+            Slider::Speed => {
+                use crate::speed::{FASTEST, SLOWEST};
+                // The trainer gives way to a hand on the speed.
+                self.training = None;
+                self.speed.set(SLOWEST + (level * (FASTEST - SLOWEST) as f32).round() as u16);
+                self.apply_speed();
+            }
         }
     }
 
@@ -1311,7 +1340,7 @@ impl Riff {
     fn keep_levels(&mut self, slider: Slider) {
         match slider {
             Slider::Volume => self.save_settings(),
-            Slider::Stem(_) => {
+            Slider::Stem(_) | Slider::Speed => {
                 self.keep_spot();
                 self.store_resume();
             }
@@ -1323,6 +1352,10 @@ impl Riff {
         match slider {
             Slider::Volume => self.audio.volume(),
             Slider::Stem(i) => self.stem_levels().get(i).copied().unwrap_or(1.0),
+            Slider::Speed => {
+                use crate::speed::{FASTEST, SLOWEST};
+                (self.speed.now().clamp(SLOWEST, FASTEST) - SLOWEST) as f32 / (FASTEST - SLOWEST) as f32
+            }
         }
     }
 
@@ -1751,6 +1784,18 @@ impl Riff {
             cx.notify();
             return;
         }
+        if let Some(at) = self.trainer_sheet {
+            let field = crate::trainer::FIELDS[at];
+            match k.key.as_str() {
+                "escape" | "enter" => self.trainer_sheet = None,
+                "up" | "k" => self.trainer_sheet = Some(at.saturating_sub(1)),
+                "down" | "j" => self.trainer_sheet = Some((at + 1).min(crate::trainer::FIELDS.len() - 1)),
+                "left" | "h" | "-" | "," => self.nudge_trainer(field, false),
+                "right" | "l" | "=" | "." => self.nudge_trainer(field, true),
+                _ => {}
+            }
+            return cx.notify();
+        }
         if let Some(name) = &mut self.naming {
             match k.key.as_str() {
                 "enter" => self.name_region(),
@@ -1909,23 +1954,38 @@ impl Riff {
                     self.play_region(&region);
                 }
             }
-            Action::Slow => {
-                self.slow = !self.slow;
-                self.apply_speed();
-            }
-            Action::Speed(faster) => {
-                // Full speed is the step after the fastest preset: faster from 90% turns
-                // slow-down off, slower from full speed goes to 90%. S jumps to the preset.
-                let top = SPEEDS.len() - 1;
-                match (self.slow, faster) {
-                    (true, true) if self.speed == top => self.slow = false,
-                    (true, true) => self.speed += 1,
-                    (true, false) => self.speed = self.speed.saturating_sub(1),
-                    (false, false) => (self.slow, self.speed) = (true, top),
-                    (false, true) => return,
+            // A hand on the speed stops the trainer.
+            Action::Slow | Action::Speed(_) | Action::SetSpeed(_) => {
+                self.training = None;
+                match action {
+                    Action::Slow => self.speed.toggle(),
+                    Action::Speed(faster) => self.speed.step(faster),
+                    Action::SetSpeed(percent) => self.speed.set(percent),
+                    _ => {}
                 }
                 self.apply_speed();
+                self.keep_levels(Slider::Speed);
             }
+            Action::Trainer => match self.training {
+                Some(_) => {
+                    self.training = None;
+                    self.message = Some((format!("trainer off, staying at {}%", self.speed.now()), false));
+                }
+                None if !self.audio.looping.looping() => {
+                    self.message = Some(("the trainer needs a loop: set one with a and b".into(), false));
+                }
+                None => {
+                    self.training = Some(self.audio.wraps());
+                    let t = self.settings.trainer;
+                    self.speed.set(t.from);
+                    self.apply_speed();
+                    self.message = Some((
+                        format!("trainer: {}% to {}%, {}% faster every {} repeats", t.from, t.to, t.step, t.every),
+                        false,
+                    ));
+                }
+            },
+            Action::TrainerSettings => self.trainer_sheet = Some(0),
             Action::Variation => self.next_variation(),
             Action::Mute(n) if n < self.muted.len() => {
                 self.muted[n] = !self.muted[n];
@@ -2805,7 +2865,7 @@ impl Riff {
                 "{} / {}{}",
                 ui::clock(position),
                 duration.map_or("–".to_string(), ui::clock),
-                if self.slow { format!(" at {}", SPEED_LABELS[self.speed]) } else { String::new() }
+                if self.speed.on { format!(" at {}%", self.speed.now()) } else { String::new() }
             )
         };
         let loop_label = match (looping.start, looping.end) {
@@ -2982,7 +3042,7 @@ impl Riff {
                     .items_center()
                     .gap_3()
                     .child(progress.flex_1())
-                    .child(self.speed_buttons(cx))
+                    .child(self.speed_control(cx))
                     .child(self.volume_slider(cx)),
             )
             .child(
@@ -3239,8 +3299,8 @@ impl Riff {
         if self.grid {
             about.push_str(if beats.is_some() { ", grid on" } else { ", grid on (finding beats…)" });
         }
-        if self.slow {
-            about.push_str(&format!(", at {} speed", SPEED_LABELS[self.speed]));
+        if self.speed.on {
+            about.push_str(&format!(", at {}% speed", self.speed.now()));
         }
         let toolbar = self.practice_toolbar(about, cx);
         let lane = self.region_lane(song.unwrap_or(self.span), cx);
@@ -3576,6 +3636,40 @@ impl Riff {
                     }),
             )
             .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(about))
+            // Any speed from 25 to 110%, the trainer beside it. Right-click for presets.
+            .child(
+                pill()
+                    .id("speed-slider")
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|riff, e: &MouseDownEvent, _, cx| {
+                            riff.menu = Some((Menu::speed(), e.position));
+                            cx.notify();
+                        }),
+                    )
+                    .child(div().pl_1().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("25"))
+                    .child(
+                        self.level_area("speed-level", Slider::Speed, gpui::rgb(if self.speed.on { t.accent } else { t.dim }), cx)
+                            .tooltip(self.tip(
+                                format!("{}% speed: drag or scroll for any speed; right-click for presets", self.speed.now()),
+                                &[Action::Speed(false), Action::Speed(true)],
+                            ))
+                            .w(px(110.))
+                            .h(px(10.))
+                            .mx_1()
+                            .rounded_full()
+                            .bg(rgb(t.faint)),
+                    )
+                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("110"))
+                    .child(self.tool(
+                        "trainer",
+                        "trending-up",
+                        "Speed trainer: the loop speeds up as it repeats; right-click for its settings",
+                        Action::Trainer,
+                        self.training.is_some(),
+                        cx,
+                    )),
+            )
             .child(
                 pill()
                     .child(self.tool("grid", "beats", "Beat grid: loops and steps follow the beats", Action::Grid, self.grid, cx))
@@ -3735,6 +3829,95 @@ impl Riff {
             .child(div().flex_none().child(", "))
             .child(link("now-album", now.album.clone(), "This album", Action::Album, false))
             .into_any_element()
+    }
+
+    /// One trainer setting up or down a notch, kept in settings.
+    fn nudge_trainer(&mut self, field: crate::trainer::Field, up: bool) {
+        self.settings.trainer.nudge(field, up);
+        self.save_settings();
+    }
+
+    /// The trainer's settings: from, to, step and how many repeats between steps, each
+    /// with − and + buttons. `j k` pick one, `h l` change it, Enter or Esc close.
+    fn render_trainer_sheet(&self, at: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::trainer::{FIELDS, Field};
+        let t = t();
+        let trainer = self.settings.trainer;
+        let rows = FIELDS.iter().enumerate().map(|(i, &field)| {
+            let (label, value) = match field {
+                Field::From => ("Start at", format!("{}%", trainer.get(field))),
+                Field::To => ("Speed up to", format!("{}%", trainer.get(field))),
+                Field::Step => ("Faster by", format!("{}%", trainer.get(field))),
+                Field::Every => ("Every", format!("{} repeats", trainer.get(field))),
+            };
+            let button = |id: &'static str, icon: &'static str, up: bool| {
+                div()
+                    .id((id, i))
+                    .size(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.faint)))
+                    .child(ui::icon(icon, 14., t.text))
+                    .on_click(cx.listener(move |riff, _, _, cx| {
+                        riff.trainer_sheet = Some(i);
+                        riff.nudge_trainer(field, up);
+                        cx.notify();
+                    }))
+            };
+            div()
+                .h(px(36.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .when(i == at, |d| d.bg(rgb(t.raised)))
+                .child(div().flex_1().text_sm().text_color(rgb(if i == at { t.accent } else { t.text })).child(label))
+                .child(button("trainer-down", "minus", false))
+                .child(div().w(px(84.)).flex().justify_center().font_family(MONO).text_sm().child(value))
+                .child(button("trainer-up", "plus", true))
+        });
+        overlay("trainer-sheet")
+            .on_click(cx.listener(|riff, _, _, cx| {
+                riff.trainer_sheet = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("trainer-settings")
+                    .w(px(400.))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(rgb(t.surface))
+                    .border_1()
+                    .border_color(rgb(t.faint))
+                    // A click inside the sheet is not a click outside it.
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .pb_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(ui::icon("trending-up", 16., t.accent))
+                            .child(div().text_color(rgb(t.text)).child("Speed trainer")),
+                    )
+                    .children(rows)
+                    .child(
+                        div()
+                            .pt_3()
+                            .font_family(MONO)
+                            .text_xs()
+                            .text_color(rgb(t.dim))
+                            .child("j k pick   h l change   Enter or Esc close   t starts the trainer"),
+                    ),
+            )
     }
 
     /// The dialog naming the loop as a region (`r`), or renaming a section from its menu:
@@ -4452,6 +4635,7 @@ impl Render for Riff {
             .when(self.help, |d| d.child(self.render_help(cx)))
             .children(self.naming.clone().map(|name| self.render_naming(name, cx)))
             .children(self.prefs.as_ref().map(|p| self.render_prefs(p, cx)))
+            .children(self.trainer_sheet.map(|at| self.render_trainer_sheet(at, cx)))
             .children(self.render_menu(cx))
     }
 }

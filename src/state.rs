@@ -35,6 +35,8 @@ pub struct Settings {
     pub volume: f32,
     /// The output device chosen, by id; none plays through the system's.
     pub output: Option<String>,
+    /// The speed trainer's settings.
+    pub trainer: crate::trainer::Trainer,
 }
 
 /// The window's place: which display (by its UUID) and where on it, in points from the
@@ -57,6 +59,7 @@ impl Default for Settings {
             vim: true,
             volume: 1.0,
             output: None,
+            trainer: Default::default(),
         }
     }
 }
@@ -180,6 +183,7 @@ mod tests {
             vim: false,
             volume: 0.6,
             output: Some("coreaudio:headphones".into()),
+            trainer: crate::trainer::Trainer { from: 60, to: 95, step: 5, every: 4 },
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s);
