@@ -261,7 +261,8 @@ commit signing is off for this repo.
 library and practice, with a keymap that stays on Tim's Glove80 base layer, then
 volume, speed, pitch, undo, loop extras, bars and notes) is the current direction. Steps 1
 (modes, keymap, right-click menus), 2 (volume, stem levels, output), 3 (speed and the
-trainer) and 4 (pitch) are built; step 5 (undo) is next.
+trainer) and 4 (pitch) are built; step 7 (bars) was dropped by Tim's choice; 5 (undo),
+6 (lead-in and channel) and 8 (notes) remain.
 
 ## Possible features
 

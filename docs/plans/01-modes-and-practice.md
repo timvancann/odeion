@@ -68,7 +68,7 @@ Today's list keys, minus everything that moves to practice:
 | `\`, `\|` | loop on or off keeping its edges, clear the loop |
 | `r`, `n N`, `dd` | save the loop as a section (or rename its section), loop the next / previous section, delete the section in play |
 | `h l` | step back / forward 5 s, a beat on the grid |
-| `H L` | step a bar (once bars exist, step 7) |
+| `H L` | unbound (bars were dropped, see step 7) |
 | `g` | beat grid on or off |
 | `,` `.` | slower / faster by 5%, 25% to 110% |
 | `s` | speed and pitch back to normal, and again back to how they were |
@@ -80,7 +80,7 @@ Today's list keys, minus everything that moves to practice:
 | `1`-`9`, ⌥`1`-`9` | mute, solo a stem |
 | `u` ⌘Z, ⇧⌘Z ⌃R | undo, redo (loop, marker, sections) |
 | `i` | a note on the song or the section in play |
-| `w`, `e` | lead-in (off, a beat, a bar), which channel (both, left, right) |
+| `w`, `e` | lead-in (off, a beat, four beats), which channel (both, left, right) |
 | `?` | keys |
 
 **Moving the loop has no keys, by Tim's choice** (2026-10-06): `h l` move the
@@ -100,7 +100,7 @@ keys come from the keymap (`keys::keys_for`, now per mode). New:
 
 - **A mode switch** in the title bar (the practice view button becomes it).
 - **Right-click menus**, each entry an `Action`, showing its keys:
-  - waveform: loop starts here, loop ends here, marker here, bar 1 starts here;
+  - waveform: loop starts here, loop ends here, marker here;
   - section: loop it, rename, delete, note;
   - stem: level 100 / 50 / 25%, solo, mute;
   - speed: presets (50 to 110%), trainer settings;
@@ -143,16 +143,16 @@ Each step lands on its own, with its rules and tests in the pure modules and
 5. **Undo.** `history.rs`: before every change to the loop, the marker or the
    recording's sections, a snapshot of the three; `u` and ⌃R walk it, 50 deep, per
    session, not saved.
-6. **Loop extras.** A **lead-in**: every repeat starts a beat or a bar before the
+6. **Loop extras.** A **lead-in**: every repeat starts a beat or four beats before the
    loop, so the music itself counts in, while the loop still marks exactly the part
-   (sections, the trainer and bars stay right). Experimental: try it and adjust. Done inside `Looped`: the jump at the
+   (sections and the trainer stay right). Experimental: try it and adjust. Done inside `Looped`: the jump at the
    loop's end lands on start minus the lead-in. Drawn faintly before the loop. This
    replaces a silent gap or clicks, which Tim does by starting loops early. Channel
    choice inside `Mix`: both, left in both ears, right in both ears.
-7. **Bars.** No downbeat detector: Tim marks "bar 1 starts here" on a beat (right-click
-   or a key) and picks the meter (4/4 by default). `bars.rs` counts bars from the
-   detected beats, so bars follow tempo drift. Numbered bars on the waveform, `H L` step
-   bars, loops can be set in whole bars. Kept per recording.
+7. ~~**Bars.**~~ Built and dropped (2026-10-06): Tim doesn't think in bar numbers; he
+   finds a part by ear and marks it as a section. Bars were only an overlay on the
+   beats (every N beats from a hand-set bar 1), with `H L` stepping bars and "loop this
+   bar". The work is in `git stash` ("Plan 01 step 7: bars") if it's ever wanted.
 8. **Notes.** A note on the song and on each section (sections get an optional note).
    `i` opens the note for the section in play, else the song.
 
