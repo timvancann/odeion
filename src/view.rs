@@ -2923,7 +2923,7 @@ impl Riff {
                         })
                     })
                     // In the album view the header shows the cover; rows show the number.
-                    // Grouped rows sit indented under their artist, without one.
+                    // Grouped rows sit indented under their artist.
                     .child(match (self.album.is_some(), in_group) {
                         (true, _) => div()
                             .w(px(28.))
@@ -2935,7 +2935,7 @@ impl Riff {
                             .text_color(rgb(if playing { t().accent } else { t().dim }))
                             .children(track.number.map(|n| n.to_string()))
                             .into_any_element(),
-                        (false, true) => div().w(px(30.)).flex_none().into_any_element(),
+                        (false, true) => div().pl_4().child(cover(track.cover.clone(), 30.)).into_any_element(),
                         (false, false) => cover(track.cover.clone(), 30.),
                     })
                     // The artist in a column of its own, faded when the song above has

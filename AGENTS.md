@@ -238,7 +238,7 @@ they fail.
   key yet): *columns* (cover, artist, title, album on one 44 px line; an artist
   repeated from the row above is faded, so each band stands out where it starts) and
   *grouped* (the full list and favourites under a row per artist with its song count,
-  songs indented without the artist; the top artist stays pinned until the next one
+  songs indented with their covers, without the artist; the top artist stays pinned until the next one
   pushes it up, Tim's condition for this view). Search, album and artist views aren't
   grouped; album and artist views drop the columns their header already names. Artist
   rows are part of a section's run, so playing a song still queues up the whole list.
