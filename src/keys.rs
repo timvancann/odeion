@@ -418,6 +418,13 @@ pub struct Group {
     pub lines: &'static [Line],
 }
 
+/// Whether a sheet line is found by `query`, typed on the ⌘? sheet: every word of it
+/// somewhere in what the line does, its group's title or its keys, case aside.
+pub fn found(title: &str, (keys, vim_keys, what): &Line, query: &str) -> bool {
+    let hay = format!("{title} {keys} {vim_keys} {what}").to_lowercase();
+    query.to_lowercase().split_whitespace().all(|word| hay.contains(word))
+}
+
 /// The groups the ⌘? sheet shows in `mode`.
 pub fn sheet(mode: Mode) -> impl Iterator<Item = &'static Group> {
     SHEET.iter().filter(move |g| g.modes.contains(&mode))
@@ -538,7 +545,7 @@ pub const SHEET: &[Group] = &[
     Group {
         title: "Sidebar",
         modes: &[Library, Practice],
-        lines: &[("`", "", "into the queue"), ("⌘B", "", "sidebar on or off")],
+        lines: &[("`", "", "into the queue"), ("⌘B", "", "sidebar open or collapsed")],
     },
     Group {
         title: "Queue",
@@ -550,7 +557,7 @@ pub const SHEET: &[Group] = &[
             ("dd x ⌫", "", "remove it"),
             ("Esc Tab `", "", "back"),
             ("Space", "", "pause or resume"),
-            ("⌘B", "", "sidebar on or off"),
+            ("⌘B", "", "sidebar open or collapsed"),
             ("⌘? ?", "", "these keys"),
         ],
     },
@@ -735,5 +742,16 @@ mod tests {
         assert_eq!(resolve("`", Queue, false), Some(Action::QueueFocus));
         assert_eq!(resolve("⌘B", Search, false), Some(Action::Sidebar));
         assert_eq!(resolve("q", Practice, false), None);
+    }
+
+    #[test]
+    fn the_sheet_finds_lines_by_what_they_do_their_group_or_their_keys() {
+        let line: Line = ("q Q", "", "queue it, Q at the top");
+        assert!(found("Songs", &line, "queue"));
+        assert!(found("Songs", &line, "QUEUE top"));
+        assert!(found("Songs", &line, "songs"));
+        assert!(found("Songs", &line, "q"));
+        assert!(found("Songs", &line, ""));
+        assert!(!found("Songs", &line, "queue loop"));
     }
 }

@@ -27,8 +27,8 @@ pub struct Session {
     pub span: Option<Duration>,
     /// The songs queued to play next.
     pub queue: Queue,
-    /// The sidebar was hidden. It shows the first time.
-    pub sidebar_hidden: bool,
+    /// The sidebar was collapsed to its icons. It's open the first time.
+    pub sidebar_collapsed: bool,
 }
 
 impl Session {
@@ -67,7 +67,7 @@ mod tests {
             grid: true,
             span: Some(Duration::from_secs(8)),
             queue: Queue::default(),
-            sidebar_hidden: true,
+            sidebar_collapsed: true,
         };
         let mut session = session;
         session.queue.add(Path::new("/m/next.mp3"));

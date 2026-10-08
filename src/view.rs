@@ -210,6 +210,8 @@ pub struct Riff {
     searching: bool,
     /// The ⌘? sheet is open.
     help: bool,
+    /// What's typed on the ⌘? sheet, to find keys by.
+    help_query: String,
     settings: Settings,
     /// The ⌘, sheet, when open.
     prefs: Option<Prefs>,
@@ -292,7 +294,7 @@ pub struct Riff {
     playlist: Playlist,
     /// Songs to play next, ahead of the list.
     queue: Queue,
-    /// The sidebar shows: navigation and the queue.
+    /// The sidebar is open; collapsed, only its icons show.
     sidebar: bool,
     /// The highlighted song in the queue, while the keyboard is in it (`Mode::Queue`).
     queue_at: Option<usize>,
@@ -407,6 +409,7 @@ impl Riff {
             query: String::new(),
             searching: false,
             help: false,
+            help_query: String::new(),
             settings,
             prefs: None,
             moved: None,
@@ -1027,7 +1030,7 @@ impl Riff {
             grid: self.grid,
             span: Some(self.span),
             queue: self.queue.clone(),
-            sidebar_hidden: !self.sidebar,
+            sidebar_collapsed: !self.sidebar,
         }
     }
 
@@ -1060,7 +1063,7 @@ impl Riff {
         };
         self.grid = session.grid;
         self.queue = session.queue.clone();
-        self.sidebar = !session.sidebar_hidden;
+        self.sidebar = !session.sidebar_collapsed;
         self.queue.retain(|p| self.by_path.contains_key(p));
         if let Some(span) = session.span {
             self.span = span;
@@ -1922,14 +1925,26 @@ impl Riff {
             return;
         }
         if self.help {
+            // Typing finds keys; Esc clears what's typed, then closes, as ⌘? and ? do.
             let mut pending = None;
-            if k.key == "escape"
-                || keys::press(self.mode(), press, self.settings.vim, &mut pending) == Some(Action::Help)
-            {
-                self.help = false;
-                cx.notify();
+            let closes = keys::press(self.mode(), press, self.settings.vim, &mut pending) == Some(Action::Help);
+            match k.key.as_str() {
+                "escape" if !self.help_query.is_empty() => self.help_query.clear(),
+                "escape" => self.help = false,
+                _ if closes => self.help = false,
+                "backspace" => {
+                    self.help_query.pop();
+                }
+                _ => {
+                    if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
+                        self.help_query.push_str(text);
+                    }
+                }
             }
-            return;
+            if !self.help {
+                self.help_query.clear();
+            }
+            return cx.notify();
         }
         let action = keys::press(self.mode(), press, self.settings.vim, &mut self.pending);
         // While searching, what isn't a key types into the query.
@@ -3264,6 +3279,7 @@ impl Riff {
     /// The ⌘? sheet: every key, over a dimmed window. Esc, ⌘? or a click closes it.
     fn render_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let vim = self.settings.vim;
+        let query = self.help_query.as_str();
         let group = |keys::Group { title, lines, .. }: &keys::Group| {
             div()
                 .flex()
@@ -3277,8 +3293,9 @@ impl Riff {
                         .text_color(rgb(t().dim))
                         .child(title.to_string()),
                 )
-                // Without vim keys, lines that only have vim keys go.
-                .children(lines.iter().filter_map(|(keys, vim_keys, what)| {
+                // Without vim keys, lines that only have vim keys go; so do lines the
+                // typed words don't find.
+                .children(lines.iter().filter(|l| keys::found(title, l, query)).filter_map(|(keys, vim_keys, what)| {
                     let caps: Vec<&str> = keys
                         .split_whitespace()
                         .chain(vim_keys.split_whitespace().filter(|_| vim))
@@ -3313,8 +3330,9 @@ impl Riff {
         };
         // Each group goes to the shorter column, so the two stay even as groups grow.
         let (mut left, mut right) = (Vec::new(), Vec::new());
-        let lines = |col: &Vec<&keys::Group>| col.iter().map(|g| g.lines.len() + 2).sum::<usize>();
-        for g in keys::sheet(self.mode()) {
+        let shown = |g: &keys::Group| g.lines.iter().filter(|l| keys::found(g.title, l, query)).count();
+        let lines = |col: &Vec<&keys::Group>| col.iter().map(|g| shown(g) + 2).sum::<usize>();
+        for g in keys::sheet(self.mode()).filter(|g| shown(g) > 0) {
             if lines(&left) <= lines(&right) { left.push(g) } else { right.push(g) }
         }
         overlay("help")
@@ -3337,12 +3355,39 @@ impl Riff {
                     .border_1()
                     .border_color(rgb(t().faint))
                     // The sheet lists this mode's keys, so it says which mode that is.
-                    .child(div().text_color(rgb(t().accent)).child(match self.mode() {
-                        keys::Mode::Library => "Library keys",
-                        keys::Mode::Search => "Search keys",
-                        keys::Mode::Practice => "Practice keys",
-                        keys::Mode::Queue => "Queue keys",
-                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_4()
+                            .child(div().text_color(rgb(t().accent)).child(match self.mode() {
+                                keys::Mode::Library => "Library keys",
+                                keys::Mode::Search => "Search keys",
+                                keys::Mode::Practice => "Practice keys",
+                                keys::Mode::Queue => "Queue keys",
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .px_2()
+                                    .py_0p5()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded_md()
+                                    .bg(rgb(t().raised))
+                                    .text_sm()
+                                    .child(ui::icon("search", 13., t().dim))
+                                    .child(if query.is_empty() {
+                                        div().text_color(rgb(t().dim)).child("type to find a key")
+                                    } else {
+                                        div().text_color(rgb(t().text)).child(query.to_string())
+                                    }),
+                            ),
+                    )
+                    .when(left.is_empty(), |d| {
+                        d.child(div().text_sm().text_color(rgb(t().dim)).child("no key does that here"))
+                    })
                     .child(
                         div()
                             .flex()
@@ -4191,12 +4236,14 @@ impl Riff {
 
     /// The artist view's header: their albums' covers, their name, and how much there is.
     /// The sidebar: places in the list (the mouse's way out of an album or artist view)
-    /// and the queue.
+    /// and the queue. Collapsed, as in VS Code, only their icons stay.
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
+        let open = self.sidebar;
+        let full = !self.practice && self.album.is_none() && self.artist.is_none() && self.query.trim().is_empty();
         let place = |id: &'static str,
                      icon: &'static str,
-                     label: String,
+                     label: &'static str,
                      lit: bool,
                      to: Place,
                      tip: &[Action],
@@ -4207,6 +4254,7 @@ impl Riff {
                 .px_2()
                 .flex()
                 .items_center()
+                .when(!open, |d| d.justify_center())
                 .gap_2()
                 .rounded_md()
                 .cursor_pointer()
@@ -4215,12 +4263,15 @@ impl Riff {
                 .when(lit, |d| d.bg(rgb(t.accent_soft)))
                 .hover(|d| d.bg(rgb(t.faint)))
                 .child(ui::icon(icon, 14., if lit { t.accent } else { t.dim }))
-                .child(div().truncate().child(label))
-                .tooltip(self.tip(format!("Go to {}", match to {
-                    Place::Library => "the full list",
-                    Place::Favourites => "the favourites",
-                    Place::Playing => "the playing song",
-                }), tip))
+                .when(open, |d| d.child(div().truncate().child(label)))
+                .tooltip(self.tip(
+                    match to {
+                        Place::Library => "The full list",
+                        Place::Favourites => "The favourites",
+                        Place::Playing => "The playing song",
+                    },
+                    tip,
+                ))
                 .on_click(cx.listener(move |riff, _, _, cx| {
                     riff.go_to(to);
                     cx.notify();
@@ -4242,73 +4293,145 @@ impl Riff {
                 .child(div().flex_1().min_w_0().truncate().child(label))
                 .child(self.tool(id, "x", "Back to the full list", leave, false, cx).h(px(22.)).w(px(22.)))
         };
-        let full = !self.practice && self.album.is_none() && self.artist.is_none() && self.query.trim().is_empty();
+        let toggle = self
+            .tool("sidebar", "panel-left", if open { "Collapse the sidebar" } else { "Open the sidebar" }, Action::Sidebar, false, cx)
+            .h(px(26.));
+        if !open {
+            // The queue's icon opens the sidebar, with its count beside it.
+            let queue = div()
+                .id("open-queue")
+                .h(px(30.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(t.faint)))
+                .child(ui::icon("list-plus", 14., if self.queue.is_empty() { t.dim } else { t.accent }))
+                .when(!self.queue.is_empty(), |d| {
+                    d.child(div().font_family(MONO).text_xs().text_color(rgb(t.accent)).child(self.queue.len().to_string()))
+                })
+                .tooltip(self.tip("The queue", &[Action::QueueFocus]))
+                .on_click(cx.listener(|riff, _, _, cx| {
+                    riff.sidebar = true;
+                    cx.notify();
+                }));
+            return div()
+                .w(px(44.))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .p_1()
+                .rounded_lg()
+                .bg(rgb(t.surface))
+                .child(toggle)
+                .child(div().w_full().flex().flex_col().gap_0p5().children([
+                    place("go-library", "music", "Library", full, Place::Library, &[Action::Clear], cx),
+                    place("go-favourites", "star", "Favourites", false, Place::Favourites, &[], cx),
+                    place("go-playing", "audio-waveform", "Playing", false, Place::Playing, &[Action::ToPlaying], cx),
+                ]))
+                .child(div().w_full().h(px(1.)).bg(rgb(t.faint)))
+                .child(div().w_full().child(queue))
+                .into_any_element();
+        }
         let lit = self.queued_at();
         let vim = self.settings.vim;
-        let rows: Vec<_> = self.queue.songs().iter().enumerate().filter_map(|(i, path)| {
-            let track = self.track_at(path)?;
-            let on = lit == Some(i);
-            let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff, usize)| {
-                div()
-                    .id((id, i))
-                    .size(px(22.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(rgb(t.faint)))
-                    .when(!on, |d| d.opacity(0.).group_hover("queue-row", |s| s.opacity(1.)))
-                    .child(ui::icon(icon, 13., t.dim))
-                    .tooltip(self.tip(what, &[]))
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        cx.stop_propagation();
-                        act(riff, i);
-                        cx.notify();
-                    }))
-            };
-            Some(
-                div()
-                    .id(("queued", i))
-                    .group("queue-row")
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .border_l_2()
-                    .border_color(rgb(if on { t.accent } else { t.surface }))
-                    .when(on, |d| d.bg(rgb(t.raised)))
-                    .hover(|d| d.bg(rgb(t.raised)))
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        riff.play_queued(i);
-                        cx.notify();
-                    }))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
-                        riff.menu = Some((Menu::queued(i), e.position));
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .line_height(relative(1.3))
-                            .child(div().truncate().text_sm().text_color(rgb(if on { t.accent } else { t.text })).child(track.title.clone()))
-                            .child(div().truncate().text_xs().text_color(rgb(t.dim)).child(track.artist.clone())),
-                    )
-                    .child(button("queue-top", "arrow-up-to-line", "To the top", |riff, i| riff.queue.to_top(i)))
-                    .child(button("queue-remove", "x", "Remove from the queue", |riff, i| {
-                        riff.queue.remove(i);
-                    })),
-            )
-        }).collect();
+        let rows: Vec<_> = self
+            .queue
+            .songs()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, path)| {
+                let track = self.track_at(path)?;
+                let on = lit == Some(i);
+                let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff, usize)| {
+                    div()
+                        .id((id, i))
+                        .size(px(22.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(t.faint)))
+                        .child(ui::icon(icon, 13., t.text))
+                        .tooltip(self.tip(what, &[]))
+                        .on_click(cx.listener(move |riff, _, _, cx| {
+                            cx.stop_propagation();
+                            act(riff, i);
+                            cx.notify();
+                        }))
+                };
+                Some(
+                    div()
+                        .id(("queued", i))
+                        .group("queue-row")
+                        .relative()
+                        .px_1()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(on, |d| d.bg(rgb(t.raised)))
+                        .hover(|d| d.bg(rgb(t.raised)))
+                        .on_click(cx.listener(move |riff, _, _, cx| {
+                            riff.play_queued(i);
+                            cx.notify();
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                                riff.menu = Some((Menu::queued(i), e.position));
+                                cx.notify();
+                            }),
+                        )
+                        .child(cover(track.cover.clone(), 34.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .line_height(relative(1.3))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(rgb(if on { t.accent } else { t.text }))
+                                        .child(track.title.clone()),
+                                )
+                                .child(div().truncate().text_xs().text_color(rgb(t.dim)).child(track.artist.clone())),
+                        )
+                        // Over the text's end, only while hovered or highlighted, so
+                        // titles use the whole width otherwise.
+                        .child(
+                            div()
+                                .absolute()
+                                .right_1()
+                                .top_0()
+                                .bottom_0()
+                                .flex()
+                                .items_center()
+                                .gap_0p5()
+                                .pl_2()
+                                .bg(rgb(t.raised))
+                                .when(!on, |d| d.opacity(0.).group_hover("queue-row", |s| s.opacity(1.)))
+                                .child(button("queue-top", "arrow-up-to-line", "To the top", |riff, i| riff.queue.to_top(i)))
+                                .child(button("queue-remove", "x", "Remove from the queue", |riff, i| {
+                                    riff.queue.remove(i);
+                                })),
+                        ),
+                )
+            })
+            .collect();
         div()
-            .w(px(240.))
+            .w(px(260.))
             .flex_none()
             .flex()
             .flex_col()
@@ -4321,17 +4444,21 @@ impl Riff {
                     .flex()
                     .flex_col()
                     .gap_0p5()
-                    .child(place("go-library", "music", "Library".into(), full, Place::Library, &[Action::Clear], cx))
+                    .child(div().flex().child(toggle))
+                    .child(place("go-library", "music", "Library", full, Place::Library, &[Action::Clear], cx))
                     .children(self.album.as_ref().filter(|_| !self.practice).map(|a| {
                         let name = if a.album.is_empty() { "Unknown album".into() } else { a.album.clone() };
                         view("leave-album", name, Action::Album, cx)
                     }))
-                    .children(self.artist.as_ref().filter(|_| !self.practice).map(|a| {
-                        view("leave-artist", a.artist.clone(), Action::Artist, cx)
-                    }))
-                    .child(place("go-favourites", "star", "Favourites".into(), false, Place::Favourites, &[], cx))
+                    .children(
+                        self.artist
+                            .as_ref()
+                            .filter(|_| !self.practice)
+                            .map(|a| view("leave-artist", a.artist.clone(), Action::Artist, cx)),
+                    )
+                    .child(place("go-favourites", "star", "Favourites", false, Place::Favourites, &[], cx))
                     .when(self.now.is_some(), |d| {
-                        d.child(place("go-playing", "audio-waveform", "Playing".into(), false, Place::Playing, &[Action::ToPlaying], cx))
+                        d.child(place("go-playing", "audio-waveform", "Playing", false, Place::Playing, &[Action::ToPlaying], cx))
                     }),
             )
             .child(
@@ -4344,7 +4471,7 @@ impl Riff {
                     .child(
                         div()
                             .h(px(24.))
-                            .px_2()
+                            .px_1()
                             .flex()
                             .items_center()
                             .gap_2()
@@ -4372,13 +4499,14 @@ impl Riff {
                             }),
                     )
                     .when(self.queue.is_empty(), |d| {
-                        d.child(div().px_2().text_xs().text_color(rgb(t.dim)).child(format!(
+                        d.child(div().px_1().text_xs().text_color(rgb(t.dim)).child(format!(
                             "{} queues the highlighted song",
                             keys::keys_for(Action::Queue(false), keys::Mode::Library, vim).join(" ")
                         )))
                     })
                     .child(div().id("queue").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().children(rows)),
             )
+            .into_any_element()
     }
 
     fn render_artist(&self, of: &Track) -> impl IntoElement {
@@ -4932,7 +5060,6 @@ impl Render for Riff {
                             window.titlebar_double_click();
                         }
                     })
-                    .child(self.tool("sidebar", "panel-left", "Sidebar: places and the queue", Action::Sidebar, self.sidebar, cx))
                     .child(self.mode_switch(cx))
                     .child(self.tool("keys", "keyboard", "Every key", Action::Help, self.help, cx))
                     .child(self.tool("settings", "settings-2", "Settings", Action::Settings, self.prefs.is_some(), cx)),
@@ -4945,7 +5072,7 @@ impl Render for Riff {
                     .min_h_0()
                     .flex()
                     .gap_3()
-                    .when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
+                    .child(self.render_sidebar(cx))
                     .child(
                         div()
                             .flex_1()
