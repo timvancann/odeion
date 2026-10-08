@@ -16,8 +16,8 @@ Pure, tested modules hold the decisions; `view.rs` only maps keys and clicks ont
 and draws:
 
 - `library.rs`: what a track is, reading one from its path, sort order, search, albums,
-  and the list's two views: a repeated artist (`repeats`), grouping under artists
-  (`grouped`) and which artist stays pinned on top (`pinned`).
+  and the grouped list view: grouping under artists (`grouped`) and which artist
+  stays pinned on top (`pinned`).
 - `scan.rs`: walking the folder, merging with the cache, reading tags and covers on
   background threads.
 - `audio.rs`: playback via rodio, and the A/B `Loop` rules. The loop is kept inside
@@ -235,8 +235,8 @@ they fail.
   offset each frame) to that letter's first artist below the favourites, highlighting
   it. Letters follow the sort (`library::initial`), so a jump never lands out of order.
 - **Two list views**, switched in the library's title bar and kept in settings (no
-  key yet): *columns* (cover, artist, title, album on one 44 px line; an artist
-  repeated from the row above is faded, so each band stands out where it starts) and
+  key yet): *columns* (cover, title, artist, album on one 44 px line, artist and
+  album alike in the dim small type, by Tim's choice) and
   *grouped* (the full list and favourites under a row per artist with its song count,
   songs indented with their covers, without the artist; the top artist stays pinned until the next one
   pushes it up, Tim's condition for this view). Search, album and artist views aren't

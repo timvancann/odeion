@@ -2880,11 +2880,6 @@ impl Riff {
                 let queued = self.queue.songs().contains(&track.path);
                 let in_group = self.grouped();
                 let show_artist = !in_group && self.album.is_none() && self.artist.is_none();
-                let above = ix.checked_sub(1).and_then(|r| match self.rows[r] {
-                    Row::Track(j) => self.tracks.get(j),
-                    _ => None,
-                });
-                let repeat = library::repeats(above, track);
                 div()
                     .id(("row", ix))
                     .group("song-row")
@@ -2938,35 +2933,6 @@ impl Riff {
                         (false, true) => div().pl_4().child(cover(track.cover.clone(), 30.)).into_any_element(),
                         (false, false) => cover(track.cover.clone(), 30.),
                     })
-                    // The artist in a column of its own, faded when the song above has
-                    // it too, so each band stands out where it starts. It opens the
-                    // artist view, as ⇧⌘A does.
-                    .when(show_artist, |d| {
-                        d.child(
-                            div().w(relative(0.26)).flex_none().min_w_0().flex().child(
-                                div()
-                                    .id(("artist", ix))
-                                    .truncate()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(rgb(if repeat {
-                                        t().faint
-                                    } else if selected || playing {
-                                        t().accent
-                                    } else {
-                                        t().text
-                                    }))
-                                    .cursor_pointer()
-                                    .hover(|d| d.text_color(rgb(t().accent)).underline())
-                                    .tooltip(self.tip("Only this artist", &[Action::Artist]))
-                                    .on_click(cx.listener(move |riff, _, _, cx| {
-                                        cx.stop_propagation();
-                                        riff.selected = ix;
-                                        riff.act(Action::Artist, cx);
-                                    }))
-                                    .child(track.artist.clone()),
-                            ),
-                        )
-                    })
                     .child(
                         div()
                             .flex_1()
@@ -2990,6 +2956,28 @@ impl Riff {
                                     .child(format!("+{variations}"))
                             })),
                     )
+                    // The artist, styled like the album beside it. It opens the artist
+                    // view, as ⇧⌘A does.
+                    .when(show_artist, |d| {
+                        d.child(
+                            div().w(relative(0.24)).flex_none().min_w_0().flex().child(
+                                div()
+                                    .id(("artist", ix))
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(rgb(t().dim))
+                                    .cursor_pointer()
+                                    .hover(|d| d.text_color(rgb(t().accent)).underline())
+                                    .tooltip(self.tip("Only this artist", &[Action::Artist]))
+                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                        cx.stop_propagation();
+                                        riff.selected = ix;
+                                        riff.act(Action::Artist, cx);
+                                    }))
+                                    .child(track.artist.clone()),
+                            ),
+                        )
+                    })
                     // The album name opens the album view, as ⌘A does.
                     .children(album.map(|album| {
                         div()

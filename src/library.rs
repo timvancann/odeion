@@ -257,12 +257,6 @@ pub fn grouped(tracks: &[Track], songs: &[usize]) -> Vec<Grouped> {
     rows
 }
 
-/// Whether `this` song's artist is the one of the song above it, so the columns view
-/// can fade the repeat and each band stands out where it starts.
-pub fn repeats(above: Option<&Track>, this: &Track) -> bool {
-    above.is_some_and(|a| fold(&a.artist) == fold(&this.artist))
-}
-
 /// What a row of the list is, for pinning artist rows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -493,16 +487,6 @@ mod tests {
             ]
         );
         assert!(grouped(&tracks, &[]).is_empty());
-    }
-
-    #[test]
-    fn a_repeated_artist_is_one_like_the_song_above() {
-        let dio = track("Dio", "Holy Diver", 1, "Holy Diver");
-        let also = track("DIO", "Lock Up the Wolves", 1, "Wild One");
-        let maiden = track("Iron Maiden", "Powerslave", 1, "Aces High");
-        assert!(repeats(Some(&dio), &also));
-        assert!(!repeats(Some(&dio), &maiden));
-        assert!(!repeats(None, &dio));
     }
 
     #[test]
