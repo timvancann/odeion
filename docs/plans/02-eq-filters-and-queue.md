@@ -86,7 +86,7 @@ mouse) and the queue below it.
   what's cut is clearly gone). With neither, the band is off and passes samples
   through untouched.
 - Presets, starting points to be tuned by ear: **bass** 40 to 250 Hz, **guitar** 120
-  to 6000 Hz, **vocals** 300 to 3400 Hz, **no bass** from 200 Hz. `f` cycles off →
+  to 6000 Hz, **vocals** 300 to 3400 Hz, **no bass** from 200 Hz. `c` (cut) cycles off →
   bass → guitar → vocals → no bass → off.
 - Free cuts snap to a log scale between 20 Hz and 20 kHz, and the low one stays below
   the high one. A band that matches no preset is shown as "custom 150–2400 Hz".
@@ -104,7 +104,7 @@ mouse) and the queue below it.
 
 ### 2.3 Screen and keys
 
-- Practice mode: `f` cycles the presets, `F` back to off. The practice toolbar gets
+- Practice mode: `c` cycles the presets, `C` back to off. The practice toolbar gets
   a filter button (lit when a band is on, showing its name; right-click for the
   presets) and a range slider with two handles over a log frequency axis. Dragging
   either handle makes the band custom.
@@ -166,7 +166,7 @@ Each step ends with `cargo test && cargo build --release` clean and AGENTS.md up
    sheet, ⌘B, and the sidebar from §4.
 3. **Band filters**: `filter.rs` with tests (a sine in the band passes within 1 dB,
    one two octaves out is down by more than 20 dB, off is bit-exact, switching doesn't
-   jump), `Filtered` in the chain, `f F`, the toolbar button and range slider, the
+   jump), `Filtered` in the chain, `c C`, the toolbar button and range slider, the
    band in the resume spot. Tim tunes the presets by ear.
 4. **EQ**: `eq.rs` with tests (each band's gain at its own frequency within 0.5 dB,
    flat and off are bit-exact, presets save, overwrite and load, old settings load
@@ -174,7 +174,7 @@ Each step ends with `cargo test && cargo build --release` clean and AGENTS.md up
 
 ## Open questions
 
-- Keys: `f F` for filters, `Q` for the queue, ⌘E for the EQ, and `w` `e` inside the
+- Keys: `c C` for filters (`f` stays favourite only), `Q` for the queue, ⌘E for the EQ, and `w` `e` inside the
   EQ sheet (plan 01 has `w` `e` pencilled in for lead-in and channel in practice, but
   sheet keys don't clash with those). Change any of them now if they feel wrong.
 - Should the sidebar start open or closed the first time?
