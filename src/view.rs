@@ -330,6 +330,8 @@ pub struct Riff {
     /// The media keys and Now Playing, when macOS lets riff have them.
     media: Option<Media>,
     message: Option<(String, bool)>,
+    /// The message showing and since when, so it can go after a few seconds.
+    message_since: Option<(String, std::time::Instant)>,
     bar: Strip,
     /// The letter rail beside the library, where it was last drawn.
     rail: Rc<Cell<Bounds<Pixels>>>,
@@ -504,6 +506,7 @@ impl Riff {
             shuffle: false,
             media: Media::new(),
             message: None,
+            message_since: None,
             bar: Strip::default(),
             rail: Rc::default(),
             scrubbing: None,
@@ -723,6 +726,19 @@ impl Riff {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.audio.tick();
+        // A message stays a few seconds, an error longer.
+        match &self.message {
+            Some((text, error)) => match &self.message_since {
+                Some((shown, since)) if shown == text => {
+                    if since.elapsed() > Duration::from_secs(if *error { 10 } else { 4 }) {
+                        (self.message, self.message_since) = (None, None);
+                        changed = true;
+                    }
+                }
+                _ => self.message_since = Some((text.clone(), std::time::Instant::now())),
+            },
+            None => self.message_since = None,
+        }
         // The trainer: the speed for how often the loop has come round since it began.
         if let Some(base) = self.training {
             let wraps = self.audio.wraps();
@@ -1914,16 +1930,6 @@ impl Riff {
         self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
     }
 
-    /// Opens a song in Transcribe!, pausing riff.
-    fn transcribe(&mut self, track: Option<Track>) {
-        let Some(track) = track else { return };
-        self.audio.pause();
-        self.message = Some(match state::open_in_transcribe(&track) {
-            Ok(()) => (format!("opened {} in Transcribe!", track.title), false),
-            Err(e) => (e, true),
-        });
-    }
-
     /// Which keys apply now: practice, searching, or the library.
     fn mode(&self) -> keys::Mode {
         if self.queue_at.is_some() {
@@ -2206,10 +2212,6 @@ impl Riff {
             Action::Favorite => self.toggle_favorite(),
             Action::Album => self.toggle_album(),
             Action::Artist => self.toggle_artist(),
-            Action::Transcribe => {
-                let track = self.selected_track().cloned().or_else(|| self.now.clone());
-                self.transcribe(track);
-            }
             // Bare `?` arrives here; ⌘? is handled first in `key`, as are ⌘, and ⌘Q.
             Action::Help => self.help = !self.help,
             Action::Settings | Action::Quit | Action::Minimize | Action::FullScreen => {}
@@ -3237,9 +3239,10 @@ impl Riff {
                                 .font_family(UI)
                                 .text_color(rgb(t().faint))
                                 .child(if self.searching {
-                                    "type to find a song"
+                                    "type to find a song".to_string()
                                 } else {
-                                    "⌘P to search"
+                                    let keys = keys::keys_for(Action::Search, keys::Mode::Library, self.settings.vim);
+                                    format!("{} to search", keys.join(" "))
                                 }),
                         )
                     }),
@@ -3292,13 +3295,13 @@ impl Riff {
         };
         let loop_label = match (looping.start, looping.end) {
             (_, Some(end)) => format!(
-                "{} to {}{}",
+                "loop {} to {}{}",
                 ui::clock(looping.start.unwrap_or_default()),
                 ui::clock(end),
-                if looping.off { ", off (| loops it)" } else { "" }
+                if looping.off { ", off" } else { "" }
             ),
-            (Some(start), None) => format!("from {}, ] sets the end", ui::clock(start)),
-            (None, None) => "[ ] sets a loop".to_string(),
+            (Some(start), None) => format!("loop from {}", ui::clock(start)),
+            (None, None) => String::new(),
         };
 
         let progress = div()
@@ -3373,22 +3376,6 @@ impl Riff {
                     })),
             );
 
-        let button = |id: &'static str, icon: &'static str, label: Option<&'static str>, lit: bool| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(36.))
-                .px_3()
-                .rounded_md()
-                .bg(rgb(if lit { t().accent_soft } else { t().raised }))
-                .hover(|d| d.bg(rgb(t().faint)))
-                .cursor_pointer()
-                .child(ui::icon(icon, 16., if lit { t().accent } else { t().text }))
-                .children(label.map(|l| div().text_sm().text_color(rgb(t().text)).child(l)))
-        };
-
         div()
             .flex()
             .flex_col()
@@ -3445,18 +3432,6 @@ impl Riff {
                                 cx,
                             )),
                     )
-                    .child(
-                        button("transcribe", "external-link", Some("Transcribe!"), false)
-                            .tooltip(self.tip("Open the playing song in Transcribe!", &[]))
-                            .on_click(
-                            cx.listener(|riff, _, _, cx| {
-                                // The button sits on the playing card, so it means that song.
-                                let track = riff.now.clone().or_else(|| riff.selected_track().cloned());
-                                riff.transcribe(track);
-                                cx.notify();
-                            }),
-                        ),
-                    ),
             )
             .child(
                 div()
@@ -3475,11 +3450,16 @@ impl Riff {
                     .text_xs()
                     .text_color(rgb(t().dim))
                     .child(time)
-                    .child(
-                        div()
+                    // What riff just did ("queued, 3rd") shows here for a few seconds,
+                    // in place of the loop.
+                    .child(match &self.message {
+                        Some((text, error)) => {
+                            div().text_color(rgb(if *error { t().error } else { t().accent })).child(text.clone())
+                        }
+                        None => div()
                             .text_color(rgb(if looping.looping() { t().loops } else { t().dim }))
                             .child(loop_label),
-                    ),
+                    }),
             )
     }
 }
@@ -5973,26 +5953,6 @@ impl Render for Riff {
         if let Some(end) = looping.end.filter(|_| looping.looping() && self.dragging.is_none()) {
             self.span = wave::fit(self.span, end - looping.start.unwrap_or_default());
         }
-        let hint = match (&self.naming, &self.message) {
-            (_, message) => match message {
-            Some((text, error)) => div()
-                .text_color(rgb(if *error { t().error } else { t().dim }))
-                .child(text.clone()),
-            None if self.queue_at.is_some() => div().child(
-                "Enter plays now   t to the top   dd removes   Esc back   ? all keys",
-            ),
-            None if self.practice => div().child(
-                "a b loop   \\ loop on or off   r section   g grid   s slow down   Esc library   ? all keys",
-            ),
-            None if self.searching => div().child(
-                "Enter plays and stops searching   Esc stops searching   ⌘⌫ clears",
-            ),
-            None if self.settings.vim => div().child(
-                "/ search   Space pause   p practice   ? all keys",
-            ),
-            None => div().child("⌘P search   Space pause   p practice   ⌘T Transcribe!   ⌘? all keys"),
-            },
-        };
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
@@ -6121,14 +6081,6 @@ impl Render for Riff {
                     ),
             )
             .child(self.render_now(cx))
-            .child(
-                div()
-                    .px_1()
-                    .font_family(MONO)
-                    .text_xs()
-                    .text_color(rgb(t().dim))
-                    .child(hint),
-            )
             .when(self.help, |d| d.child(self.render_help(cx)))
             .children(self.naming.clone().map(|name| self.render_naming(name, cx)))
             .children(self.prefs.as_ref().map(|p| self.render_prefs(p, cx)))

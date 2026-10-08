@@ -54,7 +54,6 @@ pub enum Action {
     Album,
     /// Everything by the highlighted song's artist, or back.
     Artist,
-    Transcribe,
     Help,
     Settings,
     Quit,
@@ -175,7 +174,6 @@ pub fn anywhere(p: Press) -> Option<Action> {
         ("f", true, _) => Favorite,
         ("a", true, _) if p.shift => Artist,
         ("a", true, _) => Album,
-        ("t", true, _) => Transcribe,
         ("s", true, _) => Shuffle,
         ("left" | "h", true, _) => Previous,
         ("right" | "l", true, _) => Next,
@@ -283,7 +281,6 @@ fn library(p: Press, vim: bool, first: Option<char>, pending: &mut Option<char>)
         ("a", false, false) => Album,
         ("a", true, _) => Artist,
         ("i", false, false) => Search,
-        ("t", false, false) => Transcribe,
         ("s", false, false) => Shuffle,
         _ => return None,
     })
@@ -488,7 +485,6 @@ pub const SHEET: &[Group] = &[
             ("⌘F", "f", "favourite or not"),
             ("⌘A", "a", "only this album, again to leave"),
             ("⇧⌘A", "A", "only this artist, again to leave"),
-            ("⌘T", "t", "highlighted song to Transcribe!"),
             ("q Q", "", "queue it, Q at the top"),
             ("+", "", "add it to a playlist"),
         ],
@@ -572,7 +568,6 @@ pub const SHEET: &[Group] = &[
             ("⌘F", "", "favourite or not"),
             ("⌘A", "", "only this album"),
             ("⇧⌘A", "", "only this artist"),
-            ("⌘T", "", "highlighted song to Transcribe!"),
         ],
     },
     Group {

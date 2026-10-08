@@ -77,7 +77,6 @@ impl Menu {
             ("Queue", Action::Queue(false)),
             ("Queue next", Action::Queue(true)),
             ("Add to playlist…", Action::AddToPlaylist),
-            ("Open in Transcribe!", Action::Transcribe),
             ("Add a variation…", Action::AddVariation),
         ];
         if in_playlist {

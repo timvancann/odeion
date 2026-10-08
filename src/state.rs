@@ -1,7 +1,5 @@
-//! Where things live, the settings, which songs are favourites, and handing a song to
-//! Transcribe!.
+//! Where things live, the settings, and which songs are favourites.
 
-use crate::library::Track;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -150,23 +148,6 @@ impl Favorites {
         if let Ok(json) = serde_json::to_vec(&self.0) {
             let _ = std::fs::write(file, json);
         }
-    }
-}
-
-/// Opens the track in Transcribe!: its saved `.xsc` (loops, markers) when there is one,
-/// otherwise the song itself.
-pub fn open_in_transcribe(track: &Track) -> Result<(), String> {
-    let xsc = track.xsc();
-    let target = if xsc.exists() { xsc } else { track.path.clone() };
-    let status = std::process::Command::new("open")
-        .args(["-a", "Transcribe!"])
-        .arg(&target)
-        .status()
-        .map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("Transcribe! didn't open".to_string())
     }
 }
 

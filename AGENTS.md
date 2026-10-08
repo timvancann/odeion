@@ -4,7 +4,8 @@ Riff is Tim's practice player: find a song in his music folder, play it, and pra
 it: loops to the sample, a marker, a waveform with beats, named sections, slow-down, and other
 recordings of the song (backing tracks, stem sets) to switch between. It began as a way
 into Transcribe! (whose file finding is painful) and grew into the practice tool, by
-Tim's choice; Transcribe! is still a button away for deeper work. Practice features
+Tim's choice. The Transcribe! button was removed on 2026-10-08: riff now does
+everything Tim used it for. Practice features
 are in scope; ask before adding anything that turns riff into an editor or a DAW.
 
 A single GPUI 0.2.2 app (pinned, like jasmijn's desktop app, whose patterns this copies),
@@ -69,7 +70,7 @@ and draws:
   which one is current, next and previous, removal.
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
   app that last reported a song, not as key presses, so this is the only way in.
-- `state.rs`: paths, settings, favourites, opening a song in Transcribe!.
+- `state.rs`: paths, settings, favourites.
 - `theme.rs`: Jasmijn's themes, copied: built-in gold plus every installed Zed theme.
 
 New behaviour gets its rule and tests in one of these, not in `view.rs`.
@@ -90,8 +91,6 @@ folder holding it. The Drive folder is laid out `Artist/Album/NN Title.ext`, abo
   `library.json` (tracks, re-read only when size or mtime changes), `covers/` (256px
   JPEG thumbnails named by content hash) and `favorites.json`. Deleting `library.json`
   forces a full rescan.
-- **Transcribe! keeps its `.xsc` next to the song**, same name, `.xsc` extension. It
-  holds loops and markers, so riff opens the `.xsc` when one exists, otherwise the song.
 - AIFF needs rodio's `symphonia-aiff` feature; the default features leave it out.
 
 ## Keyboard
@@ -108,7 +107,9 @@ they fail.
   *is* the view). `p` or Tab enters practice, Esc, `p` or Tab leaves; the title bar's
   Library / Practice switch does the same. Typing on the ⌘? sheet finds keys
   (`keys::found`). The ⌘? sheet and every tooltip show the
-  current mode's keys. Every primary key sits on the base layer of Tim's Glove80 (shift
+  current mode's keys. There is no hint bar at the bottom (removed 2026-10-08, the
+  buttons' tooltips say the keys); messages ("queued, 3rd") show for a few seconds on
+  the now-playing card in the loop's place, errors for ten. Every primary key sits on the base layer of Tim's Glove80 (shift
   counts); brackets, braces and parentheses take two hands there, so they're off the
   sheet. A test checks the practice sheet.
 - **Everywhere outside typing**: Space pauses, `← →` seek, `0` back to the start, `m`
@@ -118,10 +119,10 @@ they fail.
   replaced "type anywhere to search", where Space could not pause during a search.
 - **Vim keys in the library, on by default** (a settings row turns them off): `j k`,
   `gg G`, `⌃U ⌃D`, `zz` to the playing song, `h l` seek, `H L` previous and next song,
-  `f` favourite, `a` album, `A` artist, `i` search, `t` Transcribe!, `s` shuffle, `?`
+  `f` favourite, `a` album, `A` artist, `i` search, `s` shuffle, `?`
   keys, `dd` removes a folder in settings. No counts, by choice. Practice keys are the
   mode's own and work either way.
-- **The ⌘ shortcuts always work**: ⌘P, ⌘F, ⌘A, ⇧⌘A (artist view), ⌘T (the *highlighted* song), ⌘S,
+- **The ⌘ shortcuts always work**: ⌘P, ⌘F, ⌘A, ⇧⌘A (artist view), ⌘S,
   ⌘← ⌘→ or ⌘H ⌘L previous and next, ⌘, settings, ⌘? keys, ⌘Q. ⌘H is free because
   there is no menu bar to hide the app with. In the library ⌃J ⌃K and arrows move.
 - **Loop keys are practice keys**: `a` `b` set the edges at the playhead (`[ ]` quietly
@@ -136,7 +137,8 @@ they fail.
   bar, drag an edge or shift-click for the end. The rules live on `audio::Loop`.
 - **Right-click menus** (`menu.rs`): on a waveform (loop starts or ends here, marker
   here, all at the moment clicked), a section (loop it, rename, delete) and a song row
-  (favourite, album, artist, Transcribe!, add a variation; the row is highlighted).
+  (favourite, album, artist, queue, add to a playlist, add a variation; the row is
+  highlighted).
   Each entry is an `Action` showing its keys, done on what was clicked rather than at
   the playhead. They open at the pointer, take `j k` / ↑ ↓ and Enter, and close on Esc
   or a click elsewhere, which does nothing else.
@@ -262,7 +264,6 @@ they fail.
 - **The list has a scrollbar like Zed's**, drawn by riff (GPUI 0.2.2 has none): a thin
   thumb shown while the list moves and for a second after, or with the pointer on it.
   Dragging the thumb scrolls directly; a click elsewhere on the track glides there.
-- The Transcribe! button sits on the now-playing card, so it opens the *playing* song.
 - **The queue and the sidebar** (plan 02): `q` queues the highlighted song, `Q` at the
   top (vim keys on or off; also the row's hover button and its right-click menu). Next,
   by any means, plays the queue first; previous from a queued song goes back to the
@@ -317,10 +318,8 @@ Ideas Tim liked but hasn't asked for yet. Check with him before building one.
   offbeats) and halve or double the tempo (Neon Knights read at 95, Wildest Dreams at
   200), applied from the playhead on. Then perhaps tap tempo. Neural trackers (Beat
   This!) only if corrections are needed too often; they would also bring bars.
-- **Read Transcribe!'s loops** from the `.xsc` next to the song, read-only, so loops made
-  there appear in riff. The format still needs looking at.
-- **Loops aligned to beats**, as Moises does with beat detection. This is Transcribe!
-  territory, so only if it stays small.
+- **Loops aligned to beats**, as Moises does with beat detection, only if it stays
+  small.
 - **Gapless playback, and blending** (Tim, 2026-10-08, backburner): no gap between
   songs that run into each other, and a toggle to fade subtly from the end of one song
   into the next. Something to experiment with, not a request yet.

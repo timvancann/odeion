@@ -64,11 +64,6 @@ impl Track {
             reader: 0,
         }
     }
-
-    /// The Transcribe! document for this track: same name, `.xsc`.
-    pub fn xsc(&self) -> PathBuf {
-        self.path.with_extension("xsc")
-    }
 }
 
 /// "05 I'm the One" → (5, "I'm the One"); "1-03 Song" → (3, "Song"); no number → whole stem.
@@ -337,12 +332,6 @@ mod tests {
         assert_eq!((t.artist.as_str(), t.album.as_str()), ("Solo", ""));
         let t = Track::from_path(Path::new("/m"), Path::new("/m/Jam.wav"), 0, 0);
         assert_eq!((t.artist.as_str(), t.title.as_str()), ("", "Jam"));
-    }
-
-    #[test]
-    fn the_transcribe_document_sits_next_to_the_song() {
-        let t = track("Van Halen", "Van Halen", 5, "I’m the One");
-        assert_eq!(t.xsc(), PathBuf::from("/m/Van Halen/Van Halen/05 I’m the One.xsc"));
     }
 
     #[test]
