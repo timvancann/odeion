@@ -99,7 +99,8 @@ they fail.
 - **Modes, like vim**: the library (finding and playing songs; riff opens here unless
   it was left in practice), search inside it, and practice (the practice view; the mode
   *is* the view). `p` or Tab enters practice, Esc, `p` or Tab leaves; the title bar's
-  Library / Practice switch does the same. The ⌘? sheet and every tooltip show the
+  Library / Practice switch does the same. Typing on the ⌘? sheet finds keys
+  (`keys::found`). The ⌘? sheet and every tooltip show the
   current mode's keys. Every primary key sits on the base layer of Tim's Glove80 (shift
   counts); brackets, braces and parentheses take two hands there, so they're off the
   sheet. A test checks the practice sheet.
@@ -238,10 +239,12 @@ they fail.
 - **The queue and the sidebar** (plan 02): `q` queues the highlighted song, `Q` at the
   top (vim keys on or off; also the row's hover button and its right-click menu). Next,
   by any means, plays the queue first; previous from a queued song goes back to the
-  list's song before it. The sidebar (⌘B or the title bar button, open unless Tim hid
-  it) lists places, Library (the mouse's way out of an album or artist view, which
-  show under it with an ×), Favourites and Playing, and the queue below: click to play
-  now, hover for to-the-top and remove. `` ` `` puts the keyboard in the queue
+  list's song before it. The sidebar (open unless Tim collapsed it; ⌘B or its own
+  top-left button) lists places, Library (the mouse's way out of an album or artist
+  view, which show under it with an ×), Favourites and Playing, and the queue below
+  with covers: click to play now, hover for to-the-top and remove (drawn over the
+  title's end, so titles keep the width). Collapsed, as in VS Code, only the icons
+  stay, the queue's with its count. `` ` `` puts the keyboard in the queue
   (`Mode::Queue`): `j k`, Enter, `t`, `dd` `x` ⌫, Esc / Tab / `` ` `` back.
 
 ## GPUI traps hit here
