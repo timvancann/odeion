@@ -21,6 +21,8 @@ pub enum Target {
     Speed,
     /// The pitch controls.
     Pitch,
+    /// A song in the sidebar's queue, by its place there.
+    Queued(usize),
 }
 
 pub struct Menu {
@@ -73,9 +75,19 @@ impl Menu {
                 (if favorite { "Not a favourite" } else { "Favourite" }, Action::Favorite),
                 (if album { "Back from the album" } else { "Only this album" }, Action::Album),
                 (if artist { "Back from the artist" } else { "Only this artist" }, Action::Artist),
+                ("Queue", Action::Queue(false)),
+                ("Queue next", Action::Queue(true)),
                 ("Open in Transcribe!", Action::Transcribe),
                 ("Add a variation…", Action::AddVariation),
             ],
+        )
+    }
+
+    /// On the `i`-th song in the queue.
+    pub fn queued(i: usize) -> Menu {
+        Menu::new(
+            Target::Queued(i),
+            vec![("Play now", Action::QueuePlay), ("To the top", Action::QueueTop), ("Remove", Action::QueueRemove)],
         )
     }
 
@@ -163,6 +175,7 @@ mod tests {
         assert_eq!(Menu::waveform(Duration::from_secs(3)).target, Target::Moment(Duration::from_secs(3)));
         assert_eq!(Menu::section(2).target, Target::Section(2));
         assert_eq!(Menu::song(7, false, false, false).target, Target::Song(7));
+        assert_eq!(Menu::queued(1).target, Target::Queued(1));
         // A stem's entries name the stem, so they work from anywhere.
         let stem = Menu::stem(3, false, false);
         assert_eq!(stem.target, Target::Stem(3));

@@ -134,10 +134,10 @@ mouse) and the queue below it.
 
 - Library mode: `q` queues the highlighted song at the end, `Q` at the top, with or
   without vim keys. A message says "queued, 3rd", "queued next" or "already queued".
-- A key (still to be chosen, see the open questions) puts the keyboard in the queue,
+- `` ` `` (backtick, in library and practice) puts the keyboard in the queue,
   opening the sidebar if it's closed. This is a new mode, `Mode::Queue`, like search
   is: `j k` / ↑ ↓ move, Enter plays now, `t` moves to the top, `dd`, `x` or Backspace
-  removes, Esc or Tab goes back to the mode it came from.
+  removes, Esc, Tab or `` ` `` goes back to the mode it came from.
 - ⌘B toggles the sidebar everywhere.
 - The song row's right-click menu gets "Queue" (`q`) and "Queue next" (`Q`). The queue rows' menu has play
   now, to the top, and remove.
@@ -174,7 +174,7 @@ Each step ends with `cargo test && cargo build --release` clean and AGENTS.md up
    flat and off are bit-exact, presets save, overwrite and load, old settings load
    flat), `Equalized` in the chain, the sheet and ⌘E. Tim tunes the built-in presets.
 
-## Open questions
+## Keys settled with Tim
 
-- Which key puts the keyboard in the queue, now that `q` and `Q` add to it.
-  Settled: `c C` for filters, `q Q` to queue, ⌘E for the EQ, ⌘B for the sidebar.
+`c C` for filters, `q Q` to queue, `` ` `` into the queue, ⌘E for the EQ, ⌘B for the
+sidebar.

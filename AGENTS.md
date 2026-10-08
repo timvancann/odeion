@@ -25,7 +25,10 @@ and draws:
   volume, the stems' levels (`stem_gains`) and the output device (`wanted`, followed
   by `Audio::follow_output`).
 - `playlist.rs`: next, previous and shuffle over the list a song was started from (the
-  album, favourites, search results or library; the run of rows between headers).
+  album, favourites, search results or library; the run of rows between headers),
+  with the queue first: while a queued song plays the list stays where it was.
+- `queue.rs`: the queue, songs to play next (`q` to the end, `Q` to the top, each song
+  once), kept in `session.json`.
 - `keys.rs`: the keymap per mode and the ⌘? sheet, see Keyboard.
 - `menu.rs`: the right-click menus: their entries and moving through them by key.
 - `speed.rs`: the speed in whole percent, 25 to 110, and the pitch in cents, up to an
@@ -119,7 +122,9 @@ they fail.
   by 50 ms and sliding the loop by its own length (phrase by phrase) are buttons on
   the loop bar only, by Tim's choice: `h l` move the playhead and `a` or `b` again puts
   the edge there. Halving and doubling were tried and removed: Tim never used them.
-  Every change plays around the edge it moved, to be judged by ear. On the progress
+  No change moves the playhead (Tim, 2026-10-07: jumping to the edge was jarring); it
+  carries on, wrapping at the loop's end as usual, until `o` plays from the loop's
+  start. Playing a section still starts it. On the progress
   bar, drag an edge or shift-click for the end. The rules live on `audio::Loop`.
 - **Right-click menus** (`menu.rs`): on a waveform (loop starts or ends here, marker
   here, all at the moment clicked), a section (loop it, rename, delete) and a song row
@@ -230,6 +235,14 @@ they fail.
   thumb shown while the list moves and for a second after, or with the pointer on it.
   Dragging the thumb scrolls directly; a click elsewhere on the track glides there.
 - The Transcribe! button sits on the now-playing card, so it opens the *playing* song.
+- **The queue and the sidebar** (plan 02): `q` queues the highlighted song, `Q` at the
+  top (vim keys on or off; also the row's hover button and its right-click menu). Next,
+  by any means, plays the queue first; previous from a queued song goes back to the
+  list's song before it. The sidebar (⌘B or the title bar button, open unless Tim hid
+  it) lists places, Library (the mouse's way out of an album or artist view, which
+  show under it with an ×), Favourites and Playing, and the queue below: click to play
+  now, hover for to-the-top and remove. `` ` `` puts the keyboard in the queue
+  (`Mode::Queue`): `j k`, Enter, `t`, `dd` `x` ⌫, Esc / Tab / `` ` `` back.
 
 ## GPUI traps hit here
 
@@ -259,7 +272,9 @@ commit signing is off for this repo.
 
 `docs/plans/` holds agreed plans; build from them step by step. **Plan 01** (two modes,
 library and practice, with a keymap that stays on Tim's Glove80 base layer, then
-volume, speed, pitch, undo, loop extras, bars and notes) is the current direction. Steps 1
+volume, speed, pitch, undo, loop extras, bars and notes) is the current direction.
+**Plan 02** (an EQ, band filters, the queue and a sidebar) runs beside it: steps 1 and
+2 (the queue and sidebar) are built, 3 (band filters) and 4 (EQ) remain. Steps 1
 (modes, keymap, right-click menus), 2 (volume, stem levels, output), 3 (speed and the
 trainer) and 4 (pitch) are built; step 7 (bars) was dropped by Tim's choice; 5 (undo),
 6 (lead-in and channel) and 8 (notes) remain.
@@ -276,3 +291,6 @@ Ideas Tim liked but hasn't asked for yet. Check with him before building one.
   there appear in riff. The format still needs looking at.
 - **Loops aligned to beats**, as Moises does with beat detection. This is Transcribe!
   territory, so only if it stays small.
+- **Gapless playback, and blending** (Tim, 2026-10-08, backburner): no gap between
+  songs that run into each other, and a toggle to fade subtly from the end of one song
+  into the next. Something to experiment with, not a request yet.

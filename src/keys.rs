@@ -23,6 +23,8 @@ pub enum Mode {
     Search,
     /// The practice view: the waveform, the loop, sections and stems.
     Practice,
+    /// The keyboard in the sidebar's queue, from the library or practice.
+    Queue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -112,6 +114,18 @@ pub enum Action {
     Mute(usize),
     /// Solo stem n, or end the solo.
     Solo(usize),
+    /// Queue the highlighted song: at the end, or at the top (true).
+    Queue(bool),
+    /// The keyboard into the queue, or back out of it.
+    QueueFocus,
+    /// The sidebar shown or hidden.
+    Sidebar,
+    /// In the queue: play the highlighted song now.
+    QueuePlay,
+    /// In the queue: the highlighted song to the top.
+    QueueTop,
+    /// In the queue: remove the highlighted song.
+    QueueRemove,
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift
@@ -135,6 +149,7 @@ pub fn press(mode: Mode, p: Press, vim: bool, pending: &mut Option<char>) -> Opt
         Mode::Search => search(p),
         Mode::Library => outside(p).or_else(|| library(p, vim, first, pending)),
         Mode::Practice => outside(p).or_else(|| practice(p, first, pending)),
+        Mode::Queue => outside(p).or_else(|| queue(p, first, pending)),
     }
 }
 
@@ -161,6 +176,7 @@ pub fn anywhere(p: Press) -> Option<Action> {
         ("/", true, _) if p.shift => Help,
         (",", true, _) => Settings,
         ("q", true, _) => Quit,
+        ("b", true, false) if !p.shift => Sidebar,
         _ => return None,
     })
 }
@@ -175,6 +191,7 @@ fn outside(p: Press) -> Option<Action> {
         ("0", false) => Action::ToStart,
         ("m", false) => Action::Marker,
         ("o", false) => Action::FromLoopStart,
+        ("`", false) => Action::QueueFocus,
         _ => return None,
     })
 }
@@ -216,6 +233,7 @@ fn library(p: Press, vim: bool, first: Option<char>, pending: &mut Option<char>)
         ("enter", false, false) => Some(Play),
         ("escape", ..) => Some(Clear),
         ("tab", false, false) | ("p", false, false) => Some(Practice),
+        ("q", shift, false) => Some(Queue(shift)),
         _ => None,
     };
     if always.is_some() || !vim {
@@ -245,6 +263,32 @@ fn library(p: Press, vim: bool, first: Option<char>, pending: &mut Option<char>)
         ("i", false, false) => Search,
         ("t", false, false) => Transcribe,
         ("s", false, false) => Shuffle,
+        _ => return None,
+    })
+}
+
+/// In the sidebar's queue. Its keys are its own, with vim keys on or off.
+fn queue(p: Press, first: Option<char>, pending: &mut Option<char>) -> Option<Action> {
+    use Action::*;
+    if let Some(action) = moving(p) {
+        return Some(action);
+    }
+    if p.cmd || p.ctrl || p.alt {
+        return None;
+    }
+    Some(match (p.key, p.shift) {
+        ("j", false) => Move(1),
+        ("k", false) => Move(-1),
+        ("enter", _) => QueuePlay,
+        ("t", false) => QueueTop,
+        ("x", false) | ("backspace", _) => QueueRemove,
+        ("d", false) if first == Some('d') => QueueRemove,
+        ("d", false) => {
+            *pending = Some('d');
+            return None;
+        }
+        ("escape" | "tab", _) => QueueFocus,
+        ("?", _) => Help,
         _ => return None,
     })
 }
@@ -379,7 +423,7 @@ pub fn sheet(mode: Mode) -> impl Iterator<Item = &'static Group> {
     SHEET.iter().filter(move |g| g.modes.contains(&mode))
 }
 
-use Mode::{Library, Practice, Search};
+use Mode::{Library, Practice, Queue, Search};
 
 /// Every shortcut, as the ⌘? sheet lists them, one keycap per space-separated key.
 pub const SHEET: &[Group] = &[
@@ -415,6 +459,7 @@ pub const SHEET: &[Group] = &[
             ("⌘A", "a", "only this album, again to leave"),
             ("⇧⌘A", "A", "only this artist, again to leave"),
             ("⌘T", "t", "highlighted song to Transcribe!"),
+            ("q Q", "", "queue it, Q at the top"),
         ],
     },
     Group {
@@ -491,8 +536,27 @@ pub const SHEET: &[Group] = &[
         ],
     },
     Group {
+        title: "Sidebar",
+        modes: &[Library, Practice],
+        lines: &[("`", "", "into the queue"), ("⌘B", "", "sidebar on or off")],
+    },
+    Group {
+        title: "Queue",
+        modes: &[Queue],
+        lines: &[
+            ("j k ↑ ↓", "", "move"),
+            ("Enter", "", "play it now"),
+            ("t", "", "to the top"),
+            ("dd x ⌫", "", "remove it"),
+            ("Esc Tab `", "", "back"),
+            ("Space", "", "pause or resume"),
+            ("⌘B", "", "sidebar on or off"),
+            ("⌘? ?", "", "these keys"),
+        ],
+    },
+    Group {
         title: "App",
-        modes: &[Library, Search, Practice],
+        modes: &[Library, Search, Practice, Queue],
         lines: &[
             ("⌘,", "", "settings"),
             ("⌘M", "", "minimise"),
@@ -506,7 +570,7 @@ pub const SHEET: &[Group] = &[
 mod tests {
     use super::*;
 
-    const MODES: [Mode; 3] = [Library, Search, Practice];
+    const MODES: [Mode; 4] = [Library, Search, Practice, Queue];
 
     fn caps(mode: Mode, vim: bool) -> Vec<&'static str> {
         sheet(mode)
@@ -657,5 +721,19 @@ mod tests {
         assert_eq!(press(Practice, g, false, &mut pending), Some(Action::Grid));
         assert_eq!(press(Practice, d, false, &mut pending), None);
         assert_eq!(press(Practice, d, false, &mut pending), Some(Action::RemoveRegion));
+    }
+
+    #[test]
+    fn q_queues_with_or_without_vim_and_the_queue_has_its_own_keys() {
+        for vim in [false, true] {
+            assert_eq!(resolve("q", Library, vim), Some(Action::Queue(false)));
+            assert_eq!(resolve("Q", Library, vim), Some(Action::Queue(true)));
+            assert_eq!(resolve("t", Queue, vim), Some(Action::QueueTop));
+            assert_eq!(resolve("dd", Queue, vim), Some(Action::QueueRemove));
+        }
+        assert_eq!(resolve("`", Practice, false), Some(Action::QueueFocus));
+        assert_eq!(resolve("`", Queue, false), Some(Action::QueueFocus));
+        assert_eq!(resolve("⌘B", Search, false), Some(Action::Sidebar));
+        assert_eq!(resolve("q", Practice, false), None);
     }
 }

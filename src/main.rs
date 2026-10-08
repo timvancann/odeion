@@ -5,6 +5,7 @@ mod library;
 mod menu;
 mod media;
 mod playlist;
+mod queue;
 mod regions;
 mod resume;
 mod scan;

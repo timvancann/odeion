@@ -8,6 +8,7 @@ use crate::library::{self, Track};
 use crate::media::Media;
 use crate::menu::{Menu, Outcome, Target};
 use crate::playlist::Playlist;
+use crate::queue::Queue;
 use crate::regions::{Region, Regions};
 use crate::session::Session;
 use crate::resume::{Resume, Spot};
@@ -39,8 +40,6 @@ const ROW: f32 = 60.;
 /// The transparent title bar's height, where the traffic lights sit.
 const TITLEBAR: f32 = 32.;
 const SEEK: f64 = 5.0;
-/// Placing a loop's end plays this much before it.
-const LEAD_IN: Duration = Duration::from_millis(1500);
 /// How much the practice view shows around the playhead before any zooming.
 const SPAN: Duration = Duration::from_secs(10);
 /// A press this close to a strip's top grabs the marker by its flag.
@@ -182,6 +181,14 @@ enum Edge {
     Marker,
 }
 
+/// Where a sidebar entry takes the list.
+#[derive(Clone, Copy)]
+enum Place {
+    Library,
+    Favourites,
+    Playing,
+}
+
 enum Row {
     Header(String),
     Track(usize),
@@ -283,6 +290,12 @@ pub struct Riff {
     artist: Option<Track>,
     /// What plays next and before: the list the song was started from.
     playlist: Playlist,
+    /// Songs to play next, ahead of the list.
+    queue: Queue,
+    /// The sidebar shows: navigation and the queue.
+    sidebar: bool,
+    /// The highlighted song in the queue, while the keyboard is in it (`Mode::Queue`).
+    queue_at: Option<usize>,
     shuffle: bool,
     /// The media keys and Now Playing, when macOS lets riff have them.
     media: Option<Media>,
@@ -441,6 +454,9 @@ impl Riff {
             album: None,
             artist: None,
             playlist: Playlist::default(),
+            queue: Queue::default(),
+            sidebar: true,
+            queue_at: None,
             shuffle: false,
             media: Media::new(),
             message: None,
@@ -1010,6 +1026,8 @@ impl Riff {
             artist: self.artist.as_ref().map(|t| t.path.clone()),
             grid: self.grid,
             span: Some(self.span),
+            queue: self.queue.clone(),
+            sidebar_hidden: !self.sidebar,
         }
     }
 
@@ -1041,6 +1059,9 @@ impl Riff {
             path.as_ref().and_then(|p| riff.by_path.get(p)).map(|&i| riff.tracks[i].clone())
         };
         self.grid = session.grid;
+        self.queue = session.queue.clone();
+        self.sidebar = !session.sidebar_hidden;
+        self.queue.retain(|p| self.by_path.contains_key(p));
         if let Some(span) = session.span {
             self.span = span;
         }
@@ -1655,16 +1676,52 @@ impl Riff {
         self.by_path.get(path).map(|&i| self.tracks[i].clone())
     }
 
-    /// Plays the next song of the list. Returns whether there was one.
+    /// Plays the next song: the queue's first, else the list's. Returns whether there
+    /// was one.
     fn next_song(&mut self) -> bool {
         // A song gone since a rescan is skipped.
-        while let Some(path) = self.playlist.next().cloned() {
+        while let Some(path) = self.playlist.next(&mut self.queue) {
             if let Some(track) = self.track_at(&path) {
                 self.play(track, false);
                 return true;
             }
         }
         false
+    }
+
+    /// The highlighted queue row, kept inside the queue as it shrinks.
+    fn queued_at(&self) -> Option<usize> {
+        let at = self.queue_at?;
+        (!self.queue.is_empty()).then(|| at.min(self.queue.len() - 1))
+    }
+
+    /// The `i`-th queued song, now: it leaves the queue and the list stays where it was.
+    fn play_queued(&mut self, i: usize) {
+        let Some(path) = self.queue.take(i) else { return };
+        if self.queue.is_empty() {
+            self.queue_at = None;
+        }
+        if let Some(track) = self.track_at(&path) {
+            self.playlist.play_queued(&path);
+            self.play(track, true);
+        }
+    }
+
+    /// A sidebar entry: the full list (scrolled to its favourites, or to the playing
+    /// song), leaving practice, search, and the album or artist view.
+    fn go_to(&mut self, place: Place) {
+        (self.practice, self.searching, self.queue_at) = (false, false, None);
+        self.set_query(String::new());
+        match place {
+            Place::Library => {}
+            Place::Favourites => {
+                if let Some(row) = self.rows.iter().position(|r| matches!(r, Row::Header(h) if h == "Favourites")) {
+                    self.selected = (row + 1).min(self.rows.len().saturating_sub(1));
+                    self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+                }
+            }
+            Place::Playing => self.to_playing(),
+        }
     }
 
     /// The song before, or this one from the start when it is well underway.
@@ -1764,7 +1821,9 @@ impl Riff {
 
     /// Which keys apply now: practice, searching, or the library.
     fn mode(&self) -> keys::Mode {
-        if self.practice {
+        if self.queue_at.is_some() {
+            keys::Mode::Queue
+        } else if self.practice {
             keys::Mode::Practice
         } else if self.searching {
             keys::Mode::Search
@@ -1893,7 +1952,52 @@ impl Riff {
     fn perform(&mut self, action: Action) {
         let song = self.audio.duration;
         match action {
+            Action::Move(by) if self.queue_at.is_some() => {
+                let last = self.queue.len().saturating_sub(1);
+                let at = self.queued_at().unwrap_or(0) as isize + by;
+                self.queue_at = Some(at.clamp(0, last as isize) as usize);
+            }
             Action::Move(by) => self.move_selection(by),
+            Action::Queue(top) => {
+                let Some(path) = self.selected_path() else { return };
+                let place = match top {
+                    true => {
+                        self.queue.add_top(&path);
+                        Some(0)
+                    }
+                    false => self.queue.add(&path),
+                };
+                self.message = Some((crate::queue::said(place), false));
+            }
+            Action::QueueFocus if self.queue_at.is_some() => self.queue_at = None,
+            Action::QueueFocus if self.queue.is_empty() => {
+                self.message = Some(("the queue is empty, q queues the highlighted song".into(), false));
+            }
+            Action::QueueFocus => (self.sidebar, self.queue_at) = (true, Some(0)),
+            Action::Sidebar => {
+                self.sidebar = !self.sidebar;
+                if !self.sidebar {
+                    self.queue_at = None;
+                }
+            }
+            Action::QueuePlay => {
+                if let Some(i) = self.queued_at() {
+                    self.play_queued(i);
+                }
+            }
+            Action::QueueTop => {
+                if let Some(i) = self.queued_at() {
+                    self.queue.to_top(i);
+                    self.queue_at = Some(0);
+                }
+            }
+            Action::QueueRemove => {
+                if let Some(i) = self.queued_at() {
+                    self.queue.remove(i);
+                    // Kept inside the queue; an empty one hands the keyboard back.
+                    self.queue_at = self.queued_at();
+                }
+            }
             Action::Top => self.move_selection(-(self.rows.len() as isize)),
             Action::Bottom => self.move_selection(self.rows.len() as isize),
             Action::ToPlaying => self.to_playing(),
@@ -1958,7 +2062,6 @@ impl Riff {
                     }
                     None => looping.nudge_start(by),
                 }
-                self.audition(Edge::Start);
             }
             Action::NudgeEnd(by) => {
                 let grid = self.grid();
@@ -1971,7 +2074,6 @@ impl Riff {
                     }
                     _ => looping.nudge_end(by, song),
                 }
-                self.audition(Edge::End);
             }
             Action::Slide(forward) => {
                 let grid = self.grid();
@@ -1985,7 +2087,6 @@ impl Riff {
                     }
                     _ => looping.slide(forward, song),
                 }
-                self.audition(Edge::Start);
             }
             Action::Grid => self.grid = !self.grid,
             Action::SaveRegion => {
@@ -2104,13 +2205,10 @@ impl Riff {
         }
     }
 
-    /// The loop ends at `at`, and plays from its start when that makes it whole.
+    /// The loop ends at `at`. The playhead carries on; o plays from the loop's start.
     fn loop_end(&mut self, at: Duration) {
         self.audio.looping.set_end(at);
         self.frame_loop();
-        if let Some(start) = self.audio.looping.start.filter(|_| self.audio.looping.active()) {
-            self.audio.seek(start);
-        }
     }
 
     /// The playing recording's marker at `at`, or none.
@@ -2174,6 +2272,11 @@ impl Riff {
                     (self.naming, self.renaming) = (Some(name), Some(i));
                 }
             }
+            (Target::Queued(i), Action::QueuePlay) => self.play_queued(i),
+            (Target::Queued(i), Action::QueueTop) => self.queue.to_top(i),
+            (Target::Queued(i), Action::QueueRemove) => {
+                self.queue.remove(i);
+            }
             (Target::Song(row), Action::AddVariation) => {
                 self.selected = row;
                 if let Some(song) = self.selected_path() {
@@ -2225,7 +2328,7 @@ impl Riff {
         self.audio.looping =
             crate::audio::Loop { start: Some(region.start), end: Some(region.end), off: false };
         self.frame_loop();
-        self.audition(Edge::Start);
+        self.audio.play_from(region.start);
     }
 
     /// The playing recording's marker.
@@ -2272,18 +2375,6 @@ impl Riff {
     /// A moment on the grid: the nearest beat while it is on, otherwise itself.
     fn snap(&self, at: Duration) -> Duration {
         self.grid().and_then(|b| b.nearest(at)).unwrap_or(at)
-    }
-
-    /// Plays around a loop edge just placed, so it can be judged by ear: from the start,
-    /// or the last stretch up to the end.
-    fn audition(&mut self, edge: Edge) {
-        let looping = self.audio.looping;
-        let start = looping.start.unwrap_or_default();
-        let at = match (edge, looping.end) {
-            (Edge::End, Some(end)) => end.saturating_sub(LEAD_IN).max(start),
-            _ => start,
-        };
-        self.audio.play_from(at);
     }
 
     /// Zooms the practice view to a loop just completed. Afterwards the zoom is the
@@ -2538,9 +2629,6 @@ impl Riff {
         } else if event.modifiers.shift {
             self.audio.looping.set_end(self.snap(at));
             self.frame_loop();
-            if self.audio.looping.active() {
-                self.audition(Edge::Start);
-            }
         } else {
             // On the grid the playhead lands on the nearest beat; ⌥ places it freely.
             self.audio.seek(if event.modifiers.alt { at } else { self.snap(at) });
@@ -2604,18 +2692,14 @@ impl Riff {
         cx.notify();
     }
 
-    /// Lets go of a dragged edge: a section's is saved, the loop's plays around where it
-    /// landed, the marker just stays.
+    /// Lets go of a dragged edge: a section's is saved; the loop's and the marker just
+    /// stay where they landed, the playhead carrying on (o plays from them).
     fn drop_edge(&mut self, cx: &mut Context<Self>) {
         if self.shaping.take().is_some() {
             self.store_regions();
             cx.notify();
         }
-        if let Some((edge, _)) = self.dragging.take() {
-            // A marker is only placed; o plays from it.
-            if edge != Edge::Marker {
-                self.audition(edge);
-            }
+        if self.dragging.take().is_some() {
             cx.notify();
         }
     }
@@ -2642,6 +2726,7 @@ impl Riff {
                 // The album view's header already names the album.
                 let album = (self.album.is_none()).then(|| track.album.clone());
                 let variations = self.variations.of(&track.path).len();
+                let queued = self.queue.songs().contains(&track.path);
                 div()
                     .id(("row", ix))
                     .group("song-row")
@@ -2778,13 +2863,37 @@ impl Riff {
                     // A fixed width, so the columns line up with or without icons.
                     .child(
                         div()
-                            .w(px(48.))
+                            .w(px(76.))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_end()
                             .gap_1()
                             .when(playing, |d| d.child(ui::icon("music", 14., t().accent)))
+                            // Queued songs show it; others when highlighted or under the
+                            // pointer, to click.
+                            .child(
+                                div()
+                                    .id(("queue", ix))
+                                    .size(px(24.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(rgb(t().faint)))
+                                    .when(!queued && !selected, |d| {
+                                        d.opacity(0.).group_hover("song-row", |s| s.opacity(1.))
+                                    })
+                                    .child(ui::icon("list-plus", 14., if queued { t().accent } else { t().dim }))
+                                    .tooltip(self.tip(if queued { "Queued" } else { "Queue it" }, &[Action::Queue(false)]))
+                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                        cx.stop_propagation();
+                                        riff.selected = ix;
+                                        riff.act(Action::Queue(false), cx);
+                                    })),
+                            )
                             // A favourite's star always shows; others' when the row is
                             // highlighted or under the pointer, to click.
                             .child(
@@ -3232,6 +3341,7 @@ impl Riff {
                         keys::Mode::Library => "Library keys",
                         keys::Mode::Search => "Search keys",
                         keys::Mode::Practice => "Practice keys",
+                        keys::Mode::Queue => "Queue keys",
                     }))
                     .child(
                         div()
@@ -4080,6 +4190,197 @@ impl Riff {
     }
 
     /// The artist view's header: their albums' covers, their name, and how much there is.
+    /// The sidebar: places in the list (the mouse's way out of an album or artist view)
+    /// and the queue.
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let place = |id: &'static str,
+                     icon: &'static str,
+                     label: String,
+                     lit: bool,
+                     to: Place,
+                     tip: &[Action],
+                     cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .h(px(30.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .text_sm()
+                .text_color(rgb(if lit { t.accent } else { t.text }))
+                .when(lit, |d| d.bg(rgb(t.accent_soft)))
+                .hover(|d| d.bg(rgb(t.faint)))
+                .child(ui::icon(icon, 14., if lit { t.accent } else { t.dim }))
+                .child(div().truncate().child(label))
+                .tooltip(self.tip(format!("Go to {}", match to {
+                    Place::Library => "the full list",
+                    Place::Favourites => "the favourites",
+                    Place::Playing => "the playing song",
+                }), tip))
+                .on_click(cx.listener(move |riff, _, _, cx| {
+                    riff.go_to(to);
+                    cx.notify();
+                }))
+        };
+        // The open album or artist view, under Library, with an × that leaves it.
+        let view = |id: &'static str, label: String, leave: Action, cx: &mut Context<Self>| {
+            div()
+                .h(px(28.))
+                .pl(px(30.))
+                .pr_1()
+                .flex()
+                .items_center()
+                .gap_1()
+                .rounded_md()
+                .text_sm()
+                .bg(rgb(t.accent_soft))
+                .text_color(rgb(t.accent))
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .child(self.tool(id, "x", "Back to the full list", leave, false, cx).h(px(22.)).w(px(22.)))
+        };
+        let full = !self.practice && self.album.is_none() && self.artist.is_none() && self.query.trim().is_empty();
+        let lit = self.queued_at();
+        let vim = self.settings.vim;
+        let rows: Vec<_> = self.queue.songs().iter().enumerate().filter_map(|(i, path)| {
+            let track = self.track_at(path)?;
+            let on = lit == Some(i);
+            let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff, usize)| {
+                div()
+                    .id((id, i))
+                    .size(px(22.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.faint)))
+                    .when(!on, |d| d.opacity(0.).group_hover("queue-row", |s| s.opacity(1.)))
+                    .child(ui::icon(icon, 13., t.dim))
+                    .tooltip(self.tip(what, &[]))
+                    .on_click(cx.listener(move |riff, _, _, cx| {
+                        cx.stop_propagation();
+                        act(riff, i);
+                        cx.notify();
+                    }))
+            };
+            Some(
+                div()
+                    .id(("queued", i))
+                    .group("queue-row")
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .border_l_2()
+                    .border_color(rgb(if on { t.accent } else { t.surface }))
+                    .when(on, |d| d.bg(rgb(t.raised)))
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .on_click(cx.listener(move |riff, _, _, cx| {
+                        riff.play_queued(i);
+                        cx.notify();
+                    }))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                        riff.menu = Some((Menu::queued(i), e.position));
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .line_height(relative(1.3))
+                            .child(div().truncate().text_sm().text_color(rgb(if on { t.accent } else { t.text })).child(track.title.clone()))
+                            .child(div().truncate().text_xs().text_color(rgb(t.dim)).child(track.artist.clone())),
+                    )
+                    .child(button("queue-top", "arrow-up-to-line", "To the top", |riff, i| riff.queue.to_top(i)))
+                    .child(button("queue-remove", "x", "Remove from the queue", |riff, i| {
+                        riff.queue.remove(i);
+                    })),
+            )
+        }).collect();
+        div()
+            .w(px(240.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(t.surface))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(place("go-library", "music", "Library".into(), full, Place::Library, &[Action::Clear], cx))
+                    .children(self.album.as_ref().filter(|_| !self.practice).map(|a| {
+                        let name = if a.album.is_empty() { "Unknown album".into() } else { a.album.clone() };
+                        view("leave-album", name, Action::Album, cx)
+                    }))
+                    .children(self.artist.as_ref().filter(|_| !self.practice).map(|a| {
+                        view("leave-artist", a.artist.clone(), Action::Artist, cx)
+                    }))
+                    .child(place("go-favourites", "star", "Favourites".into(), false, Place::Favourites, &[], cx))
+                    .when(self.now.is_some(), |d| {
+                        d.child(place("go-playing", "audio-waveform", "Playing".into(), false, Place::Playing, &[Action::ToPlaying], cx))
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .h(px(24.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .font_family(MONO)
+                            .text_xs()
+                            .text_color(rgb(if self.queue_at.is_some() { t.accent } else { t.dim }))
+                            .child(div().flex_1().child(match self.queue.len() {
+                                0 => "Queue".to_string(),
+                                n => format!("Queue  {n}"),
+                            }))
+                            .when(!self.queue.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .id("queue-clear")
+                                        .px_1()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(rgb(t.faint)).text_color(rgb(t.text)))
+                                        .child("clear")
+                                        .on_click(cx.listener(|riff, _, _, cx| {
+                                            (riff.queue, riff.queue_at) = (Queue::default(), None);
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
+                    )
+                    .when(self.queue.is_empty(), |d| {
+                        d.child(div().px_2().text_xs().text_color(rgb(t.dim)).child(format!(
+                            "{} queues the highlighted song",
+                            keys::keys_for(Action::Queue(false), keys::Mode::Library, vim).join(" ")
+                        )))
+                    })
+                    .child(div().id("queue").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().children(rows)),
+            )
+    }
+
     fn render_artist(&self, of: &Track) -> impl IntoElement {
         let t = t();
         let songs = library::artist(&self.tracks, of);
@@ -4577,6 +4878,9 @@ impl Render for Riff {
             Some((text, error)) => div()
                 .text_color(rgb(if *error { t().error } else { t().dim }))
                 .child(text.clone()),
+            None if self.queue_at.is_some() => div().child(
+                "Enter plays now   t to the top   dd removes   Esc back   ? all keys",
+            ),
             None if self.practice => div().child(
                 "a b loop   \\ loop on or off   r section   g grid   s slow down   Esc library   ? all keys",
             ),
@@ -4628,63 +4932,80 @@ impl Render for Riff {
                             window.titlebar_double_click();
                         }
                     })
+                    .child(self.tool("sidebar", "panel-left", "Sidebar: places and the queue", Action::Sidebar, self.sidebar, cx))
                     .child(self.mode_switch(cx))
                     .child(self.tool("keys", "keyboard", "Every key", Action::Help, self.help, cx))
                     .child(self.tool("settings", "settings-2", "Settings", Action::Settings, self.prefs.is_some(), cx)),
             )
             .font_family(UI)
             .text_color(rgb(t().text))
-            .child(self.render_search(cx))
-            .when(self.practice, |d| d.child(self.render_practice(at, cx)))
-            .when(!self.practice, |d| {
-                d.children(self.album.as_ref().map(|of| self.render_album(of)))
-                    .children(self.artist.as_ref().map(|of| self.render_artist(of)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .gap_3()
+                    .when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
                     .child(
                         div()
                             .flex_1()
-                            .min_h_0()
-                            .relative()
+                            .min_w_0()
                             .flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .relative()
-                                    .flex_1()
-                                    .h_full()
+                            .flex_col()
+                            .gap_3()
+                            .child(self.render_search(cx))
+                            .when(self.practice, |d| d.child(self.render_practice(at, cx)))
+                            .when(!self.practice, |d| {
+                                d.children(self.album.as_ref().map(|of| self.render_album(of)))
+                                    .children(self.artist.as_ref().map(|of| self.render_artist(of)))
                                     .child(
-                                        uniform_list(
-                                            "library",
-                                            self.rows.len(),
-                                            cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
-                                                range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
-                                            }),
-                                        )
-                                        .track_scroll(self.scroll.clone())
-                                        .size_full(),
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .relative()
+                                            .flex()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .relative()
+                                                    .flex_1()
+                                                    .h_full()
+                                                    .child(
+                                                        uniform_list(
+                                                            "library",
+                                                            self.rows.len(),
+                                                            cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
+                                                                range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
+                                                            }),
+                                                        )
+                                                        .track_scroll(self.scroll.clone())
+                                                        .size_full(),
+                                                    )
+                                                    .child(self.render_scrollbar(cx)),
+                                            )
+                                            .when(self.browsing(), |d| d.child(self.render_rail(cx)))
+                                            // The letter being dragged to, large, while the list glides.
+                                            .children(self.scrubbing.map(|letter| {
+                                                div().absolute().size_full().flex().items_center().justify_center().child(
+                                                    div()
+                                                        .size(px(88.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .rounded_lg()
+                                                        .bg(rgb(t().raised))
+                                                        .border_1()
+                                                        .border_color(rgb(t().faint))
+                                                        .text_3xl()
+                                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                                        .text_color(rgb(t().accent))
+                                                        .child(letter.to_string()),
+                                                )
+                                            })),
                                     )
-                                    .child(self.render_scrollbar(cx)),
-                            )
-                            .when(self.browsing(), |d| d.child(self.render_rail(cx)))
-                            // The letter being dragged to, large, while the list glides.
-                            .children(self.scrubbing.map(|letter| {
-                                div().absolute().size_full().flex().items_center().justify_center().child(
-                                    div()
-                                        .size(px(88.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_lg()
-                                        .bg(rgb(t().raised))
-                                        .border_1()
-                                        .border_color(rgb(t().faint))
-                                        .text_3xl()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(rgb(t().accent))
-                                        .child(letter.to_string()),
-                                )
-                            })),
-                    )
-            })
+                            })
+                    ),
+            )
             .child(self.render_now(cx))
             .child(
                 div()

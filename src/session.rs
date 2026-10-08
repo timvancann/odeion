@@ -3,6 +3,7 @@
 //! song, the view and the practice view's grid and zoom. Kept in `session.json` in the
 //! data folder. Songs are named by path, so one that has gone is simply not restored.
 
+use crate::queue::Queue;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -24,6 +25,10 @@ pub struct Session {
     pub grid: bool,
     /// How much the practice view showed.
     pub span: Option<Duration>,
+    /// The songs queued to play next.
+    pub queue: Queue,
+    /// The sidebar was hidden. It shows the first time.
+    pub sidebar_hidden: bool,
 }
 
 impl Session {
@@ -61,10 +66,21 @@ mod tests {
             artist: Some("/m/song.mp3".into()),
             grid: true,
             span: Some(Duration::from_secs(8)),
+            queue: Queue::default(),
+            sidebar_hidden: true,
         };
+        let mut session = session;
+        session.queue.add(Path::new("/m/next.mp3"));
         session.store(&file).unwrap();
         assert_eq!(Session::load(&file), session);
         let _ = std::fs::remove_file(&file);
         assert_eq!(Session::load(&file), Session::default());
+    }
+
+    #[test]
+    fn a_session_from_before_the_queue_loads_with_an_empty_one() {
+        let old: Session = serde_json::from_str(r#"{"playing":"/m/a.mp3","grid":true}"#).unwrap();
+        assert!(old.queue.is_empty());
+        assert!(old.grid);
     }
 }
