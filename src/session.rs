@@ -21,6 +21,8 @@ pub struct Session {
     pub album: Option<PathBuf>,
     /// The artist view was open, on the artist of this song.
     pub artist: Option<PathBuf>,
+    /// A playlist's view was open, by its name.
+    pub playlist: Option<String>,
     /// The beat grid was on.
     pub grid: bool,
     /// How much the practice view showed.
@@ -64,6 +66,7 @@ mod tests {
             practice: true,
             album: None,
             artist: Some("/m/song.mp3".into()),
+            playlist: Some("Gig".into()),
             grid: true,
             span: Some(Duration::from_secs(8)),
             queue: Queue::default(),

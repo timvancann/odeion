@@ -8,6 +8,7 @@ use crate::library::{self, Grouped, Kind, Track};
 use crate::media::Media;
 use crate::menu::{Menu, Outcome, Target};
 use crate::playlist::Playlist;
+use crate::playlists::Playlists;
 use crate::queue::Queue;
 use crate::regions::{Region, Regions};
 use crate::session::Session;
@@ -181,6 +182,14 @@ enum Edge {
     Marker,
 }
 
+/// Adding a song to a playlist: which song, the highlighted row, and the name typed
+/// for a new playlist.
+struct AddTo {
+    song: PathBuf,
+    at: usize,
+    naming: Option<String>,
+}
+
 /// Where a sidebar entry takes the list.
 #[derive(Clone, Copy)]
 enum Place {
@@ -307,6 +316,16 @@ pub struct Riff {
     sidebar: bool,
     /// The highlighted song in the queue, while the keyboard is in it (`Mode::Queue`).
     queue_at: Option<usize>,
+    playlists: Playlists,
+    /// The playlist shown in the list, by its place.
+    playlist_view: Option<usize>,
+    /// The playlist picker: the song to add and the highlighted row (the last is "New
+    /// playlist…"), with the new playlist's name while it's typed.
+    add_to: Option<AddTo>,
+    /// The open playlist's new name, while it's typed in its header.
+    renaming_playlist: Option<String>,
+    /// The open playlist's delete button has asked "for good?".
+    deleting_playlist: bool,
     shuffle: bool,
     /// The media keys and Now Playing, when macOS lets riff have them.
     media: Option<Media>,
@@ -353,6 +372,10 @@ fn variations_file() -> PathBuf {
 
 fn session_file() -> PathBuf {
     state::data_dir().join("session.json")
+}
+
+fn playlists_file() -> PathBuf {
+    state::data_dir().join("playlists.json")
 }
 
 fn regions_file() -> PathBuf {
@@ -473,6 +496,11 @@ impl Riff {
             queue: Queue::default(),
             sidebar: true,
             queue_at: None,
+            playlists: Playlists::load(&playlists_file()),
+            playlist_view: None,
+            add_to: None,
+            renaming_playlist: None,
+            deleting_playlist: false,
             shuffle: false,
             media: Media::new(),
             message: None,
@@ -919,6 +947,10 @@ impl Riff {
         } else if let Some(of) = &self.artist {
             // Likewise the artist's, see `render_artist`.
             self.rows.extend(library::artist(&self.tracks, of).into_iter().map(Row::Track));
+        } else if let Some(named) = self.playlist_view.and_then(|i| self.playlists.get(i)) {
+            // In the playlist's order; songs gone since a rescan aren't listed.
+            let songs: Vec<usize> = named.songs.iter().filter_map(|p| self.by_path.get(p).copied()).collect();
+            self.rows.extend(songs.into_iter().map(Row::Track));
         } else if self.query.trim().is_empty() {
             // Library order, since the tracks are sorted.
             let mut favorites: Vec<usize> = self
@@ -966,6 +998,7 @@ impl Riff {
     /// Whether the rows are grouped under artists: the full list in the grouped view.
     fn grouped(&self) -> bool {
         self.settings.list == ListView::Grouped
+            && self.playlist_view.is_none()
             && self.album.is_none()
             && self.artist.is_none()
             && self.query.trim().is_empty()
@@ -1062,6 +1095,7 @@ impl Riff {
             practice: self.practice,
             album: self.album.as_ref().map(|t| t.path.clone()),
             artist: self.artist.as_ref().map(|t| t.path.clone()),
+            playlist: self.playlist_view.and_then(|i| self.playlists.get(i)).map(|p| p.name.clone()),
             grid: self.grid,
             span: Some(self.span),
             queue: self.queue.clone(),
@@ -1109,6 +1143,7 @@ impl Riff {
         }
         self.album = track(self, &session.album);
         self.artist = track(self, &session.artist).filter(|_| self.album.is_none());
+        self.playlist_view = session.playlist.as_deref().and_then(|name| self.playlists.find(name));
         self.practice = session.practice;
         self.reindex(session.selected.clone());
         self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
@@ -1966,6 +2001,14 @@ impl Riff {
             cx.notify();
             return;
         }
+        if self.add_to.is_some() {
+            self.picker_key(k, press);
+            return cx.notify();
+        }
+        if self.renaming_playlist.is_some() {
+            self.rename_key(k, press);
+            return cx.notify();
+        }
         if let Some(at) = self.eq_sheet {
             self.eq_key(at, k, press);
             return cx.notify();
@@ -2065,6 +2108,31 @@ impl Riff {
             }
             Action::QueueFocus => (self.sidebar, self.queue_at) = (true, Some(0)),
             Action::EqSheet => self.toggle_eq_sheet(),
+            Action::AddToPlaylist => {
+                let song = match self.practice {
+                    true => self.now.as_ref().map(|n| n.path.clone()),
+                    false => self.selected_path(),
+                };
+                if let Some(song) = song {
+                    self.add_to = Some(AddTo { song, at: 0, naming: None });
+                }
+            }
+            Action::PlaylistRemove => {
+                let (Some(i), Some(song)) = (self.playlist_view, self.selected_path()) else { return };
+                self.playlists.remove(i, &song);
+                self.store_playlists();
+                let was = self.selected;
+                self.rebuild_rows();
+                self.selected = self.first_track_row(was.min(self.rows.len().saturating_sub(1)), -1).unwrap_or(0);
+            }
+            Action::PlaylistMove(up) => {
+                let (Some(i), Some(song)) = (self.playlist_view, self.selected_path()) else { return };
+                if self.playlists.shift(i, &song, up) {
+                    self.store_playlists();
+                    self.reindex(Some(song));
+                    self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+                }
+            }
             Action::ListView => {
                 self.settings.list = match self.settings.list {
                     ListView::Columns => ListView::Grouped,
@@ -2489,7 +2557,11 @@ impl Riff {
 
     /// The whole library is listed (no search, album or artist), so the letter rail shows.
     fn browsing(&self) -> bool {
-        !self.practice && self.album.is_none() && self.artist.is_none() && self.query.trim().is_empty()
+        !self.practice
+            && self.album.is_none()
+            && self.artist.is_none()
+            && self.playlist_view.is_none()
+            && self.query.trim().is_empty()
     }
 
     /// Where each letter's artists begin in the list, below the favourites.
@@ -2700,10 +2772,11 @@ impl Riff {
     }
 
     fn set_query(&mut self, query: String) {
-        if query != self.query || self.album.is_some() || self.artist.is_some() {
+        if query != self.query || self.album.is_some() || self.artist.is_some() || self.playlist_view.is_some() {
             self.query = query;
             self.album = None;
             self.artist = None;
+            self.leave_playlist();
             self.rebuild_rows();
             self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
@@ -2930,9 +3003,10 @@ impl Riff {
                     // Right-click highlights the song and opens its menu.
                     .on_mouse_down(MouseButton::Right, {
                         let (album, artist) = (self.album.is_some(), self.artist.is_some());
+                        let in_playlist = self.playlist_view.is_some() && !album && !artist;
                         cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
                             riff.selected = ix;
-                            riff.menu = Some((Menu::song(ix, favorite, album, artist), e.position));
+                            riff.menu = Some((Menu::song(ix, favorite, album, artist, in_playlist), e.position));
                             cx.notify();
                         })
                     })
@@ -4215,6 +4289,359 @@ impl Riff {
     }
 
     /// One trainer setting up or down a notch, kept in settings.
+    fn store_playlists(&mut self) {
+        if let Err(e) = self.playlists.store(&playlists_file()) {
+            self.message = Some((format!("couldn't save the playlists: {e}"), true));
+        }
+    }
+
+    /// Shows playlist `i` in the list, leaving practice, search and other views.
+    fn open_playlist(&mut self, i: usize) {
+        (self.practice, self.searching, self.queue_at) = (false, false, None);
+        self.set_query(String::new());
+        self.playlist_view = Some(i);
+        self.rebuild_rows();
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+    }
+
+    fn leave_playlist(&mut self) {
+        self.playlist_view = None;
+        (self.renaming_playlist, self.deleting_playlist) = (None, false);
+    }
+
+    /// The picker's highlighted row chosen: a playlist gets the song, "New playlist…"
+    /// asks for a name.
+    fn pick_playlist(&mut self, at: usize) {
+        let Some(picker) = &mut self.add_to else { return };
+        if at >= self.playlists.all().len() {
+            (picker.at, picker.naming) = (at, Some(String::new()));
+            return;
+        }
+        let song = picker.song.clone();
+        self.add_to = None;
+        let name = self.playlists.get(at).map(|p| p.name.clone()).unwrap_or_default();
+        if self.playlists.add(at, &song) {
+            self.message = Some((format!("added to {name}"), false));
+            self.store_playlists();
+            if self.playlist_view == Some(at) {
+                let keep = self.selected_path();
+                self.reindex(keep);
+            }
+        } else {
+            self.message = Some((format!("already in {name}"), false));
+        }
+    }
+
+    /// A new playlist from the picker, with the song in it.
+    fn create_playlist(&mut self, name: &str) {
+        let Some(picker) = &self.add_to else { return };
+        let song = picker.song.clone();
+        match self.playlists.create(name) {
+            Ok(i) => {
+                self.playlists.add(i, &song);
+                self.add_to = None;
+                self.message = Some((format!("added to {}", name.trim()), false));
+                self.store_playlists();
+            }
+            Err(e) => self.message = Some((e, true)),
+        }
+    }
+
+    /// A key on the playlist picker: `j k` / ↑ ↓ and Enter, Esc closes; while naming a
+    /// new playlist, typing, Enter creates it, Esc goes back.
+    fn picker_key(&mut self, k: &gpui::Keystroke, press: keys::Press) {
+        let rows = self.playlists.all().len() + 1;
+        let Some(picker) = &mut self.add_to else { return };
+        if let Some(name) = &mut picker.naming {
+            match k.key.as_str() {
+                "enter" => {
+                    let name = name.clone();
+                    self.create_playlist(&name);
+                }
+                "escape" => picker.naming = None,
+                "backspace" => {
+                    name.pop();
+                }
+                _ => {
+                    if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
+                        name.push_str(text);
+                    }
+                }
+            }
+            return;
+        }
+        match k.key.as_str() {
+            "escape" => self.add_to = None,
+            "down" | "j" => picker.at = (picker.at + 1).min(rows - 1),
+            "up" | "k" => picker.at = picker.at.saturating_sub(1),
+            "enter" | "space" => {
+                let at = picker.at;
+                self.pick_playlist(at);
+            }
+            _ => {}
+        }
+    }
+
+    /// Typing the open playlist's new name in its header: Enter keeps, Esc cancels.
+    fn rename_key(&mut self, k: &gpui::Keystroke, press: keys::Press) {
+        let Some(name) = &mut self.renaming_playlist else { return };
+        match k.key.as_str() {
+            "enter" => {
+                let name = name.clone();
+                if let Some(i) = self.playlist_view {
+                    match self.playlists.rename(i, &name) {
+                        Ok(()) => {
+                            self.renaming_playlist = None;
+                            self.store_playlists();
+                        }
+                        Err(e) => self.message = Some((e, true)),
+                    }
+                }
+            }
+            "escape" => self.renaming_playlist = None,
+            "backspace" => {
+                name.pop();
+            }
+            _ => {
+                if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
+                    name.push_str(text);
+                }
+            }
+        }
+    }
+
+    fn delete_playlist(&mut self) {
+        let Some(i) = self.playlist_view else { return };
+        if let Some(gone) = self.playlists.delete(i) {
+            self.message = Some((format!("deleted the playlist {}", gone.name), false));
+            self.store_playlists();
+        }
+        self.leave_playlist();
+        self.rebuild_rows();
+    }
+
+    /// The playlist picker: every playlist (a check where the song is in it already)
+    /// and "New playlist…", whose name is typed in place.
+    fn render_picker(&self, picker: &AddTo, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let title = self.track_at(&picker.song).map(|t| t.title).unwrap_or_default();
+        let rows = self.playlists.all().iter().enumerate().map(|(i, p)| {
+            let lit = picker.at == i && picker.naming.is_none();
+            let has = self.playlists.has(i, &picker.song);
+            div()
+                .id(("pick", i))
+                .h(px(34.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .when(lit, |d| d.bg(rgb(t.raised)))
+                .hover(|d| d.bg(rgb(t.raised)))
+                .child(ui::icon("list-music", 14., if lit { t.accent } else { t.dim }))
+                .child(div().flex_1().truncate().text_sm().text_color(rgb(if lit { t.accent } else { t.text })).child(p.name.clone()))
+                .when(has, |d| d.child(ui::icon("check", 14., t.dim)))
+                .on_click(cx.listener(move |riff, _, _, cx| {
+                    riff.pick_playlist(i);
+                    cx.notify();
+                }))
+        });
+        let new_at = self.playlists.all().len();
+        let new_row = match &picker.naming {
+            Some(name) => div()
+                .h(px(34.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .bg(rgb(t.raised))
+                .child(ui::icon("plus", 14., t.accent))
+                .child(div().flex_1().text_sm().text_color(rgb(t.text)).child(format!("{name}▏")))
+                .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Enter creates"))
+                .into_any_element(),
+            None => {
+                let lit = picker.at == new_at;
+                div()
+                    .id("pick-new")
+                    .h(px(34.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(lit, |d| d.bg(rgb(t.raised)))
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .child(ui::icon("plus", 14., if lit { t.accent } else { t.dim }))
+                    .child(div().text_sm().text_color(rgb(if lit { t.accent } else { t.text })).child("New playlist…"))
+                    .on_click(cx.listener(move |riff, _, _, cx| {
+                        riff.pick_playlist(new_at);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+        };
+        overlay("add-to")
+            .on_click(cx.listener(|riff, _, _, cx| {
+                riff.add_to = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("picker-sheet")
+                    .w(px(380.))
+                    .max_h(relative(0.8))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(t.surface))
+                    .border_1()
+                    .border_color(rgb(t.faint))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .pb_2()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_color(rgb(t.text)).child("Add to a playlist"))
+                            .child(div().truncate().text_sm().text_color(rgb(t.dim)).child(title)),
+                    )
+                    .children(rows)
+                    .child(new_row)
+                    .child(
+                        div()
+                            .pt_2()
+                            .font_family(MONO)
+                            .text_xs()
+                            .text_color(rgb(t.dim))
+                            .child("j k move   Enter adds   Esc closes"),
+                    ),
+            )
+    }
+
+    /// The open playlist's header: its name (renamed in place), how many songs and how
+    /// long, and rename and delete buttons; delete asks once more.
+    fn render_playlist(&self, i: usize, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let t = t();
+        let named = self.playlists.get(i)?;
+        let songs: Vec<&Track> = named.songs.iter().filter_map(|p| self.by_path.get(p).map(|&j| &self.tracks[j])).collect();
+        let seconds = songs.iter().map(|t| t.seconds).sum::<Option<u64>>();
+        let small = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff)| {
+            div()
+                .id(id)
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(t.faint)))
+                .child(ui::icon(icon, 14., t.text))
+                .tooltip(self.tip(what, &[]))
+                .on_click(cx.listener(move |riff, _, _, cx| {
+                    act(riff);
+                    cx.notify();
+                }))
+        };
+        let name = match &self.renaming_playlist {
+            Some(typed) => div()
+                .px_2()
+                .rounded_md()
+                .bg(rgb(t.raised))
+                .text_3xl()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(t.text))
+                .child(format!("{typed}▏")),
+            None => div()
+                .truncate()
+                .text_3xl()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(t.text))
+                .child(named.name.clone()),
+        };
+        let actions = if self.renaming_playlist.is_some() {
+            div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Enter keeps, Esc cancels")
+        } else if self.deleting_playlist {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .id("delete-for-good")
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(rgb(t.raised))
+                        .text_sm()
+                        .text_color(rgb(t.error))
+                        .hover(|d| d.bg(rgb(t.faint)))
+                        .child("Delete for good")
+                        .on_click(cx.listener(|riff, _, _, cx| {
+                            riff.delete_playlist();
+                            cx.notify();
+                        })),
+                )
+                .child(small("delete-cancel", "x", "Keep it", |riff| riff.deleting_playlist = false))
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(small("playlist-rename", "pencil", "Rename the playlist", |riff| {
+                    let name = riff.playlist_view.and_then(|i| riff.playlists.get(i)).map(|p| p.name.clone());
+                    riff.renaming_playlist = name;
+                }))
+                .child(small("playlist-delete", "trash-2", "Delete the playlist", |riff| riff.deleting_playlist = true))
+        };
+        Some(
+            div()
+                .flex()
+                .items_end()
+                .gap_5()
+                .p_4()
+                .rounded_lg()
+                .bg(rgb(t.surface))
+                .child(
+                    div()
+                        .size(px(88.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .bg(rgb(t.raised))
+                        .child(ui::icon("list-music", 36., t.accent)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Playlist"))
+                        .child(name)
+                        .child(div().truncate().text_sm().text_color(rgb(t.dim)).child(ui::album_stats(songs.len(), seconds))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap_2()
+                        .child(actions)
+                        .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Esc back")),
+                ),
+        )
+    }
+
     fn toggle_eq_sheet(&mut self) {
         self.eq_naming = None;
         self.eq_sheet = match self.eq_sheet {
@@ -4712,7 +5139,7 @@ impl Riff {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
         let open = self.sidebar;
-        let full = !self.practice && self.album.is_none() && self.artist.is_none() && self.query.trim().is_empty();
+        let full = self.browsing();
         let place = |id: &'static str,
                      icon: &'static str,
                      label: &'static str,
@@ -4806,9 +5233,58 @@ impl Riff {
                     place("go-playing", "audio-waveform", "Playing", false, Place::Playing, &[Action::ToPlaying], cx),
                 ]))
                 .child(div().w_full().h(px(1.)).bg(rgb(t.faint)))
+                .child(
+                    div()
+                        .id("open-playlists")
+                        .w_full()
+                        .h(px(30.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(t.faint)))
+                        .child(ui::icon("list-music", 14., if self.playlist_view.is_some() { t.accent } else { t.dim }))
+                        .tooltip(self.tip("Playlists", &[]))
+                        .on_click(cx.listener(|riff, _, _, cx| {
+                            riff.sidebar = true;
+                            cx.notify();
+                        })),
+                )
                 .child(div().w_full().child(queue))
                 .into_any_element();
         }
+        let open_list = self.playlist_view.filter(|_| !self.practice && self.album.is_none() && self.artist.is_none());
+        let lists: Vec<_> = self
+            .playlists
+            .all()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let on = open_list == Some(i);
+                let count = p.songs.iter().filter(|s| self.by_path.contains_key(*s)).count();
+                div()
+                    .id(("playlist", i))
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(rgb(if on { t.accent } else { t.text }))
+                    .when(on, |d| d.bg(rgb(t.accent_soft)))
+                    .hover(|d| d.bg(rgb(t.faint)))
+                    .child(ui::icon("list-music", 14., if on { t.accent } else { t.dim }))
+                    .child(div().flex_1().min_w_0().truncate().child(p.name.clone()))
+                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(count.to_string()))
+                    .on_click(cx.listener(move |riff, _, _, cx| {
+                        riff.open_playlist(i);
+                        cx.notify();
+                    }))
+            })
+            .collect();
         let lit = self.queued_at();
         let vim = self.settings.vim;
         let rows: Vec<_> = self
@@ -4932,6 +5408,30 @@ impl Riff {
                     .when(self.now.is_some(), |d| {
                         d.child(place("go-playing", "audio-waveform", "Playing", false, Place::Playing, &[Action::ToPlaying], cx))
                     }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .h(px(24.))
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .font_family(MONO)
+                            .text_xs()
+                            .text_color(rgb(t.dim))
+                            .child("Playlists"),
+                    )
+                    .when(lists.is_empty(), |d| {
+                        d.child(div().px_1().text_xs().text_color(rgb(t.dim)).child(format!(
+                            "{} adds the highlighted song to one",
+                            keys::keys_for(Action::AddToPlaylist, keys::Mode::Library, vim).join(" ")
+                        )))
+                    })
+                    .children(lists),
             )
             .child(
                 div()
@@ -5561,7 +6061,13 @@ impl Render for Riff {
                             .child(self.render_search(cx))
                             .when(self.practice, |d| d.child(self.render_practice(at, cx)))
                             .when(!self.practice, |d| {
-                                d.children(self.album.as_ref().map(|of| self.render_album(of)))
+                                d.children(self.album.as_ref().map(|of| self.render_album(of).into_any_element()))
+                                    .children(
+                                        self.playlist_view
+                                            .filter(|_| self.album.is_none() && self.artist.is_none())
+                                            .and_then(|i| self.render_playlist(i, cx))
+                                            .map(|h| h.into_any_element()),
+                                    )
                                     .children(self.artist.as_ref().map(|of| self.render_artist(of)))
                                     .child(
                                         div()
@@ -5628,6 +6134,7 @@ impl Render for Riff {
             .children(self.prefs.as_ref().map(|p| self.render_prefs(p, cx)))
             .children(self.trainer_sheet.map(|at| self.render_trainer_sheet(at, cx)))
             .children(self.eq_sheet.map(|at| self.render_eq_sheet(at, cx)))
+            .children(self.add_to.as_ref().map(|p| self.render_picker(p, cx)))
             .children(self.render_menu(cx))
     }
 }

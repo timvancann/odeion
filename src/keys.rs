@@ -130,6 +130,13 @@ pub enum Action {
     ListView,
     /// The EQ sheet open or closed.
     EqSheet,
+    /// Add a song to a playlist (the picker): the highlighted one, or the playing one
+    /// in practice.
+    AddToPlaylist,
+    /// In a playlist's view: remove the highlighted song from it.
+    PlaylistRemove,
+    /// In a playlist's view: move the highlighted song up (true) or down.
+    PlaylistMove(bool),
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift
@@ -228,6 +235,12 @@ fn search(p: Press) -> Option<Action> {
 
 fn library(p: Press, vim: bool, first: Option<char>, pending: &mut Option<char>) -> Option<Action> {
     use Action::*;
+    // Before `moving`, which ignores shift.
+    match (p.key, p.shift, p.cmd || p.ctrl || p.alt) {
+        ("up", true, false) => return Some(PlaylistMove(true)),
+        ("down", true, false) => return Some(PlaylistMove(false)),
+        _ => {}
+    }
     if let Some(action) = moving(p) {
         return Some(action);
     }
@@ -239,6 +252,8 @@ fn library(p: Press, vim: bool, first: Option<char>, pending: &mut Option<char>)
         ("escape", ..) => Some(Clear),
         ("tab", false, false) | ("p", false, false) => Some(Practice),
         ("q", shift, false) => Some(Queue(shift)),
+        ("+", _, false) => Some(AddToPlaylist),
+        ("x", false, false) => Some(PlaylistRemove),
         _ => None,
     };
     if always.is_some() || !vim {
@@ -252,6 +267,8 @@ fn library(p: Press, vim: bool, first: Option<char>, pending: &mut Option<char>)
             return None;
         }
         ("g", true, _) => Bottom,
+        ("k", true, false) => PlaylistMove(true),
+        ("j", true, false) => PlaylistMove(false),
         ("d", _, true) => Move(HALF_PAGE),
         ("u", _, true) => Move(-HALF_PAGE),
         ("j", false, false) => Move(1),
@@ -347,6 +364,7 @@ fn practice(p: Press, first: Option<char>, pending: &mut Option<char>) -> Option
         ("v", false) => Variation,
         ("v", true) => AddVariation,
         ("x", true) => RemoveVariation,
+        ("+", _) => AddToPlaylist,
         ("?", _) => Help,
         _ => return None,
     })
@@ -472,6 +490,15 @@ pub const SHEET: &[Group] = &[
             ("⇧⌘A", "A", "only this artist, again to leave"),
             ("⌘T", "t", "highlighted song to Transcribe!"),
             ("q Q", "", "queue it, Q at the top"),
+            ("+", "", "add it to a playlist"),
+        ],
+    },
+    Group {
+        title: "Playlist",
+        modes: &[Library],
+        lines: &[
+            ("x", "", "remove it from the open playlist"),
+            ("⇧↑ ⇧↓", "K J", "move it up or down in the playlist"),
         ],
     },
     Group {
@@ -530,6 +557,7 @@ pub const SHEET: &[Group] = &[
             ("v", "", "next recording: the song, its variations"),
             ("V", "", "add a variation (or drop files on the waveform)"),
             ("X", "", "remove the playing variation"),
+            ("+", "", "add the playing song to a playlist"),
             ("1 2 3", "", "mute stem 1, 2, 3 (up to 9)"),
             ("⌥1 ⌥2", "", "solo stem 1, 2 (again to end it)"),
             ("⌘? ?", "", "these keys"),
@@ -749,6 +777,11 @@ mod tests {
         assert_eq!(resolve("⌘B", Search, false), Some(Action::Sidebar));
         assert_eq!(resolve("q", Practice, false), None);
         assert_eq!(resolve("⌘E", Practice, false), Some(Action::EqSheet));
+        assert_eq!(resolve("+", Library, false), Some(Action::AddToPlaylist));
+        assert_eq!(resolve("+", Practice, false), Some(Action::AddToPlaylist));
+        assert_eq!(resolve("⇧↑", Library, false), Some(Action::PlaylistMove(true)));
+        assert_eq!(resolve("J", Library, true), Some(Action::PlaylistMove(false)));
+        assert_eq!(resolve("↑", Library, false), Some(Action::Move(-1)));
         assert_eq!(resolve("⌘E", Queue, true), Some(Action::EqSheet));
     }
 

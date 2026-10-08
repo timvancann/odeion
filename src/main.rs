@@ -6,6 +6,7 @@ mod library;
 mod menu;
 mod media;
 mod playlist;
+mod playlists;
 mod queue;
 mod regions;
 mod resume;

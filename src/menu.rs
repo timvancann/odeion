@@ -67,20 +67,27 @@ impl Menu {
         )
     }
 
-    /// On the song in `row`. Album and artist say "back" when that view is already open.
-    pub fn song(row: usize, favorite: bool, album: bool, artist: bool) -> Menu {
-        Menu::new(
-            Target::Song(row),
-            vec![
-                (if favorite { "Not a favourite" } else { "Favourite" }, Action::Favorite),
-                (if album { "Back from the album" } else { "Only this album" }, Action::Album),
-                (if artist { "Back from the artist" } else { "Only this artist" }, Action::Artist),
-                ("Queue", Action::Queue(false)),
-                ("Queue next", Action::Queue(true)),
-                ("Open in Transcribe!", Action::Transcribe),
-                ("Add a variation…", Action::AddVariation),
-            ],
-        )
+    /// On the song in `row`. Album and artist say "back" when that view is already open;
+    /// in a playlist's view the song can leave it or move.
+    pub fn song(row: usize, favorite: bool, album: bool, artist: bool, in_playlist: bool) -> Menu {
+        let mut entries = vec![
+            (if favorite { "Not a favourite" } else { "Favourite" }, Action::Favorite),
+            (if album { "Back from the album" } else { "Only this album" }, Action::Album),
+            (if artist { "Back from the artist" } else { "Only this artist" }, Action::Artist),
+            ("Queue", Action::Queue(false)),
+            ("Queue next", Action::Queue(true)),
+            ("Add to playlist…", Action::AddToPlaylist),
+            ("Open in Transcribe!", Action::Transcribe),
+            ("Add a variation…", Action::AddVariation),
+        ];
+        if in_playlist {
+            entries.extend([
+                ("Remove from playlist", Action::PlaylistRemove),
+                ("Move up", Action::PlaylistMove(true)),
+                ("Move down", Action::PlaylistMove(false)),
+            ]);
+        }
+        Menu::new(Target::Song(row), entries)
     }
 
     /// On the `i`-th song in the queue.
@@ -174,7 +181,7 @@ mod tests {
     fn menus_act_on_what_was_clicked() {
         assert_eq!(Menu::waveform(Duration::from_secs(3)).target, Target::Moment(Duration::from_secs(3)));
         assert_eq!(Menu::section(2).target, Target::Section(2));
-        assert_eq!(Menu::song(7, false, false, false).target, Target::Song(7));
+        assert_eq!(Menu::song(7, false, false, false, false).target, Target::Song(7));
         assert_eq!(Menu::queued(1).target, Target::Queued(1));
         // A stem's entries name the stem, so they work from anywhere.
         let stem = Menu::stem(3, false, false);
@@ -185,8 +192,9 @@ mod tests {
     #[test]
     fn song_menu_says_what_a_toggle_will_do() {
         let labels = |m: Menu| m.entries.iter().map(|e| e.0).collect::<Vec<_>>();
-        assert!(labels(Menu::song(0, false, false, false)).contains(&"Favourite"));
-        let open = labels(Menu::song(0, true, true, true));
+        assert!(labels(Menu::song(0, false, false, false, false)).contains(&"Favourite"));
+        let open = labels(Menu::song(0, true, true, true, true));
+        assert!(open.contains(&"Remove from playlist"));
         assert!(open.contains(&"Not a favourite"));
         assert!(open.contains(&"Back from the album"));
         assert!(open.contains(&"Back from the artist"));

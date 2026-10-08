@@ -29,6 +29,8 @@ and draws:
 - `playlist.rs`: next, previous and shuffle over the list a song was started from (the
   album, favourites, search results or library; the run of rows between headers),
   with the queue first: while a queued song plays the list stays where it was.
+- `playlists.rs`: playlists, named lists filled song by song, kept in
+  `playlists.json` (gone songs stay in the file, unlisted).
 - `queue.rs`: the queue, songs to play next (`q` to the end, `Q` to the top, each song
   once), kept in `session.json`.
 - `keys.rs`: the keymap per mode and the ⌘? sheet, see Keyboard.
@@ -209,6 +211,13 @@ they fail.
   number and name (filled to the level) or scroll over them, or its right-click menu
   (100, 50, 25%, solo, mute). Levels are kept per stem set with the song's resume spot;
   mute and solo aren't kept.
+- **Playlists** (plan 03): `+` adds the highlighted song (the playing one in
+  practice) through a picker (each playlist, a check where the song is already, and
+  "New playlist…" named in place); the song menu has "Add to playlist…" too. The
+  sidebar lists them; a click opens one in the list under a header (rename in place,
+  delete asks "for good"). In its view `x` removes a song, ⇧↑ ⇧↓ or `K J` move it,
+  also from the row's menu. Enter plays from that song through the playlist. The
+  session keeps an open playlist by name.
 - **The EQ** (⌘E or the title bar's sliders button, lit while it does something):
   a sheet with on/off, the preset by name (‹ › to step, save, remove) and a vertical
   slider per column, the preamp first. Drag, wheel or double-click to 0; `h l` pick
