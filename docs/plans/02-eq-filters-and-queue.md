@@ -28,14 +28,15 @@ output. The filter comes before the pitch shift, so "bass" keeps following the b
 when the song is transposed. The EQ comes last, because it colours what you hear.
 
 **The queue.** A list of songs to play next, ahead of the list the playing song came
-from. `q` adds the highlighted song to the end. The queue can be edited by keyboard
-and mouse: kick a song out, move it to the top, play it now. It's kept across
-restarts. No duplicates: `q` on a song already queued says so and changes nothing.
+from. `q` adds the highlighted song to the end, `Q` puts it at the top. The queue
+can be edited by keyboard and mouse: kick a song out, move it to the top, play it
+now. It's kept across restarts. No duplicates: `q` on a song already queued says so
+and changes nothing; `Q` on one moves it to the top.
 Rejected for now: drag to reorder (moving to the top covers the need).
 
 **The sidebar.** A collapsible panel on the left, in both modes, toggled with ⌘B
 (Zed's key, free here) and a title-bar button. One open/closed setting, kept in the
-session. It holds the navigation (so album and artist views can be left with the
+session, open the first time (Tim, 2026-10-08, to get a feel for it). It holds the navigation (so album and artist views can be left with the
 mouse) and the queue below it.
 
 ## 1. The EQ
@@ -114,7 +115,8 @@ mouse) and the queue below it.
 
 ### 3.1 Rules (`queue.rs`, pure; next and previous in `playlist.rs`)
 
-- `Queue(Vec<PathBuf>)`: `add` (refusing a duplicate), `remove(i)`, `to_top(i)`,
+- `Queue(Vec<PathBuf>)`: `add` (refusing a duplicate), `add_top` (moving a
+  duplicate to the top), `remove(i)`, `to_top(i)`,
   `take(i)` (play now) and `retain` (drop songs gone after a rescan).
 - **Next**, by key, button, media key or the song ending, plays the queue's first
   song and removes it from the queue. With an empty queue, the list carries on as now.
@@ -130,14 +132,14 @@ mouse) and the queue below it.
 
 ### 3.2 Keys
 
-- Library mode: `q` queues the highlighted song, with or without vim keys. A
-  message says "queued, 3rd" or "already queued".
-- Library and practice: `Q` puts the keyboard in the queue (opening the sidebar if
-  it's closed). This is a new mode, `Mode::Queue`, like search is: `j k` / ↑ ↓ move,
-  Enter plays now, `t` moves to the top, `dd`, `x` or Backspace removes, Esc, `Q` or
-  Tab goes back to the mode it came from.
+- Library mode: `q` queues the highlighted song at the end, `Q` at the top, with or
+  without vim keys. A message says "queued, 3rd", "queued next" or "already queued".
+- A key (still to be chosen, see the open questions) puts the keyboard in the queue,
+  opening the sidebar if it's closed. This is a new mode, `Mode::Queue`, like search
+  is: `j k` / ↑ ↓ move, Enter plays now, `t` moves to the top, `dd`, `x` or Backspace
+  removes, Esc or Tab goes back to the mode it came from.
 - ⌘B toggles the sidebar everywhere.
-- The song row's right-click menu gets "Queue" (`q`). The queue rows' menu has play
+- The song row's right-click menu gets "Queue" (`q`) and "Queue next" (`Q`). The queue rows' menu has play
   now, to the top, and remove.
 
 ## 4. The sidebar
@@ -174,7 +176,5 @@ Each step ends with `cargo test && cargo build --release` clean and AGENTS.md up
 
 ## Open questions
 
-- Keys: `c C` for filters (`f` stays favourite only), `Q` for the queue, ⌘E for the EQ, and `w` `e` inside the
-  EQ sheet (plan 01 has `w` `e` pencilled in for lead-in and channel in practice, but
-  sheet keys don't clash with those). Change any of them now if they feel wrong.
-- Should the sidebar start open or closed the first time?
+- Which key puts the keyboard in the queue, now that `q` and `Q` add to it.
+  Settled: `c C` for filters, `q Q` to queue, ⌘E for the EQ, ⌘B for the sidebar.
