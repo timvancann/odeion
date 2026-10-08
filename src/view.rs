@@ -259,6 +259,12 @@ pub struct Riff {
     training: Option<u64>,
     /// The trainer's settings sheet, when open: the highlighted setting.
     trainer_sheet: Option<usize>,
+    /// The EQ sheet, with its highlighted column: the preamp (0) or a band.
+    eq_sheet: Option<usize>,
+    /// A name being typed to save the EQ as a preset.
+    eq_naming: Option<String>,
+    /// The EQ column being dragged, and its track's bounds.
+    eq_drag: Option<(usize, Rc<Cell<Bounds<Pixels>>>)>,
     /// Where each song was left, and when the playing one's was last kept.
     resume: Resume,
     kept: std::time::Instant,
@@ -390,7 +396,8 @@ impl Riff {
         let mut tracks = scan::load_cache(&cache_file());
         library::sort(&mut tracks);
         let settings = Settings::load(&settings_file());
-        let audio = Audio::new(settings.volume, settings.output.clone());
+        let mut audio = Audio::new(settings.volume, settings.output.clone());
+        audio.set_eq(settings.eq);
         if settings.theme != theme::DEFAULT_NAME
             && let Some(t) = theme::available(&theme::zed_dirs())
                 .into_iter()
@@ -438,6 +445,9 @@ impl Riff {
             speed: Default::default(),
             training: None,
             trainer_sheet: None,
+            eq_sheet: None,
+            eq_naming: None,
+            eq_drag: None,
             loops: HashMap::new(),
             marks: HashMap::new(),
             shaping: None,
@@ -1928,6 +1938,10 @@ impl Riff {
                 cx.notify();
                 return;
             }
+            Some(Action::EqSheet) if !self.help && self.prefs.is_none() => {
+                self.toggle_eq_sheet();
+                return cx.notify();
+            }
             Some(Action::Settings) if !self.help => {
                 if self.prefs.is_some() {
                     self.close_prefs();
@@ -1951,6 +1965,10 @@ impl Riff {
             }
             cx.notify();
             return;
+        }
+        if let Some(at) = self.eq_sheet {
+            self.eq_key(at, k, press);
+            return cx.notify();
         }
         if let Some(at) = self.trainer_sheet {
             let field = crate::trainer::FIELDS[at];
@@ -2046,6 +2064,7 @@ impl Riff {
                 self.message = Some(("the queue is empty, q queues the highlighted song".into(), false));
             }
             Action::QueueFocus => (self.sidebar, self.queue_at) = (true, Some(0)),
+            Action::EqSheet => self.toggle_eq_sheet(),
             Action::ListView => {
                 self.settings.list = match self.settings.list {
                     ListView::Columns => ListView::Grouped,
@@ -2719,6 +2738,15 @@ impl Riff {
     }
 
     fn drag(&mut self, event: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if let Some((at, bounds)) = self.eq_drag.clone() {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.eq_drag_to(at, bounds.get(), event.position.y, false);
+            } else {
+                self.eq_drag = None;
+                self.save_settings();
+            }
+            return cx.notify();
+        }
         if let Some((slider, bounds)) = self.sliding.clone() {
             if event.pressed_button == Some(MouseButton::Left) {
                 self.slide(slider, bounds.get(), event.position.x);
@@ -4187,6 +4215,312 @@ impl Riff {
     }
 
     /// One trainer setting up or down a notch, kept in settings.
+    fn toggle_eq_sheet(&mut self) {
+        self.eq_naming = None;
+        self.eq_sheet = match self.eq_sheet {
+            Some(_) => None,
+            None => Some(1),
+        };
+    }
+
+    /// Changes the EQ and hands it to the audio; `keep` also saves it (a drag saves
+    /// when it lets go).
+    fn change_eq(&mut self, keep: bool, change: impl FnOnce(&mut crate::eq::Eq)) {
+        change(&mut self.settings.eq);
+        self.audio.set_eq(self.settings.eq);
+        if keep {
+            self.save_settings();
+        }
+    }
+
+    /// Sets column `at` (preamp or band) to `db`; touching a band switches the EQ on.
+    fn set_eq_column(&mut self, at: usize, db: i8, keep: bool) {
+        self.change_eq(keep, |eq| {
+            eq.on = true;
+            eq.set(at, db);
+        });
+    }
+
+    fn nudge_eq(&mut self, at: usize, by: i8) {
+        self.change_eq(true, |eq| {
+            eq.on = true;
+            eq.nudge(at, by);
+        });
+    }
+
+    fn eq_step(&mut self, forward: bool) {
+        let preset = crate::eq::step(&self.settings.eq, &self.settings.eq_presets, forward);
+        self.change_eq(true, |eq| eq.apply(&preset));
+    }
+
+    fn save_eq(&mut self, name: &str) {
+        let eq = self.settings.eq;
+        match crate::eq::save(&mut self.settings.eq_presets, name, &eq) {
+            Ok(()) => {
+                self.message = Some((format!("saved EQ preset {}", name.trim()), false));
+                self.save_settings();
+            }
+            Err(e) => self.message = Some((e, true)),
+        }
+    }
+
+    fn remove_eq_preset(&mut self) {
+        let eq = self.settings.eq;
+        if let Some(name) = crate::eq::remove(&mut self.settings.eq_presets, &eq) {
+            self.message = Some((format!("removed EQ preset {name}"), false));
+            self.save_settings();
+        }
+    }
+
+    /// A key on the EQ sheet: `h l` pick a column, `k j` move it a dB, `0` resets it,
+    /// `n N` step through the presets, `e` on or off, `w` saves (typing a name), `x`
+    /// removes a saved preset, Esc or Enter close.
+    fn eq_key(&mut self, at: usize, k: &gpui::Keystroke, press: keys::Press) {
+        if let Some(name) = &mut self.eq_naming {
+            match k.key.as_str() {
+                "enter" => {
+                    let name = name.clone();
+                    self.eq_naming = None;
+                    self.save_eq(&name);
+                }
+                "escape" => self.eq_naming = None,
+                "backspace" => {
+                    name.pop();
+                }
+                _ => {
+                    if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
+                        name.push_str(text);
+                    }
+                }
+            }
+            return;
+        }
+        match (k.key.as_str(), press.shift) {
+            ("escape" | "enter", _) => self.eq_sheet = None,
+            ("left" | "h", _) => self.eq_sheet = Some(at.saturating_sub(1)),
+            ("right" | "l", _) => self.eq_sheet = Some((at + 1).min(crate::eq::BANDS.len())),
+            ("up" | "k", _) => self.nudge_eq(at, 1),
+            ("down" | "j", _) => self.nudge_eq(at, -1),
+            ("0", _) => self.set_eq_column(at, 0, true),
+            ("n", shift) => self.eq_step(!shift),
+            ("e", false) => self.change_eq(true, |eq| eq.on = !eq.on),
+            ("w", false) => {
+                let name = crate::eq::name_of(&self.settings.eq, &self.settings.eq_presets);
+                let saved = self.settings.eq_presets.iter().any(|p| p.name == name);
+                self.eq_naming = Some(if saved { name } else { String::new() });
+            }
+            ("x", false) => self.remove_eq_preset(),
+            _ => {}
+        }
+    }
+
+    /// The EQ column at `y` on its track, in whole dB: the top is +12, the bottom -12.
+    fn eq_drag_to(&mut self, at: usize, bounds: Bounds<Pixels>, y: Pixels, keep: bool) {
+        let height = f32::from(bounds.size.height);
+        if height > 0. {
+            let fraction = (f32::from(y - bounds.origin.y) / height).clamp(0., 1.);
+            let range = crate::eq::RANGE as f32;
+            self.set_eq_column(at, (range - fraction * 2. * range).round() as i8, keep);
+        }
+    }
+
+    /// The EQ: on or off, the preset by name (stepped with the arrows, saved, removed),
+    /// and a vertical slider each for the preamp and the ten bands.
+    fn render_eq_sheet(&self, at: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let eq = self.settings.eq;
+        let name = crate::eq::name_of(&eq, &self.settings.eq_presets);
+        let saved = self.settings.eq_presets.iter().any(|p| p.name == name);
+        let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff)| {
+            div()
+                .id(id)
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(t.faint)))
+                .child(ui::icon(icon, 14., t.text))
+                .tooltip(self.tip(what, &[]))
+                .on_click(cx.listener(move |riff, _, _, cx| {
+                    act(riff);
+                    cx.notify();
+                }))
+        };
+        let label = |i: usize| match i {
+            0 => "pre".to_string(),
+            n => {
+                let hz = crate::eq::BANDS[n - 1];
+                if hz >= 1000. { format!("{}k", hz / 1000.) } else { format!("{hz}") }
+            }
+        };
+        let columns = (0..=crate::eq::BANDS.len()).map(|i| {
+            let db = eq.get(i);
+            let lit = i == at;
+            let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::default();
+            let (drawn, pressed) = (bounds.clone(), bounds);
+            let colour = if !eq.on { t.dim } else if lit { t.accent } else { t.text };
+            // The fill runs from the middle (0 dB) to the value.
+            let half = db.unsigned_abs() as f32 / crate::eq::RANGE as f32 / 2.;
+            let fill = div().absolute().left(px(10.)).w(px(4.)).rounded_full().bg(rgb(colour)).h(relative(half));
+            let fill = if db >= 0 { fill.bottom(relative(0.5)) } else { fill.top(relative(0.5)) };
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .when(i == 1, |d| d.ml_3())
+                .child(
+                    div()
+                        .font_family(MONO)
+                        .text_xs()
+                        .text_color(rgb(if lit { t.accent } else { t.dim }))
+                        .child(if db > 0 { format!("+{db}") } else { db.to_string() }),
+                )
+                .child(
+                    div()
+                        .id(("eq-track", i))
+                        .relative()
+                        .w(px(24.))
+                        .h(px(160.))
+                        .rounded_md()
+                        .when(lit, |d| d.bg(rgb(t.raised)))
+                        .cursor(gpui::CursorStyle::ResizeUpDown)
+                        .child(canvas(move |b, _, _| drawn.set(b), |_, _, _, _| {}).absolute().size_full())
+                        .child(div().absolute().left(px(11.)).top_0().bottom_0().w(px(2.)).bg(rgb(t.faint)))
+                        .child(div().absolute().left(px(4.)).w(px(16.)).h(px(1.)).top(relative(0.5)).bg(rgb(t.dim)))
+                        .child(fill)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                riff.eq_sheet = Some(i);
+                                if e.click_count == 2 {
+                                    // A double click puts it back to 0.
+                                    riff.set_eq_column(i, 0, true);
+                                } else {
+                                    riff.eq_drag_to(i, pressed.get(), e.position.y, false);
+                                    riff.eq_drag = Some((i, pressed.clone()));
+                                }
+                                cx.notify();
+                            }),
+                        )
+                        .on_scroll_wheel(cx.listener(move |riff, e: &gpui::ScrollWheelEvent, _, cx| {
+                            let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
+                            if dy != 0. {
+                                riff.nudge_eq(i, if dy < 0. { 1 } else { -1 });
+                                cx.notify();
+                            }
+                        })),
+                )
+                .child(
+                    div()
+                        .font_family(MONO)
+                        .text_xs()
+                        .text_color(rgb(if lit { t.accent } else { t.dim }))
+                        .child(label(i)),
+                )
+        });
+        let preset_row = match &self.eq_naming {
+            Some(typed) => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().text_sm().text_color(rgb(t.dim)).child("Save as"))
+                .child(
+                    div()
+                        .flex_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(t.raised))
+                        .text_sm()
+                        .text_color(rgb(t.text))
+                        .child(format!("{typed}▏")),
+                )
+                .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Enter saves, Esc cancels")),
+            None => div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(button("eq-prev", "chevron-left", "Previous preset", |riff| riff.eq_step(false)))
+                .child(
+                    div()
+                        .w(px(150.))
+                        .flex()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(if eq.on { t.text } else { t.dim }))
+                        .child(name.clone()),
+                )
+                .child(button("eq-next", "chevron-right", "Next preset", |riff| riff.eq_step(true)))
+                .child(div().flex_1())
+                .child(button("eq-save", "bookmark-plus", "Save as a preset", |riff| {
+                    let name = crate::eq::name_of(&riff.settings.eq, &riff.settings.eq_presets);
+                    let saved = riff.settings.eq_presets.iter().any(|p| p.name == name);
+                    riff.eq_naming = Some(if saved { name } else { String::new() });
+                }))
+                .when(saved, |d| {
+                    d.child(button("eq-remove", "bookmark-minus", "Remove this preset", |riff| riff.remove_eq_preset()))
+                }),
+        };
+        overlay("eq-sheet")
+            .on_click(cx.listener(|riff, _, _, cx| {
+                (riff.eq_sheet, riff.eq_naming) = (None, None);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("eq")
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(rgb(t.surface))
+                    .border_1()
+                    .border_color(rgb(t.faint))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(ui::icon("sliders-vertical", 16., t.accent))
+                            .child(div().flex_1().text_color(rgb(t.text)).child("EQ"))
+                            .child(
+                                div()
+                                    .id("eq-on")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .font_family(MONO)
+                                    .text_xs()
+                                    .bg(rgb(if eq.on { t.accent_soft } else { t.raised }))
+                                    .text_color(rgb(if eq.on { t.accent } else { t.dim }))
+                                    .hover(|d| d.bg(rgb(t.faint)))
+                                    .child(if eq.on { "on" } else { "off" })
+                                    .tooltip(self.tip("EQ on or off (e)", &[]))
+                                    .on_click(cx.listener(|riff, _, _, cx| {
+                                        riff.change_eq(true, |eq| eq.on = !eq.on);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(preset_row)
+                    .child(div().flex().items_end().gap_2().children(columns))
+                    .child(
+                        div()
+                            .font_family(MONO)
+                            .text_xs()
+                            .text_color(rgb(t.dim))
+                            .child("h l band   k j ±1 dB   0 reset   n N preset   e on/off   w save   x remove   Esc close"),
+                    ),
+            )
+    }
+
     fn nudge_trainer(&mut self, field: crate::trainer::Field, up: bool) {
         self.settings.trainer.nudge(field, up);
         self.save_settings();
@@ -5168,6 +5502,10 @@ impl Render for Riff {
                 if riff.scrubbing.take().is_some() | riff.grab.take().is_some() | riff.drop_slider() {
                     cx.notify();
                 }
+                if riff.eq_drag.take().is_some() {
+                    riff.save_settings();
+                    cx.notify();
+                }
                 riff.drop_edge(cx)
             }))
             .relative()
@@ -5200,6 +5538,7 @@ impl Render for Riff {
                     })
                     .when(!self.practice, |d| d.child(self.list_switch(cx)))
                     .child(self.mode_switch(cx))
+                    .child(self.tool("eq", "sliders-vertical", "EQ", Action::EqSheet, !self.settings.eq.flat(), cx))
                     .child(self.tool("keys", "keyboard", "Every key", Action::Help, self.help, cx))
                     .child(self.tool("settings", "settings-2", "Settings", Action::Settings, self.prefs.is_some(), cx)),
             )
@@ -5288,6 +5627,7 @@ impl Render for Riff {
             .children(self.naming.clone().map(|name| self.render_naming(name, cx)))
             .children(self.prefs.as_ref().map(|p| self.render_prefs(p, cx)))
             .children(self.trainer_sheet.map(|at| self.render_trainer_sheet(at, cx)))
+            .children(self.eq_sheet.map(|at| self.render_eq_sheet(at, cx)))
             .children(self.render_menu(cx))
     }
 }

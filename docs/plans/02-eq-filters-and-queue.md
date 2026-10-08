@@ -51,7 +51,10 @@ mouse) and the queue below it.
   `Stretched` at 100%.
 - Built-in presets: Flat, More bass, Less bass, More treble, Less treble, Voice,
   Loudness (a smile: lows and highs up, mids flat). The exact curves are set by ear
-  when the step is built, and recorded here.
+  when the step is built. As built (preamp, then 31 Hz to 16 kHz): More bass -3,
+  6 5 4 2 0…; Less bass 0, -6 -5 -4 -2 0…; More treble -3, …0 2 4 5 6; Less treble
+  0, …0 -2 -4 -5 -6; Voice -2, -3 -2 -1 0 2 4 4 2 0 -1; Loudness -3, 5 4 2 0 -1 -1 0 2
+  4 5. Tim tunes them by ear.
 - Saved presets: a name and the gains. Saving under an existing name overwrites it;
   built-in presets can't be overwritten or deleted. Which preset is current is shown
   by name; touching a band makes it "Custom".
@@ -60,22 +63,27 @@ mouse) and the queue below it.
 
 ### 1.2 Sound (`audio.rs`)
 
-- An `Equalized` source after `Stretched`. The gains travel in `Shared` as atomics
-  plus a version number; the stage reads the version once per block of 512 frames
-  and recomputes its coefficients when it changed. The audio thread never locks.
+- An `Equalized` source after `Stretched`. The EQ travels in `Shared` packed into two
+  atomic words (`Eq::pack`); the stage reads them once per block of 512 frames and
+  recomputes its coefficients when they changed. The audio thread never locks. Bands
+  at 0 dB stay in the chain (they pass samples unchanged), so moving one band never
+  resets the others' memory.
 - Filter state per channel. After a seek, the state resets.
 - Boosts can push peaks over full scale: when the EQ isn't flat, its output goes
   through the same `soft_limit` as the stretcher's.
 
 ### 1.3 Screen and keys
 
-- ⌘E opens the **EQ sheet** in every mode, as does an EQ row in ⌘, settings and a
-  button on the practice toolbar. The sheet is shaped like the trainer settings sheet:
+- ⌘E opens the **EQ sheet** in every mode, as does a button in the title bar, lit
+  while the EQ does something (built that way instead of a settings row and a practice
+  toolbar button, so it's reachable from both modes). The sheet is shaped like the trainer settings sheet:
   on/off, the preset name, the preamp and ten vertical sliders (drag or wheel; a
   double-click resets one to 0).
 - Sheet keys: `h l` / ← → pick a band (the preamp is the first), `k j` / ↑ ↓ ±1 dB,
   `0` resets the band, `n N` next and previous preset, `e` on or off, `w` saves as a
-  preset (a name dialog like `r` for sections), Esc or Enter closes. Like the trainer
+  preset (the name is typed in the sheet's preset row), `x` removes the saved preset
+  showing, Esc or Enter closes. Saving under an existing name takes the new spelling.
+  Touching a band switches the EQ on. Like the trainer
   sheet, these keys only exist while the sheet is open.
 
 ## 2. Band filters

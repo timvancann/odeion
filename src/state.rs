@@ -39,6 +39,9 @@ pub struct Settings {
     pub trainer: crate::trainer::Trainer,
     /// How the list shows songs.
     pub list: ListView,
+    /// The global EQ, and the presets Tim saved.
+    pub eq: crate::eq::Eq,
+    pub eq_presets: Vec<crate::eq::Preset>,
 }
 
 /// How the list shows songs: artist, title and album in columns (a repeated artist
@@ -73,6 +76,8 @@ impl Default for Settings {
             output: None,
             trainer: Default::default(),
             list: ListView::Columns,
+            eq: Default::default(),
+            eq_presets: Vec::new(),
         }
     }
 }
@@ -198,6 +203,8 @@ mod tests {
             output: Some("coreaudio:headphones".into()),
             trainer: crate::trainer::Trainer { from: 60, to: 95, step: 5, every: 4 },
             list: ListView::Grouped,
+            eq: crate::eq::Eq { on: true, preamp: -2, bands: [3, 2, 0, 0, 0, 0, 0, 1, 2, 3] },
+            eq_presets: vec![crate::eq::Preset { name: "Desk".into(), preamp: 0, bands: [1; 10] }],
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s);
@@ -207,6 +214,7 @@ mod tests {
         assert_eq!(Settings::load(&file).volume, 1.0);
         assert_eq!(Settings::load(&file).output, None);
         assert_eq!(Settings::load(&file).list, ListView::Columns);
+        assert!(Settings::load(&file).eq.flat());
         let _ = std::fs::remove_file(&file);
     }
 }

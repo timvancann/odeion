@@ -38,7 +38,7 @@ macro_rules! icons {
 }
 
 icons!(
-    "panel-left", "arrow-up-to-line", "list-plus", "columns-3", "list-tree",
+    "panel-left", "arrow-up-to-line", "list-plus", "columns-3", "list-tree", "sliders-vertical", "chevron-left", "chevron-right",
     "play", "pause", "repeat", "external-link", "flag", "music", "search", "star", "folder", "x", "plus",
     "palette", "check", "skip-back", "skip-forward", "shuffle", "keyboard", "gauge", "audio-waveform", "settings-2",
     "zoom-in", "zoom-out", "layers", "layers-plus", "volume-2", "volume-x", "headphones",

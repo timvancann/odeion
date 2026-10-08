@@ -1,5 +1,6 @@
 mod audio;
 mod beats;
+mod eq;
 mod keys;
 mod library;
 mod menu;

@@ -33,6 +33,9 @@ and draws:
   once), kept in `session.json`.
 - `keys.rs`: the keymap per mode and the ⌘? sheet, see Keyboard.
 - `menu.rs`: the right-click menus: their entries and moving through them by key.
+- `eq.rs`: the global EQ (ten Winamp bands and a preamp, ±12 dB), its presets
+  (built in and saved, in `settings.json`) and the peaking filters' maths. It plays
+  as `audio::Equalized`, last in the sound after the stretcher.
 - `speed.rs`: the speed in whole percent, 25 to 110, and the pitch in cents, up to an
   octave either way; both kept by a song while it plays as recorded.
 - `trainer.rs`: the speed trainer: from, to, step, every N repeats, turned into a
@@ -206,6 +209,11 @@ they fail.
   number and name (filled to the level) or scroll over them, or its right-click menu
   (100, 50, 25%, solo, mute). Levels are kept per stem set with the song's resume spot;
   mute and solo aren't kept.
+- **The EQ** (⌘E or the title bar's sliders button, lit while it does something):
+  a sheet with on/off, the preset by name (‹ › to step, save, remove) and a vertical
+  slider per column, the preamp first. Drag, wheel or double-click to 0; `h l` pick
+  a column, `k j` a dB, `0`, `n N`, `e`, `w` (type a name, Enter), `x`. Global, for
+  the speakers and headphones; flat or off, samples pass straight through.
 - **Volume**: ⌥↑ ⌥↓ in 5% steps in every mode, and the slider beside the speed buttons
   (drag or scroll), from silent to full, no boost. Kept in settings.
 - **The output follows the system**: every second riff asks which device should play
@@ -287,7 +295,7 @@ commit signing is off for this repo.
 library and practice, with a keymap that stays on Tim's Glove80 base layer, then
 volume, speed, pitch, undo, loop extras, bars and notes) is the current direction.
 **Plan 02** (an EQ, band filters, the queue and a sidebar) runs beside it: steps 1 and
-2 (the queue and sidebar) are built, 3 (band filters) and 4 (EQ) remain. Steps 1
+2 (the queue and sidebar) and 4 (the EQ) are built; 3 (band filters) remains. Steps 1
 (modes, keymap, right-click menus), 2 (volume, stem levels, output), 3 (speed and the
 trainer) and 4 (pitch) are built; step 7 (bars) was dropped by Tim's choice; 5 (undo),
 6 (lead-in and channel) and 8 (notes) remain.

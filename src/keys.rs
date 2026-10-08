@@ -128,6 +128,8 @@ pub enum Action {
     QueueRemove,
     /// The list in columns or grouped by artist; the title bar's switch, no key yet.
     ListView,
+    /// The EQ sheet open or closed.
+    EqSheet,
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift
@@ -179,6 +181,7 @@ pub fn anywhere(p: Press) -> Option<Action> {
         (",", true, _) => Settings,
         ("q", true, _) => Quit,
         ("b", true, false) if !p.shift => Sidebar,
+        ("e", true, false) if !p.shift => EqSheet,
         _ => return None,
     })
 }
@@ -568,6 +571,7 @@ pub const SHEET: &[Group] = &[
         modes: &[Library, Search, Practice, Queue],
         lines: &[
             ("⌘,", "", "settings"),
+            ("⌘E", "", "the EQ"),
             ("⌘M", "", "minimise"),
             ("⌃⌘F", "", "full screen"),
             ("⌘Q", "", "quit"),
@@ -744,6 +748,8 @@ mod tests {
         assert_eq!(resolve("`", Queue, false), Some(Action::QueueFocus));
         assert_eq!(resolve("⌘B", Search, false), Some(Action::Sidebar));
         assert_eq!(resolve("q", Practice, false), None);
+        assert_eq!(resolve("⌘E", Practice, false), Some(Action::EqSheet));
+        assert_eq!(resolve("⌘E", Queue, true), Some(Action::EqSheet));
     }
 
     #[test]

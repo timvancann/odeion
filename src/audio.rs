@@ -349,6 +349,111 @@ impl<S: Source> Source for Stretched<S> {
     }
 }
 
+/// The global EQ, last in the sound (after the stretcher), so it colours what's heard.
+/// It reads the EQ from `Shared` once a block and passes samples straight through while
+/// it's flat. Boosts can push peaks over full scale, so its output is soft-limited.
+struct Equalized<S> {
+    inner: S,
+    shared: Arc<Shared>,
+    channels: usize,
+    rate: f32,
+    /// The packed EQ last read, and what it makes.
+    seen: Option<(u64, u64)>,
+    flat: bool,
+    gain: f32,
+    bands: Vec<crate::eq::Coefficients>,
+    /// Each channel's memory of each band, channel by channel.
+    states: Vec<crate::eq::State>,
+    channel: usize,
+    /// Samples until the EQ is read again.
+    until: usize,
+}
+
+impl<S: Source> Equalized<S> {
+    fn new(inner: S, shared: Arc<Shared>) -> Self {
+        let channels = inner.channels().get() as usize;
+        let rate = inner.sample_rate().get() as f32;
+        Equalized {
+            inner,
+            shared,
+            channels,
+            rate,
+            seen: None,
+            flat: true,
+            gain: 1.,
+            bands: Vec::new(),
+            states: Vec::new(),
+            channel: 0,
+            until: 0,
+        }
+    }
+
+    fn read_eq(&mut self) {
+        let packed = (self.shared.eq.0.load(Ordering::Relaxed), self.shared.eq.1.load(Ordering::Relaxed));
+        if self.seen == Some(packed) {
+            return;
+        }
+        self.seen = Some(packed);
+        let eq = crate::eq::Eq::unpack(packed);
+        let was_flat = self.flat;
+        self.flat = eq.flat();
+        (self.gain, self.bands) = crate::eq::design(&eq, self.rate);
+        // Coming back from flat, the filters start from silence, not stale memory.
+        if was_flat || self.states.len() != self.bands.len() * self.channels {
+            self.states = vec![Default::default(); self.bands.len() * self.channels];
+        }
+    }
+}
+
+impl<S: Source> Iterator for Equalized<S> {
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<rodio::Sample> {
+        if self.until == 0 && self.channel == 0 {
+            self.read_eq();
+            self.until = BLOCK * self.channels;
+        }
+        self.until = self.until.saturating_sub(1);
+        let x = self.inner.next()?;
+        let ch = self.channel;
+        self.channel = (self.channel + 1) % self.channels;
+        if self.flat {
+            return Some(x);
+        }
+        let n = self.bands.len();
+        let mut y = x * self.gain;
+        for (c, s) in self.bands.iter().zip(&mut self.states[ch * n..(ch + 1) * n]) {
+            y = s.run(c, y);
+        }
+        Some(soft_limit(y))
+    }
+}
+
+impl<S: Source> Source for Equalized<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(at)?;
+        self.states.iter_mut().for_each(|s| *s = Default::default());
+        (self.channel, self.until) = (0, 0);
+        Ok(())
+    }
+}
+
 /// ⌥↑ and ⌥↓ change the volume by this much.
 pub const VOLUME_STEP: f32 = 0.05;
 
@@ -460,6 +565,8 @@ struct Shared {
     delay: AtomicU64,
     /// Times the loop has jumped back to its start, for the speed trainer.
     wraps: AtomicU64,
+    /// The EQ, packed (`Eq::pack`).
+    eq: (AtomicU64, AtomicU64),
 }
 
 const NONE: u64 = u64::MAX;
@@ -474,6 +581,7 @@ impl Default for Shared {
             pitch: AtomicU32::new(0.0f32.to_bits()),
             delay: AtomicU64::new(0),
             wraps: AtomicU64::new(0),
+            eq: (AtomicU64::new(0), AtomicU64::new(0)),
         }
     }
 }
@@ -573,6 +681,8 @@ pub struct Audio {
     start_paused: bool,
     /// Playback speed, below 1 slowed down; kept across songs.
     speed: f32,
+    /// The global EQ, handed to each song's sound.
+    eq: crate::eq::Eq,
     pub duration: Option<Duration>,
     pub looping: Loop,
     pub error: Option<String>,
@@ -604,6 +714,7 @@ impl Audio {
             gains: gains(&[]),
             start_paused: false,
             speed: 1.0,
+            eq: Default::default(),
             duration: None,
             looping: Loop::default(),
         }
@@ -660,6 +771,18 @@ impl Audio {
     pub fn set_pitch(&mut self, cents: i16) {
         self.pitch = cents as f32 / 100.0;
         self.shared.pitch.store(self.pitch.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The global EQ from now on.
+    pub fn set_eq(&mut self, eq: crate::eq::Eq) {
+        self.eq = eq;
+        self.store_eq();
+    }
+
+    fn store_eq(&self) {
+        let (lo, hi) = self.eq.pack();
+        self.shared.eq.0.store(lo, Ordering::Relaxed);
+        self.shared.eq.1.store(hi, Ordering::Relaxed);
     }
 
     /// How often the loop has jumped back to its start since the song opened.
@@ -729,12 +852,13 @@ impl Audio {
                     player.set_volume(self.volume);
                     self.shared.speed.store(self.speed.to_bits(), Ordering::Relaxed);
                     self.shared.pitch.store(self.pitch.to_bits(), Ordering::Relaxed);
+                    self.store_eq();
                     // Paused before anything is added, so not a sample slips out.
                     if std::mem::take(&mut self.start_paused) {
                         player.pause();
                     }
                     let looped = Looped::new(song, self.shared.clone());
-                    player.append(Stretched::new(looped, self.shared.clone()));
+                    player.append(Equalized::new(Stretched::new(looped, self.shared.clone()), self.shared.clone()));
                     if let Some(at) = self.start_at.take() {
                         let _ = player.try_seek(at);
                     }
@@ -1106,6 +1230,7 @@ mod tests {
             gains: gains(&[]),
             start_paused: false,
             speed: 1.0,
+            eq: Default::default(),
             duration: None,
             looping: looped(0, 16),
             error: None,
@@ -1151,6 +1276,26 @@ mod tests {
         }
         // Smooth: bigger stays bigger.
         assert!(soft_limit(1.2) < soft_limit(1.5));
+    }
+
+    #[test]
+    fn a_flat_eq_passes_samples_untouched_and_a_preamp_scales_them() {
+        let shared = Arc::new(Shared::default());
+        let song = Equalized::new(Counting { at: 0, frames: 600 }, shared.clone());
+        let straight: Vec<rodio::Sample> = Counting { at: 0, frames: 600 }.collect();
+        assert_eq!(song.collect::<Vec<_>>(), straight);
+        let eq = crate::eq::Eq { on: true, preamp: -6, ..Default::default() };
+        let (lo, hi) = eq.pack();
+        shared.eq.0.store(lo, Ordering::Relaxed);
+        shared.eq.1.store(hi, Ordering::Relaxed);
+        // Frames 0 to 0.5, quiet enough that the limiter stays out of it.
+        let quiet = rodio::source::Source::amplify(Counting { at: 0, frames: 600 }, 1. / 1200.);
+        let heard: Vec<rodio::Sample> = Equalized::new(quiet, shared).collect();
+        let half = 10f32.powf(-6. / 20.);
+        for (i, y) in heard.iter().enumerate().step_by(97) {
+            let x = (i / 2) as f32 / 1200.;
+            assert!((y - x * half).abs() < 1e-4, "sample {i}: {y} for {x}");
+        }
     }
 
     #[test]
