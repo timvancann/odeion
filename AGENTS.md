@@ -203,7 +203,7 @@ they fail.
   the progress bar. `m` and `o` work in both modes, with vim keys off too.
 - **Variations**: drop files or a folder on a song (or the practice view), or `V` to
   pick; `v` cycles the song and its variations, keeping the position where they line
-  up, `X` removes the playing one. Linked files leave the song list; songs with
+  up, `X` removes the playing one (asking first: a second `X` within 4 s, Tim lost a stem set to one press). Linked files leave the song list; songs with
   variations show `+N`. Each recording has sections and a marker of its own (keyed by its first
   file) and remembers its own loop: switching puts this one's away and brings the
   next one's back. Tim's choice, over sharing them across aligned recordings.

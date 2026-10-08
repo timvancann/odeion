@@ -552,7 +552,7 @@ pub const SHEET: &[Group] = &[
             ("- =", "", "zoom out or in"),
             ("v", "", "next recording: the song, its variations"),
             ("V", "", "add a variation (or drop files on the waveform)"),
-            ("X", "", "remove the playing variation"),
+            ("X", "", "remove the playing variation (twice)"),
             ("+", "", "add the playing song to a playlist"),
             ("1 2 3", "", "mute stem 1, 2, 3 (up to 9)"),
             ("⌥1 ⌥2", "", "solo stem 1, 2 (again to end it)"),

@@ -326,6 +326,9 @@ pub struct Riff {
     renaming_playlist: Option<String>,
     /// The open playlist's delete button has asked "for good?".
     deleting_playlist: bool,
+    /// The variation `X` asked about, and when: a second `X` within a few seconds
+    /// removes it, anything else in between keeps it.
+    removing_variation: Option<(usize, std::time::Instant)>,
     shuffle: bool,
     /// The media keys and Now Playing, when macOS lets riff have them.
     media: Option<Media>,
@@ -503,6 +506,7 @@ impl Riff {
             add_to: None,
             renaming_playlist: None,
             deleting_playlist: false,
+            removing_variation: None,
             shuffle: false,
             media: Media::new(),
             message: None,
@@ -2090,6 +2094,7 @@ impl Riff {
 
     fn perform(&mut self, action: Action) {
         let song = self.audio.duration;
+        let removing = self.removing_variation.take();
         match action {
             Action::Move(by) if self.queue_at.is_some() => {
                 let last = self.queue.len().saturating_sub(1);
@@ -2338,6 +2343,16 @@ impl Riff {
                     self.message = Some(("the song itself can't be removed; v to a variation".into(), false));
                     return;
                 };
+                let asked = removing
+                    .is_some_and(|(at, since)| at == self.variation && since.elapsed() < Duration::from_secs(4));
+                if !asked {
+                    let Some(label) = self.variations.of(&now.path).get(i).map(|v| v.label.clone()) else { return };
+                    let keys = keys::keys_for(Action::RemoveVariation, self.mode(), self.settings.vim);
+                    let again = keys.first().map_or("again".to_string(), |k| format!("{k} again"));
+                    self.removing_variation = Some((self.variation, std::time::Instant::now()));
+                    self.message = Some((format!("remove {label}? {again}"), false));
+                    return;
+                }
                 if let Some(gone) = self.variations.remove(&now.path, i) {
                     // Back to the song itself, from the variation that's gone, with its loop
                     // and beats.
@@ -4068,7 +4083,7 @@ impl Riff {
                     .children(chips)
                     .child(self.tool("add-variation", "layers-plus", "Add a variation (or drop files here)", Action::AddVariation, false, cx))
                     .when(self.variation > 0, |d| {
-                        d.child(self.tool("remove-variation", "x", "Remove the playing variation", Action::RemoveVariation, false, cx))
+                        d.child(self.tool("remove-variation", "x", "Remove the playing variation (asks first)", Action::RemoveVariation, false, cx))
                     }),
             )
             .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(about))
