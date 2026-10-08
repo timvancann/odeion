@@ -37,6 +37,18 @@ pub struct Settings {
     pub output: Option<String>,
     /// The speed trainer's settings.
     pub trainer: crate::trainer::Trainer,
+    /// How the list shows songs.
+    pub list: ListView,
+}
+
+/// How the list shows songs: artist, title and album in columns (a repeated artist
+/// faded), or the full list grouped under each artist, the artist pinned on top.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListView {
+    #[default]
+    Columns,
+    Grouped,
 }
 
 /// The window's place: which display (by its UUID) and where on it, in points from the
@@ -60,6 +72,7 @@ impl Default for Settings {
             volume: 1.0,
             output: None,
             trainer: Default::default(),
+            list: ListView::Columns,
         }
     }
 }
@@ -184,6 +197,7 @@ mod tests {
             volume: 0.6,
             output: Some("coreaudio:headphones".into()),
             trainer: crate::trainer::Trainer { from: 60, to: 95, step: 5, every: 4 },
+            list: ListView::Grouped,
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s);
@@ -192,6 +206,7 @@ mod tests {
         // Settings from before volume and output play at full, through the system's.
         assert_eq!(Settings::load(&file).volume, 1.0);
         assert_eq!(Settings::load(&file).output, None);
+        assert_eq!(Settings::load(&file).list, ListView::Columns);
         let _ = std::fs::remove_file(&file);
     }
 }

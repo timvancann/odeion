@@ -15,7 +15,9 @@ macOS only, no network, no accounts.
 Pure, tested modules hold the decisions; `view.rs` only maps keys and clicks onto them
 and draws:
 
-- `library.rs`: what a track is, reading one from its path, sort order, search, albums.
+- `library.rs`: what a track is, reading one from its path, sort order, search, albums,
+  and the list's two views: a repeated artist (`repeats`), grouping under artists
+  (`grouped`) and which artist stays pinned on top (`pinned`).
 - `scan.rs`: walking the folder, merging with the cache, reading tags and covers on
   background threads.
 - `audio.rs`: playback via rodio, and the A/B `Loop` rules. The loop is kept inside
@@ -232,6 +234,14 @@ they fail.
   click or drag along `# A–Z` and the list glides (220 ms, eased, by setting the scroll
   offset each frame) to that letter's first artist below the favourites, highlighting
   it. Letters follow the sort (`library::initial`), so a jump never lands out of order.
+- **Two list views**, switched in the library's title bar and kept in settings (no
+  key yet): *columns* (cover, artist, title, album on one 44 px line; an artist
+  repeated from the row above is faded, so each band stands out where it starts) and
+  *grouped* (the full list and favourites under a row per artist with its song count,
+  songs indented without the artist; the top artist stays pinned until the next one
+  pushes it up, Tim's condition for this view). Search, album and artist views aren't
+  grouped; album and artist views drop the columns their header already names. Artist
+  rows are part of a section's run, so playing a song still queues up the whole list.
 - **The list has a scrollbar like Zed's**, drawn by riff (GPUI 0.2.2 has none): a thin
   thumb shown while the list moves and for a second after, or with the pointer on it.
   Dragging the thumb scrolls directly; a click elsewhere on the track glides there.

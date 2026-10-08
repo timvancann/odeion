@@ -126,6 +126,8 @@ pub enum Action {
     QueueTop,
     /// In the queue: remove the highlighted song.
     QueueRemove,
+    /// The list in columns or grouped by artist; the title bar's switch, no key yet.
+    ListView,
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift

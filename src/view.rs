@@ -4,7 +4,7 @@
 use crate::audio::Audio;
 use crate::beats::{self, Beats};
 use crate::keys::{self, Action};
-use crate::library::{self, Track};
+use crate::library::{self, Grouped, Kind, Track};
 use crate::media::Media;
 use crate::menu::{Menu, Outcome, Target};
 use crate::playlist::Playlist;
@@ -14,7 +14,7 @@ use crate::session::Session;
 use crate::resume::{Resume, Spot};
 use crate::variations::{self, Variation, Variations};
 use crate::scan;
-use crate::state::{self, Favorites, Settings};
+use crate::state::{self, Favorites, ListView, Settings};
 use crate::theme::{self, Theme};
 use crate::ui::{self, *};
 use crate::wave::{self, Wave};
@@ -36,7 +36,7 @@ const POLL: Duration = Duration::from_millis(40);
 const SESSION_EVERY: Duration = Duration::from_secs(1);
 /// The scrollbar stays this long after the list stops moving, as in Zed.
 const SCROLLBAR_LINGERS: Duration = Duration::from_secs(1);
-const ROW: f32 = 60.;
+const ROW: f32 = 44.;
 /// The transparent title bar's height, where the traffic lights sit.
 const TITLEBAR: f32 = 32.;
 const SEEK: f64 = 5.0;
@@ -190,7 +190,10 @@ enum Place {
 }
 
 enum Row {
+    /// A section: "Favourites", "Library".
     Header(String),
+    /// An artist and how many songs follow, in the list grouped by artist.
+    Artist(String, usize),
     Track(usize),
 }
 
@@ -915,16 +918,16 @@ impl Riff {
                 .filter_map(|p| self.by_path.get(p).copied())
                 .collect();
             favorites.sort();
+            let songs: Vec<usize> =
+                (0..self.tracks.len()).filter(|&i| !self.variations.is_variation(&self.tracks[i].path)).collect();
             if !favorites.is_empty() {
                 self.rows.push(Row::Header("Favourites".into()));
-                self.rows.extend(favorites.into_iter().map(Row::Track));
+                let rows = self.list_rows(&favorites);
+                self.rows.extend(rows);
                 self.rows.push(Row::Header("Library".into()));
             }
-            self.rows.extend(
-                (0..self.tracks.len())
-                    .filter(|&i| !self.variations.is_variation(&self.tracks[i].path))
-                    .map(Row::Track),
-            );
+            let rows = self.list_rows(&songs);
+            self.rows.extend(rows);
         } else {
             self.rows.extend(
                 library::search(&self.tracks, &self.query)
@@ -934,6 +937,28 @@ impl Riff {
             );
         }
         self.selected = self.first_track_row(0, 1).unwrap_or(0);
+    }
+
+    /// The full list's songs as rows: grouped under each artist when that's the view.
+    fn list_rows(&self, songs: &[usize]) -> Vec<Row> {
+        match self.settings.list {
+            ListView::Columns => songs.iter().map(|&i| Row::Track(i)).collect(),
+            ListView::Grouped => library::grouped(&self.tracks, songs)
+                .into_iter()
+                .map(|g| match g {
+                    Grouped::Artist(name, n) => Row::Artist(name, n),
+                    Grouped::Track(i) => Row::Track(i),
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether the rows are grouped under artists: the full list in the grouped view.
+    fn grouped(&self) -> bool {
+        self.settings.list == ListView::Grouped
+            && self.album.is_none()
+            && self.artist.is_none()
+            && self.query.trim().is_empty()
     }
 
     /// The first track row from `from`, stepping by `step`.
@@ -951,7 +976,7 @@ impl Riff {
     fn selected_track(&self) -> Option<&Track> {
         match self.rows.get(self.selected)? {
             Row::Track(i) => self.tracks.get(*i),
-            Row::Header(_) => None,
+            Row::Header(_) | Row::Artist(..) => None,
         }
     }
 
@@ -1287,6 +1312,37 @@ impl Riff {
             .mr_2()
             .child(segment("mode-library", "music", "Library", !self.practice))
             .child(segment("mode-practice", "audio-waveform", "Practice", self.practice))
+    }
+
+    /// The list's view, in the library's title bar: columns, or grouped by artist.
+    fn list_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let segment = |id: &'static str, icon: &'static str, what: &'static str, on: bool| {
+            div()
+                .id(id)
+                .h(px(22.))
+                .w(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .when(on, |d| d.bg(rgb(t.accent_soft)))
+                .when(!on, |d| d.cursor_pointer().hover(|d| d.bg(rgb(t.faint))))
+                .child(ui::icon(icon, 14., if on { t.accent } else { t.dim }))
+                .tooltip(self.tip(what, &[Action::ListView]))
+                .when(!on, |d| {
+                    d.on_click(cx.listener(|riff, _, _, cx| {
+                        cx.stop_propagation();
+                        riff.act(Action::ListView, cx);
+                    }))
+                })
+        };
+        let grouped = self.settings.list == ListView::Grouped;
+        pill()
+            .p(px(2.))
+            .mr_2()
+            .child(segment("list-columns", "columns-3", "Columns: artist, title, album", !grouped))
+            .child(segment("list-grouped", "list-tree", "Grouped by artist", grouped))
     }
 
     /// An action from a click, done exactly as its key would do it.
@@ -1655,14 +1711,15 @@ impl Riff {
         let Some(track) = self.selected_track().cloned() else {
             return;
         };
-        // The list is the run of songs between the headers around the selection.
-        let is_track = |r: &usize| matches!(self.rows[*r], Row::Track(_));
+        // The list is the run of songs between the section headers around the
+        // selection; artist rows are part of it.
+        let is_track = |r: &usize| !matches!(self.rows[*r], Row::Header(_));
         let start = (0..self.selected).rev().take_while(is_track).last().unwrap_or(self.selected);
         let list = (start..self.rows.len())
             .take_while(is_track)
             .filter_map(|r| match self.rows[r] {
                 Row::Track(i) => Some(self.tracks[i].path.clone()),
-                Row::Header(_) => None,
+                Row::Header(_) | Row::Artist(..) => None,
             })
             .collect();
         self.playlist = Playlist::new(list, &track.path, self.seed());
@@ -1719,7 +1776,7 @@ impl Riff {
             Place::Library => {}
             Place::Favourites => {
                 if let Some(row) = self.rows.iter().position(|r| matches!(r, Row::Header(h) if h == "Favourites")) {
-                    self.selected = (row + 1).min(self.rows.len().saturating_sub(1));
+                    self.selected = self.first_track_row(row, 1).unwrap_or(row);
                     self.scroll.scroll_to_item(row, ScrollStrategy::Top);
                 }
             }
@@ -1989,6 +2046,16 @@ impl Riff {
                 self.message = Some(("the queue is empty, q queues the highlighted song".into(), false));
             }
             Action::QueueFocus => (self.sidebar, self.queue_at) = (true, Some(0)),
+            Action::ListView => {
+                self.settings.list = match self.settings.list {
+                    ListView::Columns => ListView::Grouped,
+                    ListView::Grouped => ListView::Columns,
+                };
+                self.save_settings();
+                let keep = self.selected_path();
+                self.reindex(keep);
+                self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+            }
             Action::Sidebar => {
                 self.sidebar = !self.sidebar;
                 if !self.sidebar {
@@ -2411,7 +2478,7 @@ impl Riff {
         let from = self.rows.iter().position(|r| matches!(r, Row::Header(h) if h == "Library")).map_or(0, |h| h + 1);
         library::letters((from..self.rows.len()).filter_map(|r| match self.rows[r] {
             Row::Track(i) => Some((r, self.tracks[i].artist.as_str())),
-            Row::Header(_) => None,
+            Row::Header(_) | Row::Artist(..) => None,
         }))
     }
 
@@ -2719,6 +2786,74 @@ impl Riff {
         }
     }
 
+    /// An artist over its songs in the grouped list; also pinned on top of the list.
+    /// A click opens the artist view.
+    fn render_artist_row(&self, ix: usize, name: &str, songs: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id(("artist-row", ix))
+            .w_full()
+            .h(px(ROW))
+            .px_3()
+            .flex()
+            .items_end()
+            .pb_1p5()
+            .gap_3()
+            .bg(rgb(t().bg))
+            .cursor_pointer()
+            .child(
+                div()
+                    .truncate()
+                    .text_lg()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(t().text))
+                    .child(name.to_string()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .pb(px(3.))
+                    .font_family(MONO)
+                    .text_xs()
+                    .text_color(rgb(t().dim))
+                    .child(if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") }),
+            )
+            .tooltip(self.tip("Only this artist", &[Action::Artist]))
+            .on_click(cx.listener(move |riff, _, _, cx| {
+                riff.selected = ix + 1;
+                riff.act(Action::Artist, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// The grouped list's artist pinned on top, until the next one pushes it off.
+    fn render_pinned(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.grouped() || self.rows.is_empty() {
+            return None;
+        }
+        let (content, _, offset) = self.list_extent()?;
+        let row = content / self.rows.len() as f32;
+        let kinds: Vec<Kind> = self
+            .rows
+            .iter()
+            .map(|r| match r {
+                Row::Header(_) => Kind::Section,
+                Row::Artist(..) => Kind::Artist,
+                Row::Track(_) => Kind::Track,
+            })
+            .collect();
+        let (head, push) = library::pinned(&kinds, -offset / row)?;
+        let Row::Artist(name, songs) = &self.rows[head] else { return None };
+        Some(
+            div()
+                .absolute()
+                .top(-row * push)
+                .left_0()
+                .right(px(14.))
+                .child(self.render_artist_row(head, name, *songs, cx))
+                .into_any_element(),
+        )
+    }
+
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         match &self.rows[ix] {
             Row::Header(label) => div()
@@ -2733,6 +2868,7 @@ impl Riff {
                 .text_color(rgb(t().dim))
                 .child(label.clone())
                 .into_any_element(),
+            Row::Artist(name, songs) => self.render_artist_row(ix, name, *songs, cx),
             Row::Track(i) => {
                 let track = &self.tracks[*i];
                 let selected = ix == self.selected;
@@ -2742,6 +2878,13 @@ impl Riff {
                 let album = (self.album.is_none()).then(|| track.album.clone());
                 let variations = self.variations.of(&track.path).len();
                 let queued = self.queue.songs().contains(&track.path);
+                let in_group = self.grouped();
+                let show_artist = !in_group && self.album.is_none() && self.artist.is_none();
+                let above = ix.checked_sub(1).and_then(|r| match self.rows[r] {
+                    Row::Track(j) => self.tracks.get(j),
+                    _ => None,
+                });
+                let repeat = library::repeats(above, track);
                 div()
                     .id(("row", ix))
                     .group("song-row")
@@ -2780,9 +2923,9 @@ impl Riff {
                         })
                     })
                     // In the album view the header shows the cover; rows show the number.
-                    .child(match album {
-                        Some(_) => cover(track.cover.clone(), 44.),
-                        None => div()
+                    // Grouped rows sit indented under their artist, without one.
+                    .child(match (self.album.is_some(), in_group) {
+                        (true, _) => div()
                             .w(px(28.))
                             .flex_none()
                             .flex()
@@ -2792,61 +2935,68 @@ impl Riff {
                             .text_color(rgb(if playing { t().accent } else { t().dim }))
                             .children(track.number.map(|n| n.to_string()))
                             .into_any_element(),
+                        (false, true) => div().w(px(30.)).flex_none().into_any_element(),
+                        (false, false) => cover(track.cover.clone(), 30.),
+                    })
+                    // The artist in a column of its own, faded when the song above has
+                    // it too, so each band stands out where it starts. It opens the
+                    // artist view, as ⇧⌘A does.
+                    .when(show_artist, |d| {
+                        d.child(
+                            div().w(relative(0.26)).flex_none().min_w_0().flex().child(
+                                div()
+                                    .id(("artist", ix))
+                                    .truncate()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(rgb(if repeat {
+                                        t().faint
+                                    } else if selected || playing {
+                                        t().accent
+                                    } else {
+                                        t().text
+                                    }))
+                                    .cursor_pointer()
+                                    .hover(|d| d.text_color(rgb(t().accent)).underline())
+                                    .tooltip(self.tip("Only this artist", &[Action::Artist]))
+                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                        cx.stop_propagation();
+                                        riff.selected = ix;
+                                        riff.act(Action::Artist, cx);
+                                    }))
+                                    .child(track.artist.clone()),
+                            ),
+                        )
                     })
                     .child(
-                        // Title over artist, set tight so each row reads as one song.
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
-                            .flex_col()
-                            .line_height(relative(1.3))
+                            .items_center()
+                            .gap_2()
                             .child(
                                 div()
-                                    .flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_color(rgb(if selected || playing { t().accent } else { t().text }))
-                                            .child(track.title.clone()),
-                                    )
-                                    // How many other recordings the song has.
-                                    .children((variations > 0).then(|| {
-                                        div()
-                                            .flex_none()
-                                            .font_family(MONO)
-                                            .text_xs()
-                                            .text_color(rgb(t().dim))
-                                            .child(format!("+{variations}"))
-                                    })),
+                                    .truncate()
+                                    .text_color(rgb(if selected || playing { t().accent } else { t().text }))
+                                    .child(track.title.clone()),
                             )
-                            // The artist opens the artist view, as ⇧⌘A does.
-                            .child(
-                                div().flex().min_w_0().child(
-                                    div()
-                                        .id(("artist", ix))
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(rgb(t().dim))
-                                        .cursor_pointer()
-                                        .hover(|d| d.text_color(rgb(t().accent)).underline())
-                                        .tooltip(self.tip("Only this artist", &[Action::Artist]))
-                                        .on_click(cx.listener(move |riff, _, _, cx| {
-                                            cx.stop_propagation();
-                                            riff.selected = ix;
-                                            riff.act(Action::Artist, cx);
-                                        }))
-                                        .child(track.artist.clone()),
-                                ),
-                            ),
+                            // How many other recordings the song has.
+                            .children((variations > 0).then(|| {
+                                div()
+                                    .flex_none()
+                                    .font_family(MONO)
+                                    .text_xs()
+                                    .text_color(rgb(t().dim))
+                                    .child(format!("+{variations}"))
+                            })),
                     )
                     // The album name opens the album view, as ⌘A does.
                     .children(album.map(|album| {
                         div()
-                            .w(relative(0.32))
+                            .w(relative(0.24))
                             .flex_none()
                             .min_w_0()
+                            .flex()
                             .child(
                                 div()
                                     .id(("album", ix))
@@ -5060,6 +5210,7 @@ impl Render for Riff {
                             window.titlebar_double_click();
                         }
                     })
+                    .when(!self.practice, |d| d.child(self.list_switch(cx)))
                     .child(self.mode_switch(cx))
                     .child(self.tool("keys", "keyboard", "Every key", Action::Help, self.help, cx))
                     .child(self.tool("settings", "settings-2", "Settings", Action::Settings, self.prefs.is_some(), cx)),
@@ -5097,6 +5248,8 @@ impl Render for Riff {
                                                     .relative()
                                                     .flex_1()
                                                     .h_full()
+                                                    // The pinned artist slides up out of sight here.
+                                                    .overflow_hidden()
                                                     .child(
                                                         uniform_list(
                                                             "library",
@@ -5108,6 +5261,7 @@ impl Render for Riff {
                                                         .track_scroll(self.scroll.clone())
                                                         .size_full(),
                                                     )
+                                                    .children(self.render_pinned(cx))
                                                     .child(self.render_scrollbar(cx)),
                                             )
                                             .when(self.browsing(), |d| d.child(self.render_rail(cx)))

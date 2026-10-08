@@ -228,6 +228,67 @@ pub fn album(tracks: &[Track], of: &Track) -> Vec<usize> {
     hits
 }
 
+/// One row of a list grouped by artist: the artist, said once with how many songs
+/// follow, or a song.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Grouped {
+    Artist(String, usize),
+    Track(usize),
+}
+
+/// `songs` (in library order) with each run by one artist under a row naming it.
+/// Names match ignoring case and accents; the first song's spelling is shown.
+pub fn grouped(tracks: &[Track], songs: &[usize]) -> Vec<Grouped> {
+    let mut rows = Vec::with_capacity(songs.len() * 5 / 4);
+    let mut head = 0;
+    let mut name = None;
+    for &i in songs {
+        let this = fold(&tracks[i].artist);
+        if name.as_ref() != Some(&this) {
+            head = rows.len();
+            rows.push(Grouped::Artist(tracks[i].artist.clone(), 0));
+            name = Some(this);
+        }
+        if let Grouped::Artist(_, n) = &mut rows[head] {
+            *n += 1;
+        }
+        rows.push(Grouped::Track(i));
+    }
+    rows
+}
+
+/// Whether `this` song's artist is the one of the song above it, so the columns view
+/// can fade the repeat and each band stands out where it starts.
+pub fn repeats(above: Option<&Track>, this: &Track) -> bool {
+    above.is_some_and(|a| fold(&a.artist) == fold(&this.artist))
+}
+
+/// What a row of the list is, for pinning artist rows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    /// "Favourites", "Library": the list's sections.
+    Section,
+    Artist,
+    Track,
+}
+
+/// The artist row pinned to the top of a grouped list scrolled `scrolled` rows down
+/// (fractions count): the one whose songs are at the top, and how far up the next
+/// artist or section, arriving under it, pushes it (0 to 1 row). None above the first
+/// artist of a section.
+pub fn pinned(kinds: &[Kind], scrolled: f32) -> Option<(usize, f32)> {
+    let top = scrolled.max(0.).floor() as usize;
+    let head = (0..=top.min(kinds.len().checked_sub(1)?))
+        .rev()
+        .take_while(|&r| kinds[r] != Kind::Section)
+        .find(|&r| kinds[r] == Kind::Artist)?;
+    let push = match kinds.get(top + 1) {
+        Some(Kind::Artist | Kind::Section) => scrolled.max(0.) - top as f32,
+        _ => 0.,
+    };
+    Some((head, push))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +473,52 @@ mod tests {
             live,
         ];
         assert_eq!(album(&tracks, &tracks[0]), [2, 0]);
+    }
+
+    #[test]
+    fn grouping_says_each_artist_once_with_its_count() {
+        let tracks = vec![
+            track("Dio", "Holy Diver", 1, "Stand Up and Shout"),
+            track("dio", "Holy Diver", 2, "Holy Diver"),
+            track("Iron Maiden", "Powerslave", 1, "Aces High"),
+        ];
+        assert_eq!(
+            grouped(&tracks, &[0, 1, 2]),
+            vec![
+                Grouped::Artist("Dio".into(), 2),
+                Grouped::Track(0),
+                Grouped::Track(1),
+                Grouped::Artist("Iron Maiden".into(), 1),
+                Grouped::Track(2),
+            ]
+        );
+        assert!(grouped(&tracks, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_repeated_artist_is_one_like_the_song_above() {
+        let dio = track("Dio", "Holy Diver", 1, "Holy Diver");
+        let also = track("DIO", "Lock Up the Wolves", 1, "Wild One");
+        let maiden = track("Iron Maiden", "Powerslave", 1, "Aces High");
+        assert!(repeats(Some(&dio), &also));
+        assert!(!repeats(Some(&dio), &maiden));
+        assert!(!repeats(None, &dio));
+    }
+
+    #[test]
+    fn the_artist_of_the_top_row_stays_pinned_until_the_next_pushes_it_up() {
+        use Kind::*;
+        let kinds = [Section, Artist, Track, Track, Artist, Track, Section, Artist, Track];
+        assert_eq!(pinned(&kinds, 0.0), None);
+        assert_eq!(pinned(&kinds, 1.0), Some((1, 0.0)));
+        assert_eq!(pinned(&kinds, 2.5), Some((1, 0.0)));
+        // Row 4, the next artist, is arriving under the pinned one.
+        assert_eq!(pinned(&kinds, 3.25), Some((1, 0.25)));
+        assert_eq!(pinned(&kinds, 4.0), Some((4, 0.0)));
+        assert_eq!(pinned(&kinds, 5.5), Some((4, 0.5)));
+        // A section starts afresh.
+        assert_eq!(pinned(&kinds, 6.0), None);
+        assert_eq!(pinned(&kinds, 7.5), Some((7, 0.0)));
+        assert_eq!(pinned(&[], 0.0), None);
     }
 }
