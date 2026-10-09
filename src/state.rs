@@ -8,11 +8,6 @@ fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 
-/// The music folder before any are chosen in settings: `RIFF_MUSIC`, or `~/Music`.
-pub fn music_root() -> PathBuf {
-    std::env::var_os("RIFF_MUSIC").map_or_else(|| home().join("Music"), PathBuf::from)
-}
-
 /// Where riff keeps its data unless another folder is chosen in settings. It also holds
 /// the note naming that other folder.
 pub fn default_data_dir() -> PathBuf {
@@ -103,7 +98,7 @@ pub struct Placement {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            folders: vec![music_root()],
+            folders: Vec::new(),
             theme: crate::theme::DEFAULT_NAME.to_string(),
             window: None,
             vim: true,
@@ -241,7 +236,8 @@ mod tests {
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s);
         std::fs::write(&file, br#"{"theme": "Tokyo Night"}"#).unwrap();
-        assert_eq!(Settings::load(&file).folders, Settings::default().folders);
+        // No folder until one is added: riff starts empty.
+        assert!(Settings::load(&file).folders.is_empty());
         // Settings from before volume and output play at full, through the system's.
         assert_eq!(Settings::load(&file).volume, 1.0);
         assert_eq!(Settings::load(&file).output, None);

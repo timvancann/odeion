@@ -16,7 +16,7 @@ main user and the keymap and design stay his, but the code is written for other 
 too:
 
 - Nothing personal in the code: no paths, names or accounts of Tim's. Defaults suit
-  anyone (the music folder falls back to `~/Music`); Tim's setup lives in his
+  anyone (riff starts with no music folder and asks for one); Tim's setup lives in his
   `settings.json`, never in the source.
 - `README.md` is for people who find the repo: what riff does, its inspiration and
   acknowledgements, no keymap (the ⌘? sheet is the reference). A feature that changes
@@ -95,7 +95,7 @@ New behaviour gets its rule and tests in one of these, not in `view.rs`.
 ## The music library
 
 Riff scans the folders listed in ⌘, settings (`settings.json` in the data folder below),
-by default `~/Music` (or `RIFF_MUSIC`) until settings are saved. A track's Artist/Album
+none at first: the empty list asks for one (a button, or Enter). A track's Artist/Album
 path is read from the deepest listed folder holding it. Tags and embedded covers win
 over the path.
 

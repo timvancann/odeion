@@ -1462,6 +1462,8 @@ impl Riff {
     /// An action from a click, done exactly as its key would do it.
     fn act(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {
+            // With no music yet, Enter adds the folder it's in, as the empty list offers.
+            Action::Play if self.settings.folders.is_empty() => self.pick_folders(cx),
             Action::Settings => {
                 if self.prefs.is_some() {
                     self.close_prefs();
@@ -5990,6 +5992,51 @@ fn overlay(id: &'static str) -> Stateful<Div> {
 }
 
 /// A folder as people write it: `~/Music` rather than `/Users/tim/Music`.
+impl Riff {
+    /// The list before any folder is added: what riff wants, and a button for it.
+    fn render_no_music(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        div().absolute().size_full().flex().items_center().justify_center().child(
+            div()
+                .w(px(360.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .child(ui::icon("music", 28., t.dim))
+                .child(div().text_lg().text_color(rgb(t.text)).child("Where is your music?"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_center()
+                        .text_color(rgb(t.dim))
+                        .child("Add the folder your songs are in. Riff finds every song below it and never writes there. More folders can be added in settings."),
+                )
+                .child(
+                    div()
+                        .id("add-music")
+                        .mt_2()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(rgb(t.accent_soft))
+                        .hover(|d| d.bg(rgb(t.faint)))
+                        .child(ui::icon("folder", 14., t.accent))
+                        .child(div().text_sm().text_color(rgb(t.accent)).child("Add music folder…"))
+                        .tooltip(self.tip("Add music folder", &[Action::Play]))
+                        .on_click(cx.listener(|riff, _, _, cx| {
+                            riff.pick_folders(cx);
+                            cx.notify();
+                        })),
+                ),
+        )
+    }
+}
+
 /// Whether riff keeps its data somewhere other than the default this run.
 fn custom_data_dir() -> bool {
     state::data_dir() != state::default_data_dir()
@@ -6145,7 +6192,8 @@ impl Render for Riff {
                                                         .size_full(),
                                                     )
                                                     .children(self.render_pinned(cx))
-                                                    .child(self.render_scrollbar(cx)),
+                                                    .child(self.render_scrollbar(cx))
+                                                    .when(self.settings.folders.is_empty(), |d| d.child(self.render_no_music(cx))),
                                             )
                                             .when(self.browsing(), |d| d.child(self.render_rail(cx)))
                                             // The letter being dragged to, large, while the list glides.
