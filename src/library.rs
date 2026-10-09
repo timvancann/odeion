@@ -164,6 +164,30 @@ pub fn search(tracks: &[Track], query: &str) -> Vec<usize> {
     hits.into_iter().map(|(_, i)| i).collect()
 }
 
+/// The songs among `songs` that match `query` (every word somewhere in artist, album or
+/// title), in their own order: searching inside an album, an artist or a playlist.
+pub fn filter(tracks: &[Track], songs: &[usize], query: &str) -> Vec<usize> {
+    let query = fold(query.trim());
+    let words: Vec<&str> = query.split_whitespace().collect();
+    songs
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let t = &tracks[i];
+            let all = format!("{} {} {}", fold(&t.artist), fold(&t.album), fold(&t.title));
+            words.iter().all(|w| all.contains(w))
+        })
+        .collect()
+}
+
+/// Whether a name (a playlist's) has every word of `query` in it. An empty query
+/// matches nothing, so the full list doesn't list every playlist.
+pub fn named(name: &str, query: &str) -> bool {
+    let (name, query) = (fold(name), fold(query.trim()));
+    let words: Vec<&str> = query.split_whitespace().collect();
+    !words.is_empty() && words.iter().all(|w| name.contains(w))
+}
+
 /// The library's index letters, in its order: digits and symbols sort first.
 pub const ALPHABET: &str = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
@@ -397,6 +421,28 @@ mod tests {
         assert_eq!(search(&tracks, "van"), [0, 1]);
         assert_eq!(search(&tracks, "nothing"), Vec::<usize>::new());
         assert_eq!(search(&tracks, "  "), [0, 1, 2]);
+    }
+
+    #[test]
+    fn searching_inside_a_list_keeps_its_order() {
+        let tracks = vec![
+            track("Van Halen", "Van Halen", 2, "Eruption"),
+            track("Van Halen", "1984", 3, "Jump"),
+            track("Queen", "Jazz", 1, "Mustapha"),
+        ];
+        // A playlist's order, not the library's.
+        assert_eq!(filter(&tracks, &[2, 1, 0], "a"), [2, 1, 0]);
+        assert_eq!(filter(&tracks, &[2, 1, 0], "halen"), [1, 0]);
+        assert_eq!(filter(&tracks, &[2, 0], "jump"), Vec::<usize>::new());
+        assert_eq!(filter(&tracks, &[2, 0], " "), [2, 0]);
+    }
+
+    #[test]
+    fn playlists_are_found_by_every_word_of_their_name() {
+        assert!(named("Gig warm-up", "warm gig"));
+        assert!(named("Motörhead covers", "motorhead"));
+        assert!(!named("Gig", "gig set"));
+        assert!(!named("Gig", "  "));
     }
 
     #[test]

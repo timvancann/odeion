@@ -204,6 +204,8 @@ enum Row {
     /// An artist and how many songs follow, in the list grouped by artist.
     Artist(String, usize),
     Track(usize),
+    /// A playlist whose name matches the search; Enter or a click opens it.
+    Playlist(usize),
 }
 
 pub struct Riff {
@@ -218,6 +220,8 @@ pub struct Riff {
     scan_note: Option<(String, std::time::Instant)>,
     unsaved: usize,
     query: String,
+    /// The search put aside while an album or artist is open over it, back when it closes.
+    query_before: Option<String>,
     /// Whether keys type into the search (⌘P). Otherwise they control playback.
     searching: bool,
     /// The ⌘? sheet is open.
@@ -445,6 +449,7 @@ impl Riff {
             scan_note: None,
             unsaved: 0,
             query: String::new(),
+            query_before: None,
             searching: false,
             help: false,
             help_query: String::new(),
@@ -1006,20 +1011,22 @@ impl Riff {
         // A glide aimed at the old list would drag the new one along.
         self.glide = None;
         self.rows.clear();
-        if let Some(of) = &self.album {
+        // An album, artist or playlist open: its songs in its order, the search finding
+        // among them.
+        let open = if let Some(of) = &self.album {
             // The album's header sits above the list, see `render_album`.
-            self.rows.extend(
-                library::album(&self.tracks, of)
-                    .into_iter()
-                    .map(Row::Track),
-            );
+            Some(library::album(&self.tracks, of))
         } else if let Some(of) = &self.artist {
             // Likewise the artist's, see `render_artist`.
-            self.rows.extend(library::artist(&self.tracks, of).into_iter().map(Row::Track));
-        } else if let Some(named) = self.playlist_view.and_then(|i| self.playlists.get(i)) {
+            Some(library::artist(&self.tracks, of))
+        } else {
             // In the playlist's order; songs gone since a rescan aren't listed.
-            let songs: Vec<usize> = named.songs.iter().filter_map(|p| self.by_path.get(p).copied()).collect();
-            self.rows.extend(songs.into_iter().map(Row::Track));
+            self.playlist_view
+                .and_then(|i| self.playlists.get(i))
+                .map(|named| named.songs.iter().filter_map(|p| self.by_path.get(p).copied()).collect())
+        };
+        if let Some(songs) = open {
+            self.rows.extend(library::filter(&self.tracks, &songs, &self.query).into_iter().map(Row::Track));
         } else if self.query.trim().is_empty() {
             // Library order, since the tracks are sorted.
             let mut favorites: Vec<usize> = self
@@ -1040,6 +1047,15 @@ impl Riff {
             let rows = self.list_rows(&songs);
             self.rows.extend(rows);
         } else {
+            // Playlists by name first, then songs, each its own run.
+            let playlists: Vec<usize> = (0..self.playlists.all().len())
+                .filter(|&i| library::named(&self.playlists.all()[i].name, &self.query))
+                .collect();
+            if !playlists.is_empty() {
+                self.rows.push(Row::Header("Playlists".into()));
+                self.rows.extend(playlists.into_iter().map(Row::Playlist));
+                self.rows.push(Row::Header("Songs".into()));
+            }
             self.rows.extend(
                 library::search(&self.tracks, &self.query)
                     .into_iter()
@@ -1073,11 +1089,12 @@ impl Riff {
             && self.query.trim().is_empty()
     }
 
-    /// The first track row from `from`, stepping by `step`.
+    /// The first row from `from` that can be highlighted (a song or a playlist),
+    /// stepping by `step`.
     fn first_track_row(&self, from: usize, step: isize) -> Option<usize> {
         let mut i = from as isize;
         while i >= 0 && (i as usize) < self.rows.len() {
-            if matches!(self.rows[i as usize], Row::Track(_)) {
+            if matches!(self.rows[i as usize], Row::Track(_) | Row::Playlist(_)) {
                 return Some(i as usize);
             }
             i += step;
@@ -1088,7 +1105,7 @@ impl Riff {
     fn selected_track(&self) -> Option<&Track> {
         match self.rows.get(self.selected)? {
             Row::Track(i) => self.tracks.get(*i),
-            Row::Header(_) | Row::Artist(..) => None,
+            Row::Header(_) | Row::Artist(..) | Row::Playlist(_) => None,
         }
     }
 
@@ -1835,7 +1852,7 @@ impl Riff {
             .take_while(is_track)
             .filter_map(|r| match self.rows[r] {
                 Row::Track(i) => Some(self.tracks[i].path.clone()),
-                Row::Header(_) | Row::Artist(..) => None,
+                Row::Header(_) | Row::Artist(..) | Row::Playlist(_) => None,
             })
             .collect();
         self.playlist = Playlist::new(list, &track.path, self.seed());
@@ -1957,6 +1974,7 @@ impl Riff {
             None => self.selected_track().cloned(),
         };
         self.artist = None;
+        self.put_query_aside();
         self.reindex(keep);
         self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
     }
@@ -1969,8 +1987,23 @@ impl Riff {
             None => self.selected_track().cloned(),
         };
         self.album = None;
+        self.put_query_aside();
         self.reindex(keep);
         self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+    }
+
+    /// An album or artist opened puts the search aside, so it shows all its songs; closed,
+    /// the search comes back with what it found.
+    fn put_query_aside(&mut self) {
+        if self.album.is_some() || self.artist.is_some() {
+            if self.query_before.is_none() {
+                self.query_before = Some(std::mem::take(&mut self.query));
+            } else {
+                self.query.clear();
+            }
+        } else if let Some(query) = self.query_before.take() {
+            self.query = query;
+        }
     }
 
     /// The album or artist of `track` (the playing song, from its card), with `track`
@@ -1979,6 +2012,7 @@ impl Riff {
         let keep = Some(track.path.clone());
         (self.album, self.artist) = if artist { (None, Some(track)) } else { (Some(track), None) };
         self.query.clear();
+        self.query_before = None;
         self.searching = false;
         self.practice = false;
         self.reindex(keep);
@@ -2133,13 +2167,16 @@ impl Riff {
         let action = keys::press(self.mode(), press, self.settings.vim, &mut self.pending);
         // While searching, what isn't a key types into the query.
         if self.searching && !self.practice && action.is_none() {
-            if k.key == "backspace" {
+            if k.key == "backspace" && self.query.is_empty() {
+                // Out of the album, artist or playlist, to search everything.
+                self.widen_search();
+            } else if k.key == "backspace" {
                 let mut q = self.query.clone();
                 q.pop();
-                self.set_query(q);
+                self.type_query(q);
             } else if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
                 let q = format!("{}{text}", self.query);
-                self.set_query(q);
+                self.type_query(q);
             }
             return cx.notify();
         }
@@ -2240,10 +2277,15 @@ impl Riff {
             // From practice, search goes back to the library to type.
             Action::Search if self.practice => (self.practice, self.searching) = (false, true),
             Action::Search => self.searching = !self.searching,
+            // Esc in an album, artist or playlist clears its search first, then leaves it.
+            Action::Clear if self.scope().is_some() && !self.query.is_empty() => self.type_query(String::new()),
             Action::Clear | Action::ClearSearch => self.set_query(String::new()),
             Action::Play => {
                 self.searching = false;
-                self.play_selected();
+                match self.rows.get(self.selected) {
+                    Some(&Row::Playlist(i)) => self.open_playlist(i),
+                    _ => self.play_selected(),
+                }
             }
             Action::Toggle => self.audio.toggle(),
             Action::Seek(by) => match self.grid() {
@@ -2642,7 +2684,7 @@ impl Riff {
         let from = self.rows.iter().position(|r| matches!(r, Row::Header(h) if h == "Library")).map_or(0, |h| h + 1);
         library::letters((from..self.rows.len()).filter_map(|r| match self.rows[r] {
             Row::Track(i) => Some((r, self.tracks[i].artist.as_str())),
-            Row::Header(_) | Row::Artist(..) => None,
+            Row::Header(_) | Row::Artist(..) | Row::Playlist(_) => None,
         }))
     }
 
@@ -2844,7 +2886,9 @@ impl Riff {
         }
     }
 
+    /// A new search over the whole library, leaving any album, artist or playlist.
     fn set_query(&mut self, query: String) {
+        self.query_before = None;
         if query != self.query || self.album.is_some() || self.artist.is_some() || self.playlist_view.is_some() {
             self.query = query;
             self.album = None;
@@ -2852,6 +2896,35 @@ impl Riff {
             self.leave_playlist();
             self.rebuild_rows();
             self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        }
+    }
+
+    /// The search typed: inside the album, artist or playlist when one is open.
+    fn type_query(&mut self, query: String) {
+        if query != self.query {
+            self.query = query;
+            self.rebuild_rows();
+            self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        }
+    }
+
+    /// The search leaves the album, artist or playlist it was in and finds in everything.
+    fn widen_search(&mut self) {
+        if self.scope().is_some() {
+            let query = self.query.clone();
+            self.set_query(query);
+        }
+    }
+
+    /// What the search finds in, when not the whole library: the open album, artist or
+    /// playlist, by name.
+    fn scope(&self) -> Option<String> {
+        if let Some(of) = &self.album {
+            Some(of.album.clone())
+        } else if let Some(of) = &self.artist {
+            Some(of.artist.clone())
+        } else {
+            self.playlist_view.and_then(|i| self.playlists.get(i)).map(|p| p.name.clone())
         }
     }
 
@@ -3010,7 +3083,7 @@ impl Riff {
             .rows
             .iter()
             .map(|r| match r {
-                Row::Header(_) => Kind::Section,
+                Row::Header(_) | Row::Playlist(_) => Kind::Section,
                 Row::Artist(..) => Kind::Artist,
                 Row::Track(_) => Kind::Track,
             })
@@ -3043,6 +3116,41 @@ impl Riff {
                 .child(label.clone())
                 .into_any_element(),
             Row::Artist(name, songs) => self.render_artist_row(ix, name, *songs, cx),
+            Row::Playlist(i) => {
+                let i = *i;
+                let selected = ix == self.selected;
+                let named = &self.playlists.all()[i];
+                let songs = named.songs.iter().filter(|p| self.by_path.contains_key(*p)).count();
+                div()
+                    .id(("playlist-row", ix))
+                    .w_full()
+                    .h(px(ROW))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded_md()
+                    .border_l_2()
+                    .border_color(rgb(if selected { t().accent } else { t().bg }))
+                    .when(selected, |d| d.bg(rgb(t().raised)))
+                    .hover(|d| d.bg(rgb(t().surface)))
+                    .cursor_pointer()
+                    .child(div().w(px(30.)).flex().justify_center().child(ui::icon("list-music", 16., t().dim)))
+                    .child(div().flex_1().min_w_0().truncate().text_color(rgb(t().text)).child(named.name.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(MONO)
+                            .text_xs()
+                            .text_color(rgb(t().dim))
+                            .child(if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") }),
+                    )
+                    .on_click(cx.listener(move |riff, _, _, cx| {
+                        riff.open_playlist(i);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
             Row::Track(i) => {
                 let track = &self.tracks[*i];
                 let selected = ix == self.selected;
@@ -3260,6 +3368,7 @@ impl Riff {
     }
 
     fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let scope = self.scope().filter(|_| !self.practice);
         let songs = format!("{} songs", ui::count(self.tracks.len()));
         let read = self.tags_total.saturating_sub(self.tags_left);
         let status = if self.scanning.is_some() {
@@ -3292,6 +3401,39 @@ impl Riff {
                 cx.notify();
             }))
             .child(ui::icon("search", 16., if self.searching { t().accent } else { t().dim }))
+            // Inside an album, artist or playlist the search finds only there; × or ⌫ on
+            // an empty search widens it to everything.
+            .children(scope.clone().map(|name| {
+                div()
+                    .id("search-scope")
+                    .flex_none()
+                    .max_w(px(220.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .pl_2()
+                    .pr_1()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(rgb(t().raised))
+                    .text_sm()
+                    .text_color(rgb(t().dim))
+                    .child(div().truncate().child(format!("in {name}")))
+                    .child(
+                        div()
+                            .id("search-everything")
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(t().faint)))
+                            .child(ui::icon("x", 12., t().dim))
+                            .tooltip(self.tip("Search everything", &[]))
+                            .on_click(cx.listener(|riff, _, _, cx| {
+                                cx.stop_propagation();
+                                riff.widen_search();
+                                cx.notify();
+                            })),
+                    )
+            }))
             .child(
                 div()
                     .flex_1()
@@ -3309,11 +3451,13 @@ impl Riff {
                                 .when(self.searching, |d| d.ml_2())
                                 .font_family(UI)
                                 .text_color(rgb(t().faint))
-                                .child(if self.searching {
-                                    "type to find a song".to_string()
-                                } else {
-                                    let keys = keys::keys_for(Action::Search, keys::Mode::Library, self.settings.vim);
-                                    format!("{} to search", keys.join(" "))
+                                .child(match (self.searching, scope.is_some()) {
+                                    (true, true) => "type to find a song here".to_string(),
+                                    (true, false) => "type to find a song or playlist".to_string(),
+                                    (false, _) => {
+                                        let keys = keys::keys_for(Action::Search, keys::Mode::Library, self.settings.vim);
+                                        format!("{} to search", keys.join(" "))
+                                    }
                                 }),
                         )
                     }),

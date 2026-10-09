@@ -137,6 +137,12 @@ they fail.
 - **Search is a mode** (⌘P, or `/` `i`). Typing goes to the query only while
   searching; outside it bare keys are commands, even with results showing. This
   replaced "type anywhere to search", where Space could not pause during a search.
+  The search is contextual (Tim, 2026-10-09): with an album, artist or playlist open
+  it finds only among its songs, in their order, the bar saying "in <name>"; its × or
+  ⌫ on an empty search widens it to everything, and Esc clears it before leaving the
+  view. Opening an album or artist from results puts the search aside and closing
+  brings it back. Over everything, playlists whose names match are listed first
+  (`library::named`), Enter or a click opening one.
 - **Vim keys in the library, on by default** (a settings row turns them off): `j k`,
   `gg G`, `⌃U ⌃D`, `zz` to the playing song, `h l` seek, `H L` previous and next song,
   `f` favourite, `a` album, `A` artist, `i` search, `s` shuffle, `?`
