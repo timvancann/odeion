@@ -573,6 +573,55 @@ impl Riff {
         .detach();
     }
 
+    /// Asks macOS for a folder to keep riff's data in, then reopens riff from it.
+    fn pick_data_dir(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Use".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut dirs))) = picked.await
+                && let Some(dir) = dirs.pop()
+            {
+                let _ = this.update(cx, |riff, cx| riff.switch_data_dir(Some(dir), cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Keeps riff's data in `dir` (the default for `None`): saves where everything is in
+    /// the folder used now, then reopens riff from the new one.
+    fn switch_data_dir(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        let default = state::default_data_dir();
+        if dir.clone().unwrap_or_else(|| default.clone()) == state::data_dir() {
+            return;
+        }
+        self.keep_spot();
+        self.store_resume();
+        self.save_session();
+        if let Err(e) = state::choose_data_dir(&default, dir.as_deref()) {
+            self.message = Some((format!("couldn't choose the data folder: {e}"), true));
+            return cx.notify();
+        }
+        // From the app bundle, through `open`, so it comes back as the app; from source,
+        // the same binary again.
+        let exe = std::env::current_exe().unwrap_or_default();
+        let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
+        let reopened = match bundle {
+            Some(app) => std::process::Command::new("open").arg("-n").arg(app).spawn(),
+            None => std::process::Command::new(&exe).spawn(),
+        };
+        match reopened {
+            Ok(_) => cx.quit(),
+            Err(e) => {
+                self.message = Some((format!("couldn't reopen riff ({e}); open it again to use the folder"), true));
+                cx.notify();
+            }
+        }
+    }
+
     fn remove_folder(&mut self, i: usize) {
         if i < self.settings.folders.len() {
             self.settings.folders.remove(i);
@@ -708,7 +757,7 @@ impl Riff {
         match k.key.as_str() {
             "escape" => self.close_prefs(),
             _ if up => prefs.row = row.saturating_sub(1),
-            _ if down => prefs.row = (row + 1).min(folders + 3),
+            _ if down => prefs.row = (row + 1).min(folders + 4 + custom_data_dir() as usize),
             _ if dd && row < folders => {
                 self.remove_folder(row);
                 if let Some(prefs) = &mut self.prefs {
@@ -1999,12 +2048,17 @@ impl Riff {
             _ => {}
         }
         if self.prefs.is_some() {
-            // Opening the folder dialog needs the context, so Enter on "add folder" is here.
+            // Opening a folder dialog or reopening riff needs the context, so Enter on "add
+            // folder" and the data folder's rows is here.
             let add = self.settings.folders.len();
-            if matches!(k.key.as_str(), "enter" | "space")
-                && self.prefs.as_ref().is_some_and(|p| p.picker.is_none() && p.row == add)
-            {
+            let enter = matches!(k.key.as_str(), "enter" | "space");
+            let row = self.prefs.as_ref().filter(|p| p.picker.is_none() && p.choosing.is_none()).map(|p| p.row);
+            if enter && row == Some(add) {
                 self.pick_folders(cx);
+            } else if enter && row == Some(add + 4) {
+                self.pick_data_dir(cx);
+            } else if enter && row == Some(add + 5) {
+                self.switch_data_dir(None, cx);
             } else {
                 self.prefs_key(k);
             }
@@ -5694,6 +5748,22 @@ impl Riff {
                 }))
             }
         };
+        let data = state::data_dir();
+        let custom = custom_data_dir();
+        let label = if custom { tilde(&data) } else { format!("The default, {}", tilde(&data)) };
+        body = body.child(title("Data")).child(
+            row(("data", 0), lit(folders.len() + 4), "folder", label).on_click(cx.listener(|riff, _, _, cx| {
+                riff.pick_data_dir(cx);
+                cx.notify();
+            })),
+        );
+        if custom {
+            body = body.child(
+                row(("data", 1), lit(folders.len() + 5), "x", "Back to the default folder".into()).on_click(
+                    cx.listener(|riff, _, _, cx| riff.switch_data_dir(None, cx)),
+                ),
+            );
+        }
         let hint = match (prefs.picker.is_some(), self.settings.vim) {
             _ if prefs.choosing.is_some() => "↑↓ move   Enter plays through it   Esc closes",
             (true, _) => "↑↓ preview   Enter keeps   Esc restores",
@@ -5920,6 +5990,11 @@ fn overlay(id: &'static str) -> Stateful<Div> {
 }
 
 /// A folder as people write it: `~/Music` rather than `/Users/tim/Music`.
+/// Whether riff keeps its data somewhere other than the default this run.
+fn custom_data_dir() -> bool {
+    state::data_dir() != state::default_data_dir()
+}
+
 fn tilde(path: &std::path::Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     match path.strip_prefix(&home) {

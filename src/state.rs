@@ -13,8 +13,47 @@ pub fn music_root() -> PathBuf {
     std::env::var_os("RIFF_MUSIC").map_or_else(|| home().join("Music"), PathBuf::from)
 }
 
-pub fn data_dir() -> PathBuf {
+/// Where riff keeps its data unless another folder is chosen in settings. It also holds
+/// the note naming that other folder.
+pub fn default_data_dir() -> PathBuf {
     home().join("Library/Application Support/riff")
+}
+
+/// Where riff keeps its data this run: the folder chosen in settings, or the default.
+/// Read once, so a new choice only takes effect when riff opens again.
+pub fn data_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let default = default_data_dir();
+        chosen_data_dir(&default).unwrap_or(default)
+    })
+    .clone()
+}
+
+/// The note in the default data folder that names the folder chosen in settings.
+const CHOSEN: &str = "data-folder";
+
+/// The data folder chosen in settings, if any, from the note in `default`.
+pub fn chosen_data_dir(default: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(default.join(CHOSEN)).ok()?;
+    let dir = text.trim();
+    (!dir.is_empty()).then(|| PathBuf::from(dir)).filter(|d| d != default)
+}
+
+/// Chooses the data folder for the next run: `dir`, or the default when it's `None` or
+/// the default itself.
+pub fn choose_data_dir(default: &Path, dir: Option<&Path>) -> std::io::Result<()> {
+    let note = default.join(CHOSEN);
+    match dir.filter(|d| *d != default) {
+        Some(dir) => {
+            std::fs::create_dir_all(default)?;
+            std::fs::write(note, dir.to_string_lossy().as_bytes())
+        }
+        None => match std::fs::remove_file(note) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
 }
 
 /// What ⌘, changes: the folders to scan, the colour theme by name, vim keys and the
@@ -160,6 +199,20 @@ mod tests {
         assert!(f.contains(Path::new("/a")));
         assert!(!f.toggle(Path::new("/a")));
         assert_eq!(f, Favorites::default());
+    }
+
+    #[test]
+    fn a_chosen_data_folder_is_kept_and_the_default_clears_it() {
+        let default = std::env::temp_dir().join(format!("riff-data-{}", std::process::id()));
+        let demo = PathBuf::from("/tmp/riff demo");
+        assert_eq!(chosen_data_dir(&default), None);
+        choose_data_dir(&default, Some(&demo)).unwrap();
+        assert_eq!(chosen_data_dir(&default), Some(demo));
+        choose_data_dir(&default, Some(&default)).unwrap();
+        assert_eq!(chosen_data_dir(&default), None);
+        choose_data_dir(&default, None).unwrap();
+        assert_eq!(chosen_data_dir(&default), None);
+        let _ = std::fs::remove_dir_all(&default);
     }
 
     #[test]

@@ -85,7 +85,9 @@ and draws:
   which one is current, next and previous, removal.
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
   app that last reported a song, not as key presses, so this is the only way in.
-- `state.rs`: paths, settings, favourites.
+- `state.rs`: paths, settings, favourites, and the data folder: the default, or one
+  chosen in settings, named by a `data-folder` note in the default folder and read once
+  per run.
 - `theme.rs`: Jasmijn's themes, copied: built-in gold plus every installed Zed theme.
 
 New behaviour gets its rule and tests in one of these, not in `view.rs`.
@@ -257,6 +259,9 @@ they fail.
   Esc restores), vim keys on or off, and the output: Enter or a click opens a picker
   (the system's output, then each device, listed on a thread when it opens), ↑↓ or
   `j k` move, Enter or a click plays through it, Esc closes.
+  Last, the data folder (for Tim's demos, kept apart from his own data): pick another
+  folder or go back to the default, and riff saves where everything is, then reopens
+  from the new folder (`open -n` on the bundle, or the binary again from source).
 - **Every action has a button too**, built with `Riff::tool` (an icon, a tooltip and
   the action, done through `Riff::act` exactly as its key would). Tooltips list keys
   from `keys::keys_for`, which reads the ⌘? sheet through the real keymap, so they stay

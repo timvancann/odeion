@@ -61,7 +61,8 @@ just install   # build Riff.app into ~/Applications
 On first start riff scans `~/Music`. Add your own folders in settings (`⌘,`).
 
 Your music stays where it is: riff never writes next to your songs. Its cache, loops,
-sections, playlists and settings live in `~/Library/Application Support/riff/`.
+sections, playlists and settings live in `~/Library/Application Support/riff/`, or in
+another folder you choose in settings.
 
 ## Inspiration
 
