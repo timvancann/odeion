@@ -11,6 +11,21 @@ are in scope; ask before adding anything that turns riff into an editor or a DAW
 A single GPUI 0.2.2 app (pinned, like jasmijn's desktop app, whose patterns this copies),
 macOS only, no network, no accounts.
 
+**Riff is going open source** (Tim, 2026-10-09), under the GPL-3.0. Tim is still its
+main user and the keymap and design stay his, but the code is written for other people
+too:
+
+- Nothing personal in the code: no paths, names or accounts of Tim's. Defaults suit
+  anyone (the music folder falls back to `~/Music`); Tim's setup lives in his
+  `settings.json`, never in the source.
+- `README.md` is for people who find the repo: what riff does, its inspiration and
+  acknowledgements, no keymap (the ⌘? sheet is the reference). A feature that changes
+  what riff does updates the README in the same commit, and a new dependency or
+  borrowed algorithm gets a line in its acknowledgements.
+- Screenshots in `docs/screenshots/` (`library.png`, `stems.png`) are Tim's to take.
+- Bundled assets need a licence that allows it, with the licence file beside them
+  (the fonts' OFL; Lucide's ISC for the icons).
+
 ## Layout and where logic lives
 
 Pure, tested modules hold the decisions; `view.rs` only maps keys and clicks onto them
@@ -78,10 +93,13 @@ New behaviour gets its rule and tests in one of these, not in `view.rs`.
 ## The music library
 
 Riff scans the folders listed in ⌘, settings (`settings.json` in the data folder below),
-by default Google Drive (`~/Library/CloudStorage/.../Mijn Drive/Music`, or `RIFF_MUSIC`
-until settings are saved). A track's Artist/Album path is read from the deepest listed
-folder holding it. The Drive folder is laid out `Artist/Album/NN Title.ext`, about
-2,700 tracks of mp3, flac, wav and aiff. Tags and embedded covers are correct; they win over the path.
+by default `~/Music` (or `RIFF_MUSIC`) until settings are saved. A track's Artist/Album
+path is read from the deepest listed folder holding it. Tags and embedded covers win
+over the path.
+
+Tim's library, the one riff is tested on, is a Google Drive folder laid out
+`Artist/Album/NN Title.ext`, about 2,700 tracks of mp3, flac, wav and aiff, with
+correct tags and covers.
 
 - **Files may be cloud-only.** Drive streams on demand: reading a cloud-only file's
   header took 1.6s and pulled about 4 MB. A full tag scan is then slow, and that is
@@ -296,8 +314,9 @@ his keyboard focus. So does merely opening a second riff window: whatever Tim is
 elsewhere then lands in it as riff keys (a stray `1` muted a stem, a `v` switched
 recordings). Only open one when he isn't typing, or ask first.
 
-Before committing: `cargo test && cargo build --release`, no warnings. Work on `main`;
-commit signing is off for this repo.
+Before committing: `cargo test && cargo build --release`, no warnings (the
+future-incompatibility note about the `block` crate comes from a dependency). Work on
+`main`; commit signing is off for this repo.
 
 ## Plans
 

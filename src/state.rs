@@ -3,16 +3,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const DEFAULT_MUSIC: &str =
-    "Library/CloudStorage/GoogleDrive-timvancann@gmail.com/Mijn Drive/Music";
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 
-/// The music folder before any are chosen in settings: `RIFF_MUSIC`, or the Drive folder.
+/// The music folder before any are chosen in settings: `RIFF_MUSIC`, or `~/Music`.
 pub fn music_root() -> PathBuf {
-    std::env::var_os("RIFF_MUSIC").map_or_else(|| home().join(DEFAULT_MUSIC), PathBuf::from)
+    std::env::var_os("RIFF_MUSIC").map_or_else(|| home().join("Music"), PathBuf::from)
 }
 
 pub fn data_dir() -> PathBuf {
