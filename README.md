@@ -81,7 +81,8 @@ from VS Code.
 
 Riff stands on these projects:
 
-- [GPUI](https://www.gpui.rs), Zed's UI framework.
+- [GPUI](https://www.gpui.rs), Zed's UI framework, through
+  [gpui-pre](https://crates.io/crates/gpui-pre), its maintained snapshot on crates.io.
 - [rodio](https://github.com/RustAudio/rodio) and
   [cpal](https://github.com/RustAudio/cpal) for playback,
   [Symphonia](https://github.com/pdeljanov/Symphonia) for decoding.

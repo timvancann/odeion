@@ -22,12 +22,12 @@ mod view;
 mod wave;
 
 use gpui::{
-    App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px,
+    App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px,
     size,
 };
 
 fn main() {
-    Application::new()
+    gpui_platform::application()
         .with_assets(ui::Assets)
         .run(|cx: &mut App| {
             ui::load_fonts(cx);

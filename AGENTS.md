@@ -8,8 +8,10 @@ Tim's choice. The Transcribe! button was removed on 2026-10-08: riff now does
 everything Tim used it for. Practice features
 are in scope; ask before adding anything that turns riff into an editor or a DAW.
 
-A single GPUI 0.2.2 app (pinned, like jasmijn's desktop app, whose patterns this copies),
-macOS only, no network, no accounts.
+A single GPUI app on `gpui-pre` 0.3.9, the maintained snapshot of Zed's GPUI (pinned
+exactly, the version rsdisk and `gpui-component` 0.7.3 use; renamed to `gpui` in
+`Cargo.toml` so code says `gpui::`). Jasmijn's desktop app, whose patterns this copies,
+moves to the same version. Riff is macOS only, no network, no accounts.
 
 **Riff is going open source** (Tim, 2026-10-09), under the GPL-3.0. Tim is still its
 main user and the keymap and design stay his, but the code is written for other people
@@ -290,7 +292,7 @@ they fail.
   pushes it up, Tim's condition for this view). Search, album and artist views aren't
   grouped; album and artist views drop the columns their header already names. Artist
   rows are part of a section's run, so playing a song still queues up the whole list.
-- **The list has a scrollbar like Zed's**, drawn by riff (GPUI 0.2.2 has none): a thin
+- **The list has a scrollbar like Zed's**, drawn by riff (GPUI has none): a thin
   thumb shown while the list moves and for a second after, or with the pointer on it.
   Dragging the thumb scrolls directly; a click elsewhere on the track glides there.
 - **The queue and the sidebar** (plan 02): `q` queues the highlighted song, `Q` at the
@@ -310,6 +312,13 @@ they fail.
   selected path *before* replacing or re-sorting tracks and pass it to `reindex`.
   Getting this wrong made the highlight jump to a random song after the scan.
 - Rows in a `uniform_list` need `w_full()` or they shrink to their text.
+- **The app comes from `gpui-pre-platform`** (`gpui_platform::application()`):
+  `gpui::Application` has no `new()` since 0.3. That crate needs its `font-kit`
+  feature, or macOS draws no text at all. It also has `runtime_shaders`, which
+  compiles the Metal shaders when riff starts instead of at build time: the build-time
+  path needs the Metal toolchain, and `metal` failed here ("missing Metal Toolchain")
+  even with the component installed. Drop the feature once `xcrun metal --version`
+  works.
 
 ## Running and checking
 

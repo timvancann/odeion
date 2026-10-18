@@ -398,7 +398,7 @@ pub fn settings_file() -> PathBuf {
 impl Riff {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        focus.focus(window);
+        focus.focus(window, cx);
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
@@ -6332,7 +6332,7 @@ impl Render for Riff {
                                                                 range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
                                                             }),
                                                         )
-                                                        .track_scroll(self.scroll.clone())
+                                                        .track_scroll(&self.scroll)
                                                         .size_full(),
                                                     )
                                                     .children(self.render_pinned(cx))
