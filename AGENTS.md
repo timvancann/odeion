@@ -389,7 +389,7 @@ add a key to both or they fail.
 - The menu bar has one menu, Odeion (`main.rs`, `menu_bar`, Tim 2026-11-08): the
   version, Check for Updates… (asks GitHub's API for the latest release on a
   background thread, then a native dialog says "You're on the latest version" or offers
-  the Mac zip with Download; `update.rs` compares versions, `view.rs` only asks and
+  this system's zip with Download; `update.rs` compares versions, `view.rs` only asks and
   shows), Settings…, Keyboard Shortcuts, Hide and Quit. Its entries
   aren't bound to keys, so they show no shortcuts: ⌘Q, ⌘M (minimise), ⌃⌘F (full
   screen) and every other ⌘ shortcut are handled by hand, as before, and none collide
@@ -440,13 +440,19 @@ add a key to both or they fail.
 
 `just run` runs from source; `just install` builds `Odeion.app` (icon rendered from
 `bundle/icon.svg` with resvg) into `~/Applications`. A pushed `v*` tag matching
-`Cargo.toml`'s version publishes a universal `Odeion-<version>.zip` as a GitHub release
-(`.github/workflows/release.yml`), signed and notarized once the Apple secrets are set;
-`docs/releasing.md` has the steps. A panic writes `crash.log` (with a backtrace) to
-the data folder, since a Windows release build and an app opened from the Dock have no
-console. The Windows build embeds `bundle/icon.ico` through `build.rs`; regenerate it
-from `bundle/icon.svg` (resvg at 16 to 256 px, joined with `magick`) when the icon
-changes. Windows has no media keys yet (souvlaki needs the window's HWND there).
+`Cargo.toml`'s version publishes a GitHub release (`.github/workflows/release.yml`): a
+universal Mac app as `Odeion-<version>.zip` and `Odeion-macOS.zip`, signed and notarized
+once the Apple secrets are set, and the Windows build (a trial) as
+`Odeion-<version>-Windows.zip` and `Odeion-Windows.zip`. The fixed names are what the
+README's download buttons (`releases/latest/download/…`) and Check for Updates
+(`update::DOWNLOAD`) use; `docs/releasing.md` has the steps. A panic writes `crash.log`
+(with a backtrace) to the data folder, since a Windows release build and an app opened
+from the Dock have no console. The Windows build embeds `bundle/icon.ico` through
+`build.rs`; regenerate it from `bundle/icon.svg` (resvg at 16 to 256 px, joined with
+`magick`) when the icon changes. On Windows the media keys get the window's HWND
+(`media.rs`); souvlaki panics without it. The wordmark (`bundle/wordmark-on-light.svg`,
+`wordmark-on-dark.svg`, source `wordmark.vectorcraft`) is Poppins SemiBold "deion" in
+outlines after the icon's pick as the o, its point on the baseline (Tim, 2026-11-08).
 
 Tim uses Odeion while you work on it. **Leave his running instance alone**: restarting it
 cuts off whatever he is practising. Build, then tell him to restart. Playing audio

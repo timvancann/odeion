@@ -108,9 +108,35 @@ jobs:
           # releases/latest/download/Odeion-macOS.zip is always the newest.
           cp "$zip" Odeion-macOS.zip
           if [ "$SIGNED" = yes ]; then
-            notes="Download $zip, unzip it and drag Odeion into Applications."
+            mac="**macOS:** download Odeion-macOS.zip, unzip it and drag Odeion into Applications."
           else
-            notes="Download $zip, unzip it and drag Odeion into Applications. This build isn't notarized by Apple, so macOS blocks it the first time: open it once, then go to System Settings, Privacy & Security, and click Open Anyway. Or run \`xattr -dr com.apple.quarantine /Applications/Odeion.app\` in Terminal."
+            mac="**macOS:** download Odeion-macOS.zip, unzip it and drag Odeion into Applications. This build isn't notarized by Apple, so macOS blocks it the first time: open it once, then go to System Settings, Privacy & Security, and click Open Anyway. Or run \`xattr -dr com.apple.quarantine /Applications/Odeion.app\` in Terminal."
           fi
+          windows="**Windows (trial):** download Odeion-Windows.zip, unzip it and run odeion.exe. Windows warns about an unknown publisher the first time: click More info, then Run anyway."
           gh release create "$GITHUB_REF_NAME" "$zip" Odeion-macOS.zip --title "Odeion $VERSION" \
-            --notes "$notes" --generate-notes
+            --notes "$mac"$'\n\n'"$windows" --generate-notes
+
+  # The Windows build (a trial), added to the release the job above made. No signing
+  # secrets here; the build cache is read-only, written by ci.yml's windows job on main.
+  windows:
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows
+          save-if: false
+      - run: cargo build --release
+      - name: Add Odeion-Windows.zip to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "$env:GITHUB_REF_NAME".TrimStart("v")
+          Compress-Archive -Path target/release/odeion.exe -DestinationPath "Odeion-$version-Windows.zip"
+          Copy-Item "Odeion-$version-Windows.zip" Odeion-Windows.zip
+          gh release upload "$env:GITHUB_REF_NAME" "Odeion-$version-Windows.zip" Odeion-Windows.zip

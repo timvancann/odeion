@@ -10,9 +10,18 @@ const LATEST: &str = "https://api.github.com/repos/timvancann/odeion/releases/la
 #[derive(Debug, Clone, PartialEq)]
 pub struct Release {
     pub version: String,
-    /// The Mac download on a Mac, else the release's page.
+    /// This system's download (`DOWNLOAD`), else the release's page.
     pub download: String,
 }
+
+/// The download each release carries for this system, under a name that never changes.
+const DOWNLOAD: Option<&str> = if cfg!(target_os = "macos") {
+    Some("Odeion-macOS.zip")
+} else if cfg!(windows) {
+    Some("Odeion-Windows.zip")
+} else {
+    None
+};
 
 /// What a check found.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,11 +49,8 @@ struct Asset {
 /// GitHub's answer for the latest release, as a `Release`.
 pub fn parse(body: &str) -> Result<Release, String> {
     let answer: Answer = serde_json::from_str(body).map_err(|_| "GitHub's answer didn't make sense".to_string())?;
-    let zip = answer
-        .assets
-        .iter()
-        .find(|a| a.name.starts_with("Odeion-") && a.name.ends_with(".zip"))
-        .filter(|_| cfg!(target_os = "macos"))
+    let zip = DOWNLOAD
+        .and_then(|name| answer.assets.iter().find(|a| a.name == name))
         .map(|a| a.browser_download_url.clone());
     Ok(Release {
         version: answer.tag_name.trim_start_matches('v').to_string(),
@@ -119,12 +125,16 @@ mod tests {
     #[test]
     fn a_release_offers_the_mac_zip_or_its_page() {
         let body = r#"{"tag_name": "v0.3.0", "html_url": "https://github.com/timvancann/odeion/releases/tag/v0.3.0",
-            "assets": [{"name": "notes.txt", "browser_download_url": "https://x/notes.txt"},
-                       {"name": "Odeion-0.3.0.zip", "browser_download_url": "https://x/Odeion-0.3.0.zip"}]}"#;
+            "assets": [{"name": "Odeion-Windows.zip", "browser_download_url": "https://x/Odeion-Windows.zip"},
+                       {"name": "Odeion-0.3.0.zip", "browser_download_url": "https://x/Odeion-0.3.0.zip"},
+                       {"name": "Odeion-macOS.zip", "browser_download_url": "https://x/Odeion-macOS.zip"}]}"#;
         let release = parse(body).unwrap();
         assert_eq!(release.version, "0.3.0");
+        // Each system gets its own download, never the other's.
         let expected = if cfg!(target_os = "macos") {
-            "https://x/Odeion-0.3.0.zip"
+            "https://x/Odeion-macOS.zip"
+        } else if cfg!(windows) {
+            "https://x/Odeion-Windows.zip"
         } else {
             "https://github.com/timvancann/odeion/releases/tag/v0.3.0"
         };

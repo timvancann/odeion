@@ -1,18 +1,32 @@
-# Odeion
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="bundle/wordmark-on-dark.svg">
+    <img src="bundle/wordmark-on-light.svg" width="320" alt="Odeion">
+  </picture>
+</h1>
 
-[![Download for macOS](https://img.shields.io/badge/download-macOS-2350d6?logo=apple&logoColor=white)](https://github.com/timvancann/odeion/releases/latest/download/Odeion-macOS.zip)
-[![Latest release](https://img.shields.io/github/v/release/timvancann/odeion?label=release&color=2350d6)](https://github.com/timvancann/odeion/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/timvancann/odeion/total?color=2350d6)](https://github.com/timvancann/odeion/releases)
-[![CI](https://github.com/timvancann/odeion/actions/workflows/ci.yml/badge.svg)](https://github.com/timvancann/odeion/actions/workflows/ci.yml)
-[![Licence: PolyForm Noncommercial](https://img.shields.io/badge/licence-PolyForm%20Noncommercial-18181b)](LICENSE)
+<p align="center">
+  A music player and a practice tool in one.<br>
+  Listen to your own library, or loop the solo, slow it down, mute the guitar and play along.
+</p>
 
-A music player and a practice tool in one. Listen to your own library, or loop the
-solo, slow it down, mute the guitar and play along.
+<p align="center">
+  <a href="https://github.com/timvancann/odeion/releases/latest/download/Odeion-macOS.zip"><img src="https://img.shields.io/badge/Download_for_macOS-2350d6?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
+  <a href="https://github.com/timvancann/odeion/releases/latest/download/Odeion-Windows.zip"><img src="https://img.shields.io/badge/Download_for_Windows-2350d6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+</p>
 
-Named after the odeion, the small concert hall of ancient Greece, where people came to
-hear music and musicians came to play it.
+<p align="center">
+  <a href="https://github.com/timvancann/odeion/releases/latest"><img src="https://img.shields.io/github/v/release/timvancann/odeion?label=release&color=2350d6" alt="Latest release"></a>
+  <a href="https://github.com/timvancann/odeion/releases"><img src="https://img.shields.io/github/downloads/timvancann/odeion/total?color=2350d6" alt="Downloads"></a>
+  <a href="https://github.com/timvancann/odeion/actions/workflows/ci.yml"><img src="https://github.com/timvancann/odeion/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-PolyForm_Noncommercial-18181b" alt="Licence: PolyForm Noncommercial"></a>
+</p>
 
 ![The library](docs/screenshots/library.png)
+
+<p align="center"><sub>Named after the <a href="https://en.wikipedia.org/wiki/Odeon_(building)">odeion</a>,
+the small concert hall of ancient Greece, where people came to hear music and musicians
+came to play it.</sub></p>
 
 ## What it does
 
@@ -41,11 +55,17 @@ hear music and musicians came to play it.
 
 ## Getting started
 
-[Download the latest Odeion for macOS](https://github.com/timvancann/odeion/releases/latest/download/Odeion-macOS.zip)
-(or pick a version from [Releases](https://github.com/timvancann/odeion/releases)), unzip
-it and drag Odeion into Applications. It runs on macOS 13 or later, Apple silicon and Intel. If macOS says it
-can't check the app, open it once, then click Open Anyway in System Settings, Privacy &
-Security.
+**macOS** (13 or later, Apple silicon and Intel):
+[download the latest Odeion](https://github.com/timvancann/odeion/releases/latest/download/Odeion-macOS.zip),
+unzip it and drag Odeion into Applications. If macOS says it can't check the app, open
+it once, then click Open Anyway in System Settings, Privacy & Security.
+
+**Windows** (new, still being tried out):
+[download the latest Odeion](https://github.com/timvancann/odeion/releases/latest/download/Odeion-Windows.zip),
+unzip it and run `odeion.exe`. Windows warns about an unknown publisher the first time:
+click More info, then Run anyway. Ctrl does what ⌘ does on a Mac.
+
+Older versions are on the [Releases](https://github.com/timvancann/odeion/releases) page.
 
 Or build it yourself, with [Rust](https://rustup.rs),
 [just](https://github.com/casey/just) and
@@ -98,7 +118,8 @@ Odeion stands on these projects:
   [T3 Code](https://github.com/pingdotgg/t3code), whose clean look it follows.
 - Icons from [Lucide](https://lucide.dev), fonts
   [JetBrains Mono](https://www.jetbrains.com/lp/mono/) and
-  [Space Grotesk](https://fonts.google.com/specimen/Space+Grotesk).
+  [Space Grotesk](https://fonts.google.com/specimen/Space+Grotesk); the wordmark is set in
+  [Poppins](https://fonts.google.com/specimen/Poppins).
 
 ## Roadmap
 

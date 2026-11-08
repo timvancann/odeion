@@ -13,8 +13,9 @@
    ```
 
 The Release workflow (`.github/workflows/release.yml`) then runs the tests, builds
-`Odeion.app` for Apple silicon and Intel in one, and publishes `Odeion-0.2.0.zip` on the
-repo's Releases page. A tag that doesn't match `Cargo.toml` fails the run before
+`Odeion.app` for Apple silicon and Intel in one, and publishes `Odeion-0.2.0.zip` (and
+the same as `Odeion-macOS.zip`) on the repo's Releases page; a second job then builds
+Windows and adds `Odeion-0.2.0-Windows.zip` and `Odeion-Windows.zip`. A tag that doesn't match `Cargo.toml` fails the run before
 anything is built.
 
 A tag on a mistake can go again: delete the release and the tag on GitHub
