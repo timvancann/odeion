@@ -1,7 +1,7 @@
 //! What each key does, and the ⌘? sheet that lists them, side by side so they can't
 //! disagree. Pure: `view.rs` turns a keystroke into a `Press` and performs the `Action`.
 //!
-//! Riff has modes, like vim. The library is for finding and playing songs, search is
+//! Odeion has modes, like vim. The library is for finding and playing songs, search is
 //! its sub-mode where keys type, and practice is the waveform with the loop, sections
 //! and stems. A key means what the current mode's map says, after the few keys that
 //! work everywhere. There are two keyboards, chosen in settings: Mac (the default),
@@ -19,7 +19,7 @@ pub const ZOOM: f64 = 1.5;
 pub const HALF_PAGE: isize = 6;
 const SEEK: f64 = 5.0;
 
-/// Which keys riff answers to, chosen in settings.
+/// Which keys odeion answers to, chosen in settings.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Keyboard {
@@ -32,7 +32,7 @@ pub enum Keyboard {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Finding and playing songs. Riff opens here.
+    /// Finding and playing songs. Odeion opens here.
     Library,
     /// Typing a search, within the library.
     Search,
@@ -74,7 +74,7 @@ pub enum Action {
     Help,
     Settings,
     Quit,
-    /// Hide riff, as ⌘H does in every Mac app (no menu bar does it for riff).
+    /// Hide odeion, as ⌘H does in every Mac app (no menu bar does it for odeion).
     Hide,
     LoopStart,
     LoopEnd,
@@ -115,7 +115,7 @@ pub enum Action {
     AddVariation,
     /// Remove the playing variation.
     RemoveVariation,
-    /// Minimise the window, or make it full screen (no menu bar does it for riff).
+    /// Minimise the window, or make it full screen (no menu bar does it for odeion).
     Minimize,
     FullScreen,
     /// Speed and pitch as recorded, and again back to the song's kept ones.
@@ -779,7 +779,7 @@ pub const SHEET: &[Group] = &[
         lines: &[
             ("⌘,", "", "", "settings"),
             ("⌘E ⌥⌘E", "", "", "the EQ"),
-            ("⌘H", "", "", "hide riff"),
+            ("⌘H", "", "", "hide Odeion"),
             ("⌘M", "", "", "minimise"),
             ("⌃⌘F", "", "", "full screen"),
             ("⌘Q", "", "", "quit"),

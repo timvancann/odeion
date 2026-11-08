@@ -1,4 +1,4 @@
-//! What riff says where there is nothing to show: the song list with no songs in it
+//! What odeion says where there is nothing to show: the song list with no songs in it
 //! (each reason in its own words), the practice view before a waveform, the loop bar
 //! without a loop, the now-playing card before the first song, and the messages for a
 //! folder or song that can't be read. Pure: the window hands in names and keys (from
@@ -127,7 +127,7 @@ pub fn said(empty: Empty, a: &About) -> Said {
         Empty::NoFolder => Said {
             title: "Where is your music?".into(),
             detail: format!(
-                "Add the folder your songs are in: click Add music folder{}. Riff finds every song inside it and never writes there. More folders can be added in settings.",
+                "Add the folder your songs are in: click Add music folder{}. Odeion finds every song inside it and never writes there. More folders can be added in settings.",
                 or_press(a.keys.play)
             ),
             button: Some((Button::AddFolder, "Add music folder…")),
@@ -158,7 +158,7 @@ pub fn said(empty: Empty, a: &About) -> Said {
         }
         Empty::NoSongs => Said {
             title: format!("No songs found in {}", and(a.folders)),
-            detail: format!("Riff plays {} files. To add another folder, {settings}.", and(a.formats)),
+            detail: format!("Odeion plays {} files. To add another folder, {settings}.", and(a.formats)),
             button: Some((Button::Settings, "Open settings")),
         },
         Empty::NoMatch { scoped: false } => Said {
@@ -222,11 +222,11 @@ pub fn cant_read(unreadable: &[(String, String)]) -> Option<String> {
     })
 }
 
-/// The message for riff's own files that couldn't be read when it opened, given where
+/// The message for odeion's own files that couldn't be read when it opened, given where
 /// each was moved aside, or nothing when all could.
 pub fn set_aside(kept: &[String]) -> Option<String> {
     (!kept.is_empty()).then(|| {
-        format!("couldn't read some of riff's own files, so they start afresh; the old ones are kept as {}", kept.join(", "))
+        format!("couldn't read some of Odeion's own files, so they start afresh; the old ones are kept as {}", kept.join(", "))
     })
 }
 
@@ -300,7 +300,7 @@ mod tests {
         let a = about(&folders, &formats);
         let none = said(Empty::NoSongs, &a);
         assert_eq!(none.title, "No songs found in ~/Music and ~/Downloads");
-        assert_eq!(none.detail, "Riff plays MP3, FLAC and WAV files. To add another folder, click Open settings or press ⌘,.");
+        assert_eq!(none.detail, "Odeion plays MP3, FLAC and WAV files. To add another folder, click Open settings or press ⌘,.");
         assert_eq!(none.button, Some((Button::Settings, "Open settings")));
         assert!(said(Empty::NoFolder, &a).detail.contains("click Add music folder or press Enter"));
 

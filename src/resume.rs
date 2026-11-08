@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn where_songs_were_left_survives_a_save() {
-        let file = std::env::temp_dir().join(format!("riff-resume-{}.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("odeion-resume-{}.json", std::process::id()));
         let mut r = Resume::default();
         let mut loops = HashMap::new();
         loops.insert(PathBuf::from("/d/stems-Bass.mp3"), Loop { start: Some(s(10)), end: Some(s(14)), off: true });

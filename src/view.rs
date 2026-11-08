@@ -255,7 +255,7 @@ enum Row {
     Playlist(usize),
 }
 
-pub struct Riff {
+pub struct Odeion {
     focus: FocusHandle,
     tracks: Vec<Track>,
     by_path: HashMap<PathBuf, usize>,
@@ -398,7 +398,7 @@ pub struct Riff {
     /// removes it, anything else in between keeps it.
     removing_variation: Option<(usize, std::time::Instant)>,
     shuffle: bool,
-    /// The media keys and Now Playing, when macOS lets riff have them.
+    /// The media keys and Now Playing, when macOS lets odeion have them.
     media: Option<Media>,
     message: Option<(String, bool)>,
     /// The message showing and since when, so it can go after a few seconds.
@@ -462,41 +462,41 @@ pub fn settings_file() -> PathBuf {
     state::data_dir().join("settings.json")
 }
 
-impl Riff {
+impl Odeion {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
-                if this.update(cx, |riff, cx| riff.poll(cx)).is_err() {
+                if this.update(cx, |odeion, cx| odeion.poll(cx)).is_err() {
                     break;
                 }
             }
         })
         .detach();
 
-        cx.observe_window_bounds(window, |riff, window, cx| {
+        cx.observe_window_bounds(window, |odeion, window, cx| {
             let bounds = window.window_bounds().get_bounds();
             let Some(display) = window.display(cx).and_then(|d| d.uuid().ok()) else {
                 return;
             };
-            riff.settings.window = Some(state::Placement {
+            odeion.settings.window = Some(state::Placement {
                 display: display.to_string(),
                 x: bounds.origin.x.into(),
                 y: bounds.origin.y.into(),
                 width: bounds.size.width.into(),
                 height: bounds.size.height.into(),
             });
-            riff.moved = Some(std::time::Instant::now());
+            odeion.moved = Some(std::time::Instant::now());
         })
         .detach();
 
-        // Closing the window quits riff (`main` sets that), saving first as ⌘Q does.
+        // Closing the window quits odeion (`main` sets that), saving first as ⌘Q does.
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
-            this.update(cx, |riff, cx| {
-                let quit = riff.save_for_quit();
+            this.update(cx, |odeion, cx| {
+                let quit = odeion.save_for_quit();
                 cx.notify();
                 quit
             })
@@ -509,17 +509,17 @@ impl Riff {
         let mut audio = Audio::new(settings.volume, settings.output.clone());
         audio.set_eq(settings.eq);
 
-        // On Auto with riff's own theme, macOS turning light or dark turns riff too.
-        cx.observe_window_appearance(window, |riff, window, cx| {
-            if theme::is_own(&riff.settings.theme) && riff.settings.appearance == theme::Appearance::Auto {
+        // On Auto with odeion's own theme, macOS turning light or dark turns odeion too.
+        cx.observe_window_appearance(window, |odeion, window, cx| {
+            if theme::is_own(&odeion.settings.theme) && odeion.settings.appearance == theme::Appearance::Auto {
                 let dark = system_dark(window.appearance());
-                theme::set_active(theme::own(&riff.settings.theme, theme::Appearance::Auto, dark));
+                theme::set_active(theme::own(&odeion.settings.theme, theme::Appearance::Auto, dark));
                 cx.notify();
             }
         })
         .detach();
 
-        let mut riff = Riff {
+        let mut odeion = Odeion {
             focus,
             tracks,
             by_path: HashMap::new(),
@@ -619,16 +619,16 @@ impl Riff {
             kept_at: Duration::ZERO,
             quit_held: None,
         };
-        riff.apply_theme(cx);
-        riff.message = riff.audio.error.clone().map(|e| (e, true));
-        riff.reindex(None);
-        riff.restore(Session::load(&session_file()));
+        odeion.apply_theme(cx);
+        odeion.message = odeion.audio.error.clone().map(|e| (e, true));
+        odeion.reindex(None);
+        odeion.restore(Session::load(&session_file()));
         let aside: Vec<String> = state::take_set_aside().iter().map(|p| tilde(p)).collect();
         if let Some(note) = empty::set_aside(&aside) {
-            riff.message = Some((note, true));
+            odeion.message = Some((note, true));
         }
-        riff.rescan();
-        riff
+        odeion.rescan();
+        odeion
     }
 
     /// Walks the folders again in the background. The list stays as it was meanwhile.
@@ -664,10 +664,10 @@ impl Riff {
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(folders))) = picked.await {
-                let _ = this.update(cx, |riff, cx| {
-                    if riff.settings.add_folders(folders) {
-                        riff.save_settings();
-                        riff.rescan();
+                let _ = this.update(cx, |odeion, cx| {
+                    if odeion.settings.add_folders(folders) {
+                        odeion.save_settings();
+                        odeion.rescan();
                     }
                     cx.notify();
                 });
@@ -676,7 +676,7 @@ impl Riff {
         .detach();
     }
 
-    /// Asks macOS for a folder to keep riff's data in, then reopens riff from it.
+    /// Asks macOS for a folder to keep odeion's data in, then reopens odeion from it.
     fn pick_data_dir(&mut self, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -688,14 +688,14 @@ impl Riff {
             if let Ok(Ok(Some(mut dirs))) = picked.await
                 && let Some(dir) = dirs.pop()
             {
-                let _ = this.update(cx, |riff, cx| riff.switch_data_dir(Some(dir), cx));
+                let _ = this.update(cx, |odeion, cx| odeion.switch_data_dir(Some(dir), cx));
             }
         })
         .detach();
     }
 
-    /// Keeps riff's data in `dir` (the default for `None`): saves where everything is in
-    /// the folder used now, then reopens riff from the new one.
+    /// Keeps odeion's data in `dir` (the default for `None`): saves where everything is in
+    /// the folder used now, then reopens odeion from the new one.
     fn switch_data_dir(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
         let default = state::default_data_dir();
         if dir.clone().unwrap_or_else(|| default.clone()) == state::data_dir() {
@@ -719,7 +719,7 @@ impl Riff {
         match reopened {
             Ok(_) => cx.quit(),
             Err(e) => {
-                self.message = Some((format!("couldn't reopen riff ({e}); open it again to use the folder"), true));
+                self.message = Some((format!("couldn't reopen Odeion ({e}); open it again to use the folder"), true));
                 cx.notify();
             }
         }
@@ -734,7 +734,7 @@ impl Riff {
     }
 
     /// Draws with the theme the settings choose: the editor theme when one is chosen and
-    /// still installed, otherwise riff's own for the Appearance (on Auto, as macOS is now).
+    /// still installed, otherwise odeion's own for the Appearance (on Auto, as macOS is now).
     fn apply_theme(&self, cx: &gpui::App) {
         let editor = Some(self.settings.theme.as_str())
             .filter(|name| !theme::is_own(name))
@@ -750,7 +750,7 @@ impl Riff {
     }
 
     /// Draws with `t`, the window's own chrome (its edge, the traffic lights) matching it.
-    /// Riff's own theme on Auto leaves the chrome to macOS, which is how it follows.
+    /// Odeion's own theme on Auto leaves the chrome to macOS, which is how it follows.
     fn draw_with(&self, t: Theme, cx: &gpui::App) {
         let follows = !t.editor && self.settings.appearance == theme::Appearance::Auto;
         let forced = if t.dark { gpui::WindowAppearance::Dark } else { gpui::WindowAppearance::Light };
@@ -758,8 +758,8 @@ impl Riff {
         theme::set_active(t);
     }
 
-    /// The settings row's next Appearance: Auto, Light, Dark. It means riff's own schemes,
-    /// so from an editor theme the first press goes back to Riff as it was.
+    /// The settings row's next Appearance: Auto, Light, Dark. It means odeion's own schemes,
+    /// so from an editor theme the first press goes back to Odeion as it was.
     fn next_appearance(&mut self, cx: &gpui::App) {
         if theme::is_own(&self.settings.theme) {
             self.settings.appearance = self.settings.appearance.next();
@@ -1337,7 +1337,7 @@ impl Riff {
         }
     }
 
-    /// What riff shows now, as the next start should show it.
+    /// What odeion shows now, as the next start should show it.
     fn session(&self) -> Session {
         Session {
             playing: self.now.as_ref().map(|n| n.path.clone()),
@@ -1355,7 +1355,7 @@ impl Riff {
 
     /// Saves the session when it changed, and the paused playhead when it moved (while
     /// playing, `poll` keeps it every few seconds), so closing the window loses nothing.
-    /// Saves what riff shows, when it changed. Returns whether that worked.
+    /// Saves what odeion shows, when it changed. Returns whether that worked.
     fn save_session(&mut self) -> bool {
         self.saved_at = std::time::Instant::now();
         let session = self.session();
@@ -1381,11 +1381,11 @@ impl Riff {
         saved
     }
 
-    /// Opens as riff was left: the song that was playing, paused where it was (in its
+    /// Opens as odeion was left: the song that was playing, paused where it was (in its
     /// recording, with its loops), the view, the grid and zoom, and the highlighted song.
     fn restore(&mut self, session: Session) {
-        let track = |riff: &Self, path: &Option<PathBuf>| {
-            path.as_ref().and_then(|p| riff.by_path.get(p)).map(|&i| riff.tracks[i].clone())
+        let track = |odeion: &Self, path: &Option<PathBuf>| {
+            path.as_ref().and_then(|p| odeion.by_path.get(p)).map(|&i| odeion.tracks[i].clone())
         };
         self.grid = session.grid;
         self.queue = session.queue.clone();
@@ -1445,7 +1445,7 @@ impl Riff {
         self.kept = std::time::Instant::now();
     }
 
-    /// Everything kept before riff goes: where the song is, and the session.
+    /// Everything kept before odeion goes: where the song is, and the session.
     /// Saves before quitting, and says whether to quit: when a save fails the first quit
     /// is held back with the error showing, so it isn't lost as the window goes; quitting
     /// again quits.
@@ -1502,10 +1502,10 @@ impl Riff {
             .bg(rgb(t.raised))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|riff, e: &MouseDownEvent, _, cx| {
+                cx.listener(|odeion, e: &MouseDownEvent, _, cx| {
                     // Not also the now-playing card's menu around it.
                     cx.stop_propagation();
-                    riff.menu = Some((Menu::speed(), e.position));
+                    odeion.menu = Some((Menu::speed(), e.position));
                     cx.notify();
                 }),
             )
@@ -1533,13 +1533,13 @@ impl Riff {
                         &[Action::Slow],
                     ))
                     .child(label)
-                    .on_click(cx.listener(|riff, _, _, cx| riff.act(Action::Slow, cx))),
+                    .on_click(cx.listener(|odeion, _, _, cx| odeion.act(Action::Slow, cx))),
             )
             .child(self.tool("faster", "plus", "5% faster, pitch kept", Action::Speed(true), false, cx))
             // The right-click menu by a plain click too.
             .child(
-                self.button("speed-menu", "chevron-down", "Speed presets and the trainer's settings", &[], false, cx, |riff, e, _| {
-                    riff.menu = Some((Menu::speed(), e.position()));
+                self.button("speed-menu", "chevron-down", "Speed presets and the trainer's settings", &[], false, cx, |odeion, e, _| {
+                    odeion.menu = Some((Menu::speed(), e.position()));
                 })
                 .w(px(24.)),
             )
@@ -1555,15 +1555,15 @@ impl Riff {
             .id("pitch")
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|riff, e: &MouseDownEvent, _, cx| {
-                    riff.menu = Some((Menu::pitch(), e.position));
+                cx.listener(|odeion, e: &MouseDownEvent, _, cx| {
+                    odeion.menu = Some((Menu::pitch(), e.position));
                     cx.notify();
                 }),
             )
-            .on_scroll_wheel(cx.listener(|riff, e: &gpui::ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(cx.listener(|odeion, e: &gpui::ScrollWheelEvent, _, cx| {
                 let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
                 if dy != 0. {
-                    riff.act(Action::Pitch(if dy < 0. { 5 } else { -5 }), cx);
+                    odeion.act(Action::Pitch(if dy < 0. { 5 } else { -5 }), cx);
                 }
             }))
             .child(self.tool("pitch-down", "minus", "Down a semitone, speed kept", Action::Pitch(-100), false, cx))
@@ -1633,10 +1633,10 @@ impl Riff {
                 .child(label)
                 .when(!on, |d| {
                     d.tooltip(self.tip(format!("{label} mode"), &[Action::Practice])).on_click(cx.listener(
-                        |riff, _, _, cx| {
+                        |odeion, _, _, cx| {
                             // Not also a click on the title bar.
                             cx.stop_propagation();
-                            riff.act(Action::Practice, cx);
+                            odeion.act(Action::Practice, cx);
                         },
                     ))
                 })
@@ -1664,9 +1664,9 @@ impl Riff {
                 .child(ui::icon(icon, 14., if on { t.accent } else { t.text_dim }))
                 .tooltip(self.tip(what, &[Action::ListView]))
                 .when(!on, |d| {
-                    d.on_click(cx.listener(|riff, _, _, cx| {
+                    d.on_click(cx.listener(|odeion, _, _, cx| {
                         cx.stop_propagation();
-                        riff.act(Action::ListView, cx);
+                        odeion.act(Action::ListView, cx);
                     }))
                 })
         };
@@ -1714,7 +1714,7 @@ impl Riff {
         lit: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        self.button(id, icon, what, &[action], lit, cx, move |riff, _, cx| riff.act(action, cx))
+        self.button(id, icon, what, &[action], lit, cx, move |odeion, _, cx| odeion.act(action, cx))
     }
 
     /// An icon button like `tool` that does `click` rather than an action: a sheet's ×,
@@ -1729,7 +1729,7 @@ impl Riff {
         keys: &[Action],
         lit: bool,
         cx: &mut Context<Self>,
-        click: impl Fn(&mut Riff, &gpui::ClickEvent, &mut Context<Riff>) + 'static,
+        click: impl Fn(&mut Odeion, &gpui::ClickEvent, &mut Context<Odeion>) + 'static,
     ) -> Stateful<Div> {
         let t = t();
         div()
@@ -1746,10 +1746,10 @@ impl Riff {
             .hover(|d| d.bg(rgb(t.hover)))
             .child(ui::icon(icon, 16., if lit { t.accent } else { t.text }))
             .tooltip(self.tip(what.to_string(), keys))
-            .on_click(cx.listener(move |riff, e, _, cx| {
+            .on_click(cx.listener(move |odeion, e, _, cx| {
                 // Not also a click on what it sits on (a row, the title bar).
                 cx.stop_propagation();
-                click(riff, e, cx);
+                click(odeion, e, cx);
                 cx.notify();
             }))
     }
@@ -1775,7 +1775,7 @@ impl Riff {
         key: &'static str,
         colour: u32,
         cx: &mut Context<Self>,
-        click: impl Fn(&mut Riff) + 'static,
+        click: impl Fn(&mut Odeion) + 'static,
     ) -> Stateful<Div> {
         let t = t();
         div()
@@ -1796,9 +1796,9 @@ impl Riff {
             .text_color(rgb(colour))
             .child(label.to_string())
             .when(!key.is_empty(), |d| d.child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(key)))
-            .on_click(cx.listener(move |riff, _, _, cx| {
+            .on_click(cx.listener(move |odeion, _, _, cx| {
                 cx.stop_propagation();
-                click(riff);
+                click(odeion);
                 cx.notify();
             }))
     }
@@ -1836,9 +1836,9 @@ impl Riff {
             .child(ui::icon(icon, 20., if lit { t.accent } else { t.text }))
             .child(label.to_string())
             .tooltip(self.tip(what.to_string(), &[action]))
-            .on_click(cx.listener(move |riff, _, _, cx| {
+            .on_click(cx.listener(move |odeion, _, _, cx| {
                 cx.stop_propagation();
-                riff.act(action, cx);
+                odeion.act(action, cx);
             }))
     }
 
@@ -1976,26 +1976,26 @@ impl Riff {
         area
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     let from = match slider {
-                        Slider::Stem(_) => Some((e.position.x, riff.level(slider))),
+                        Slider::Stem(_) => Some((e.position.x, odeion.level(slider))),
                         Slider::Volume | Slider::Speed => {
-                            riff.slide(slider, pressed.get(), e.position.x);
+                            odeion.slide(slider, pressed.get(), e.position.x);
                             None
                         }
                     };
-                    riff.sliding = Some((slider, pressed.clone(), from));
+                    odeion.sliding = Some((slider, pressed.clone(), from));
                     cx.notify();
                 }),
             )
-            .on_scroll_wheel(cx.listener(move |riff, e: &gpui::ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(cx.listener(move |odeion, e: &gpui::ScrollWheelEvent, _, cx| {
                 let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
                 if dy != 0. {
                     // A notch is a 5% step, as ⌥↑ ⌥↓ are for the volume.
-                    let level = riff.level(slider) - dy / 20. * crate::audio::VOLUME_STEP;
-                    riff.set_level(slider, crate::audio::level_at(level));
-                    riff.keep_levels(slider);
+                    let level = odeion.level(slider) - dy / 20. * crate::audio::VOLUME_STEP;
+                    odeion.set_level(slider, crate::audio::level_at(level));
+                    odeion.keep_levels(slider);
                     cx.notify();
                 }
             }))
@@ -2162,8 +2162,8 @@ impl Riff {
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(files))) = picked.await {
-                let _ = this.update(cx, |riff, cx| {
-                    riff.add_variation(song, files);
+                let _ = this.update(cx, |odeion, cx| {
+                    odeion.add_variation(song, files);
                     cx.notify();
                 });
             }
@@ -2403,7 +2403,7 @@ impl Riff {
         // The sheets swallow every key but their own toggles and ⌘Q.
         match global {
             // GPUI apps get no menu bar, so ⌘Q has to be handled here.
-            // Without a menu bar macOS doesn't do these for riff.
+            // Without a menu bar macOS doesn't do these for odeion.
             Some(Action::Minimize) => return window.minimize_window(),
             Some(Action::FullScreen) => return window.toggle_fullscreen(),
             Some(Action::Hide) => return cx.hide(),
@@ -2435,7 +2435,7 @@ impl Riff {
             _ => {}
         }
         if self.prefs.is_some() {
-            // Opening a folder dialog or reopening riff needs the context, so Enter on "add
+            // Opening a folder dialog or reopening odeion needs the context, so Enter on "add
             // folder" and the data folder's rows is here.
             let add = self.settings.folders.len();
             let enter = matches!(k.key.as_str(), "enter" | "space");
@@ -3321,15 +3321,15 @@ impl Riff {
             .right_0()
             .w(px(14.))
             .when(thumb.is_some(), |d| {
-                d.on_hover(cx.listener(|riff, hovered: &bool, _, cx| {
-                    riff.over_track = *hovered;
+                d.on_hover(cx.listener(|odeion, hovered: &bool, _, cx| {
+                    odeion.over_track = *hovered;
                     cx.notify();
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|riff, e: &MouseDownEvent, _, cx| {
+                    cx.listener(|odeion, e: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        riff.track_down(e.position.y);
+                        odeion.track_down(e.position.y);
                         cx.notify();
                     }),
                 )
@@ -3378,8 +3378,8 @@ impl Riff {
             .text_size(px(10.))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|riff, e: &MouseDownEvent, _, cx| {
-                    riff.scrub(e.position.y);
+                cx.listener(|odeion, e: &MouseDownEvent, _, cx| {
+                    odeion.scrub(e.position.y);
                     cx.notify();
                 }),
             )
@@ -3704,9 +3704,9 @@ impl Riff {
                     .child(if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") }),
             )
             .tooltip(self.tip("Only this artist; right-click to play or queue them all", &[Action::Artist]))
-            .on_click(cx.listener(move |riff, _, _, cx| {
-                riff.selected = ix + 1;
-                riff.act(Action::Artist, cx);
+            .on_click(cx.listener(move |odeion, _, _, cx| {
+                odeion.selected = ix + 1;
+                odeion.act(Action::Artist, cx);
             }))
             .on_mouse_down(MouseButton::Right, opens_menu(move || Menu::artist(ix), cx))
             .into_any_element()
@@ -3791,8 +3791,8 @@ impl Riff {
                             .text_color(rgb(t().text_dim))
                             .child(if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") }),
                     )
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        riff.open_playlist(i);
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        odeion.open_playlist(i);
                         cx.notify();
                     }))
                     .on_mouse_down(MouseButton::Right, opens_menu(move || Menu::playlist(i), cx))
@@ -3826,10 +3826,10 @@ impl Riff {
                         .when(!selected, |d| d.opacity(0.).group_hover("song-row", |s| s.opacity(1.)))
                         .child(ui::icon(icon, 14., t().text_dim))
                         .tooltip(self.tip(what, &[action]))
-                        .on_click(cx.listener(move |riff, _, _, cx| {
+                        .on_click(cx.listener(move |odeion, _, _, cx| {
                             cx.stop_propagation();
-                            riff.selected = ix;
-                            riff.act(action, cx);
+                            odeion.selected = ix;
+                            odeion.act(action, cx);
                         }))
                 };
                 div()
@@ -3844,18 +3844,18 @@ impl Riff {
                     .rounded_md()
                     .map(|d| selected_cues(d, selected))
                     .when(!selected, |d| d.hover(|d| d.bg(rgb(t().hover))))
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        riff.selected = ix;
-                        riff.play_selected();
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        odeion.selected = ix;
+                        odeion.play_selected();
                         cx.notify();
                     }))
                     // Right-click highlights the song and opens its menu.
                     .on_mouse_down(MouseButton::Right, {
                         let (album, artist) = (self.album.is_some(), self.artist.is_some());
                         let in_playlist = self.playlist_view.is_some() && !album && !artist;
-                        cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
-                            riff.selected = ix;
-                            riff.menu = Some((Menu::song(ix, favorite, album, artist, in_playlist), e.position));
+                        cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
+                            odeion.selected = ix;
+                            odeion.menu = Some((Menu::song(ix, favorite, album, artist, in_playlist), e.position));
                             cx.notify();
                         })
                     })
@@ -3863,8 +3863,8 @@ impl Riff {
                     .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(t().accent_soft)).border_color(rgb(t().focus)))
                     .on_drop({
                         let song = track.path.clone();
-                        cx.listener(move |riff, dropped: &ExternalPaths, _, cx| {
-                            riff.add_variation(song.clone(), dropped.paths().to_vec());
+                        cx.listener(move |odeion, dropped: &ExternalPaths, _, cx| {
+                            odeion.add_variation(song.clone(), dropped.paths().to_vec());
                             cx.notify();
                         })
                     })
@@ -3924,10 +3924,10 @@ impl Riff {
                                     .cursor_pointer()
                                     .hover(|d| d.text_color(rgb(t().accent_text)).underline())
                                     .tooltip(self.tip("Only this artist", &[Action::Artist]))
-                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                    .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
-                                        riff.selected = ix;
-                                        riff.act(Action::Artist, cx);
+                                        odeion.selected = ix;
+                                        odeion.act(Action::Artist, cx);
                                     }))
                                     .child(track.artist.clone()),
                             ),
@@ -3949,10 +3949,10 @@ impl Riff {
                                     .cursor_pointer()
                                     .hover(|d| d.text_color(rgb(t().accent_text)).underline())
                                     .tooltip(self.tip("Only this album", &[Action::Album]))
-                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                    .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
-                                        riff.selected = ix;
-                                        riff.act(Action::Album, cx);
+                                        odeion.selected = ix;
+                                        odeion.act(Action::Album, cx);
                                     }))
                                     .child(album),
                             )
@@ -4001,10 +4001,10 @@ impl Riff {
                                     })
                                     .child(ui::icon("list-plus", 14., if queued { t().accent } else { t().text_dim }))
                                     .tooltip(self.tip(if queued { "Queued" } else { "Queue it" }, &[Action::Queue(false)]))
-                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                    .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
-                                        riff.selected = ix;
-                                        riff.act(Action::Queue(false), cx);
+                                        odeion.selected = ix;
+                                        odeion.act(Action::Queue(false), cx);
                                     })),
                             )
                             // Queue next, at the top of the queue: as the queue button,
@@ -4023,10 +4023,10 @@ impl Riff {
                                     .when(!selected, |d| d.opacity(0.).group_hover("song-row", |s| s.opacity(1.)))
                                     .child(ui::icon("arrow-up-to-line", 14., t().text_dim))
                                     .tooltip(self.tip("Queue it next", &[Action::Queue(true)]))
-                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                    .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
-                                        riff.selected = ix;
-                                        riff.act(Action::Queue(true), cx);
+                                        odeion.selected = ix;
+                                        odeion.act(Action::Queue(true), cx);
                                     })),
                             )
                             // A favourite's star always shows; others' when the row is
@@ -4054,10 +4054,10 @@ impl Riff {
                                         if favorite { "Not a favourite" } else { "Favourite" },
                                         &[Action::Favorite],
                                     ))
-                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                    .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
-                                        riff.selected = ix;
-                                        riff.act(Action::Favorite, cx);
+                                        odeion.selected = ix;
+                                        odeion.act(Action::Favorite, cx);
                                     })),
                             ),
                     )
@@ -4095,8 +4095,8 @@ impl Riff {
             .when(self.searching, |d| d.border_1().border_color(rgb(t().focus)))
             .when(!self.searching, |d| d.tooltip(self.tip("Search", &[Action::Find, Action::Search])))
             // Typing goes to the search in the library, so a click there leaves practice.
-            .on_click(cx.listener(|riff, _, _, cx| {
-                (riff.practice, riff.searching) = (false, true);
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                (odeion.practice, odeion.searching) = (false, true);
                 cx.notify();
             }))
             .child(ui::icon("search", 16., if self.searching { t().accent } else { t().text_dim }))
@@ -4129,9 +4129,9 @@ impl Riff {
                             .hover(|d| d.bg(rgb(t().hover)))
                             .child(ui::icon("x", 12., t().text_dim))
                             .tooltip(self.tip("Search everything", &[]))
-                            .on_click(cx.listener(|riff, _, _, cx| {
+                            .on_click(cx.listener(|odeion, _, _, cx| {
                                 cx.stop_propagation();
-                                riff.widen_search();
+                                odeion.widen_search();
                                 cx.notify();
                             })),
                     )
@@ -4246,14 +4246,14 @@ impl Riff {
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, {
                 let bar = self.bar.clone();
-                cx.listener(move |riff, e, _, cx| riff.strip_down(&bar, e, cx))
+                cx.listener(move |odeion, e, _, cx| odeion.strip_down(&bar, e, cx))
             })
             .on_mouse_down(MouseButton::Right, {
                 let bar = self.bar.clone();
-                cx.listener(move |riff, e, _, cx| {
+                cx.listener(move |odeion, e, _, cx| {
                     // Not also the card's menu around it.
                     cx.stop_propagation();
-                    riff.strip_menu(&bar, e, cx)
+                    odeion.strip_menu(&bar, e, cx)
                 })
             })
             .child(
@@ -4322,9 +4322,9 @@ impl Riff {
             .when(self.now.is_some(), |d| {
                 d.on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                    cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
                         let menu = Menu::playing(favorite, looping.active(), looping.looping(), marker);
-                        riff.menu = Some((menu, e.position));
+                        odeion.menu = Some((menu, e.position));
                         cx.notify();
                     }),
                 )
@@ -4406,7 +4406,7 @@ impl Riff {
                     .text_xs()
                     .text_color(rgb(t().text_dim))
                     .child(time)
-                    // What riff just did ("queued, 3rd") shows here for a few seconds,
+                    // What odeion just did ("queued, 3rd") shows here for a few seconds,
                     // in place of the loop.
                     .child(match &self.message {
                         // Errors with an alert in front, so they don't rest on red alone.
@@ -4439,11 +4439,11 @@ fn typed(k: &gpui::Keystroke, press: keys::Press, cx: &gpui::App) -> Option<Stri
 /// a menu of what it sits on.
 fn opens_menu(
     make: impl Fn() -> Menu + 'static,
-    cx: &mut Context<Riff>,
+    cx: &mut Context<Odeion>,
 ) -> impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
-    cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+    cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
         cx.stop_propagation();
-        riff.menu = Some((make(), e.position));
+        odeion.menu = Some((make(), e.position));
         cx.notify();
     })
 }
@@ -4479,7 +4479,7 @@ fn cover(path: Option<PathBuf>, size: f32) -> gpui::AnyElement {
     }
 }
 
-impl Riff {
+impl Odeion {
     /// The ⌘? sheet: every key, over a dimmed window. Esc, ⌘? or a click closes it.
     fn render_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let keyboard = self.settings.keyboard;
@@ -4540,8 +4540,8 @@ impl Riff {
             if lines(&left) <= lines(&right) { left.push(g) } else { right.push(g) }
         }
         overlay("help")
-            .on_click(cx.listener(|riff, _, _, cx| {
-                riff.help = false;
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                odeion.help = false;
                 cx.notify();
             }))
             .child(
@@ -4588,9 +4588,9 @@ impl Riff {
                                         div().text_color(rgb(t().text)).child(query.to_string())
                                     }),
                             )
-                            .child(self.button("help-close", "x", "Close", &[Action::Help], false, cx, |riff, _, _| {
-                                riff.help = false;
-                                riff.help_query.clear();
+                            .child(self.button("help-close", "x", "Close", &[Action::Help], false, cx, |odeion, _, _| {
+                                odeion.help = false;
+                                odeion.help_query.clear();
                             })),
                     )
                     .when(left.is_empty(), |d| {
@@ -4611,8 +4611,8 @@ impl Riff {
     fn render_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let t = t();
         let (menu, at) = self.menu.as_ref()?;
-        let close = |riff: &mut Riff, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Riff>| {
-            riff.menu = None;
+        let close = |odeion: &mut Odeion, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Odeion>| {
+            odeion.menu = None;
             cx.notify();
         };
         let entries = menu.entries.iter().enumerate().map(|(i, &(label, action))| {
@@ -4639,13 +4639,13 @@ impl Riff {
                         .text_color(rgb(t.text_dim))
                         .child(keys::keys_for(action, self.mode(), self.settings.keyboard).join(" ")),
                 )
-                .on_hover(cx.listener(move |riff, hovered: &bool, _, cx| {
-                    if let Some((menu, _)) = riff.menu.as_mut().filter(|_| *hovered) {
+                .on_hover(cx.listener(move |odeion, hovered: &bool, _, cx| {
+                    if let Some((menu, _)) = odeion.menu.as_mut().filter(|_| *hovered) {
                         menu.row = i;
                         cx.notify();
                     }
                 }))
-                .on_click(cx.listener(move |riff, _, _, cx| riff.choose(action, cx)));
+                .on_click(cx.listener(move |odeion, _, _, cx| odeion.choose(action, cx)));
             div().flex().flex_col().children(line).child(entry)
         });
         Some(deferred(
@@ -4772,10 +4772,10 @@ impl Riff {
                 .children(edge_grips(view.looping, view.marker, view.from, view.to))
                 // The wheel zooms, as - and = do: a mouse notch is about one step, and a
                 // trackpad's many small deltas add up to the same.
-                .on_scroll_wheel(cx.listener(|riff, e: &gpui::ScrollWheelEvent, _, cx| {
+                .on_scroll_wheel(cx.listener(|odeion, e: &gpui::ScrollWheelEvent, _, cx| {
                     let dy = f32::from(e.delta.pixel_delta(px(20.)).y) as f64;
                     if dy != 0. {
-                        riff.perform(Action::Zoom(keys::ZOOM.powf(-dy / 20.)));
+                        odeion.perform(Action::Zoom(keys::ZOOM.powf(-dy / 20.)));
                         cx.notify();
                     }
                 }))
@@ -4787,14 +4787,14 @@ impl Riff {
                 .cursor(if overview { gpui::CursorStyle::PointingHand } else { gpui::CursorStyle::IBeam })
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |riff, e, _, cx| match overview {
-                        true => riff.overview_down(e, cx),
-                        false => riff.detail_down(e, cx),
+                    cx.listener(move |odeion, e, _, cx| match overview {
+                        true => odeion.overview_down(e, cx),
+                        false => odeion.detail_down(e, cx),
                     }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |riff, e, _, cx| riff.strip_menu(&right, e, cx)),
+                    cx.listener(move |odeion, e, _, cx| odeion.strip_menu(&right, e, cx)),
                 )
                 .child(paint_wave(strip.clone(), view).absolute().size_full())
         };
@@ -4819,9 +4819,9 @@ impl Riff {
             .border_1()
             .border_color(gpui::transparent_black())
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(rgb(t.accent_soft)).border_color(rgb(t.focus)))
-            .on_drop(cx.listener(|riff, dropped: &ExternalPaths, _, cx| {
-                if let Some(song) = riff.now.as_ref().map(|n| n.path.clone()) {
-                    riff.add_variation(song, dropped.paths().to_vec());
+            .on_drop(cx.listener(|odeion, dropped: &ExternalPaths, _, cx| {
+                if let Some(song) = odeion.now.as_ref().map(|n| n.path.clone()) {
+                    odeion.add_variation(song, dropped.paths().to_vec());
                 }
                 cx.notify();
             }))
@@ -4892,8 +4892,8 @@ impl Riff {
                         }))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
-                                riff.menu = Some((Menu::stem(i, muted, soloed), e.position));
+                            cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
+                                odeion.menu = Some((Menu::stem(i, muted, soloed), e.position));
                                 cx.notify();
                             }),
                         )
@@ -4962,11 +4962,11 @@ impl Riff {
                         .opacity(if heard { 1.0 } else { 0.35 })
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |riff, e, _, cx| riff.strip_down(&down, e, cx)),
+                            cx.listener(move |odeion, e, _, cx| odeion.strip_down(&down, e, cx)),
                         )
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |riff, e, _, cx| riff.strip_menu(&right, e, cx)),
+                            cx.listener(move |odeion, e, _, cx| odeion.strip_menu(&right, e, cx)),
                         )
                         .child(
                             paint_wave(
@@ -5028,9 +5028,9 @@ impl Riff {
                 .cursor(gpui::CursorStyle::ResizeLeftRight)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                    cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        riff.shaping = Some(Shaping { i, start, x: e.position.x, moved: false });
+                        odeion.shaping = Some(Shaping { i, start, x: e.position.x, moved: false });
                         cx.notify();
                     }),
                 )
@@ -5065,14 +5065,14 @@ impl Riff {
                 .child(div().truncate().child(name))
                 .child(handle(i, true))
                 .child(handle(i, false))
-                .on_click(cx.listener(move |riff, _, _, cx| {
-                    riff.play_region(&region);
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    odeion.play_region(&region);
                     cx.notify();
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
-                        riff.menu = Some((Menu::section(i), e.position));
+                    cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
+                        odeion.menu = Some((Menu::section(i), e.position));
                         cx.notify();
                     }),
                 )
@@ -5082,14 +5082,14 @@ impl Riff {
         let tools = match asking {
             Some((i, name)) => pill()
                 .child(
-                    self.choice("section-delete-for-good", &format!("Delete {name} for good"), "", t.danger, cx, move |riff| {
-                        riff.deleting_section = None;
-                        riff.remove_region(i);
+                    self.choice("section-delete-for-good", &format!("Delete {name} for good"), "", t.danger, cx, move |odeion| {
+                        odeion.deleting_section = None;
+                        odeion.remove_region(i);
                     })
                     .max_w(px(240.))
                     .overflow_hidden(),
                 )
-                .child(self.button("section-keep", "x", "Keep it", &[], false, cx, |riff, _, _| riff.deleting_section = None)),
+                .child(self.button("section-keep", "x", "Keep it", &[], false, cx, |odeion, _, _| odeion.deleting_section = None)),
             None => pill()
                 .child(self.tool("region-save", "bookmark-plus", "Save the loop as a section, or rename its section", Action::SaveRegion, false, cx))
                 .child(self.button(
@@ -5099,7 +5099,7 @@ impl Riff {
                     &[Action::RemoveRegion],
                     false,
                     cx,
-                    |riff, _, _| riff.ask_delete_section(riff.region_in_play()),
+                    |odeion, _, _| odeion.ask_delete_section(odeion.region_in_play()),
                 )),
         };
         Some(div().flex().items_center().gap_2().child(lane).child(tools).into_any_element())
@@ -5140,8 +5140,8 @@ impl Riff {
                 .child(ui::icon(if i == 0 { "music" } else { "layers" }, 14., if lit { t.accent } else { t.text_dim }))
                 .child(div().max_w(px(160.)).truncate().child(name.clone()))
                 .tooltip(self.tip(format!("Play {}", if i == 0 { "the song itself".to_string() } else { name }), &[Action::Variation]))
-                .on_click(cx.listener(move |riff, _, _, cx| {
-                    riff.select_recording(i);
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    odeion.select_recording(i);
                     cx.notify();
                 }))
         });
@@ -5161,9 +5161,9 @@ impl Riff {
                             &[Action::RemoveVariation],
                             false,
                             cx,
-                            |riff, _, _| {
-                                let removing = riff.removing_variation.take();
-                                riff.remove_variation(removing, true);
+                            |odeion, _, _| {
+                                let removing = odeion.removing_variation.take();
+                                odeion.remove_variation(removing, true);
                             },
                         ))
                     }),
@@ -5176,8 +5176,8 @@ impl Riff {
                     .id("speed-slider")
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(|riff, e: &MouseDownEvent, _, cx| {
-                            riff.menu = Some((Menu::speed(), e.position));
+                        cx.listener(|odeion, e: &MouseDownEvent, _, cx| {
+                            odeion.menu = Some((Menu::speed(), e.position));
                             cx.notify();
                         }),
                     )
@@ -5269,9 +5269,9 @@ impl Riff {
             // Right-click anywhere along it: the loop's menu.
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
                     let edges = looping.start.is_some() || looping.end.is_some();
-                    riff.menu = Some((Menu::looping(looping.active(), looping.looping(), edges, marker), e.position));
+                    odeion.menu = Some((Menu::looping(looping.active(), looping.looping(), edges, marker), e.position));
                     cx.notify();
                 }),
             )
@@ -5402,8 +5402,8 @@ impl Riff {
                 .cursor_pointer()
                 .hover(|d| d.text_color(rgb(t.accent_text)).underline())
                 .tooltip(self.tip(what.to_string(), &[action]))
-                .on_click(cx.listener(move |riff, _, _, cx| {
-                    riff.show(track.clone(), artist);
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    odeion.show(track.clone(), artist);
                     cx.notify();
                 }))
                 .child(text)
@@ -5590,8 +5590,8 @@ impl Riff {
                         .child(p.name.clone()),
                 )
                 .when(has, |d| d.child(ui::icon("check", 14., t.text_dim)))
-                .on_click(cx.listener(move |riff, _, _, cx| {
-                    riff.pick_playlist(i);
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    odeion.pick_playlist(i);
                     cx.notify();
                 }))
         });
@@ -5608,22 +5608,22 @@ impl Riff {
                 .gap_2()
                 .rounded_md()
                 .bg(rgb(t.raised))
-                .on_mouse_down_out(cx.listener(|riff, _, _, cx| {
-                    if let Some(picker) = &mut riff.add_to {
+                .on_mouse_down_out(cx.listener(|odeion, _, _, cx| {
+                    if let Some(picker) = &mut odeion.add_to {
                         picker.naming = None;
                     }
                     cx.notify();
                 }))
                 .child(ui::icon("plus", 14., t.accent))
                 .child(div().flex_1().min_w_0().truncate().text_sm().text_color(rgb(t.text)).child(format!("{name}▏")))
-                .child(self.choice("new-playlist-cancel", "Cancel", "Esc", t.text, cx, |riff| {
-                    if let Some(picker) = &mut riff.add_to {
+                .child(self.choice("new-playlist-cancel", "Cancel", "Esc", t.text, cx, |odeion| {
+                    if let Some(picker) = &mut odeion.add_to {
                         picker.naming = None;
                     }
                 }))
-                .child(self.choice("new-playlist-create", "Create", "Enter", t.accent_text, cx, |riff| {
-                    let name = riff.add_to.as_ref().and_then(|p| p.naming.clone()).unwrap_or_default();
-                    riff.create_playlist(&name);
+                .child(self.choice("new-playlist-create", "Create", "Enter", t.accent_text, cx, |odeion| {
+                    let name = odeion.add_to.as_ref().and_then(|p| p.naming.clone()).unwrap_or_default();
+                    odeion.create_playlist(&name);
                 }))
                 .into_any_element(),
             None => {
@@ -5647,16 +5647,16 @@ impl Riff {
                             .text_color(rgb(t.text))
                             .child("New playlist…"),
                     )
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        riff.pick_playlist(new_at);
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        odeion.pick_playlist(new_at);
                         cx.notify();
                     }))
                     .into_any_element()
             }
         };
         overlay("add-to")
-            .on_click(cx.listener(|riff, _, _, cx| {
-                riff.add_to = None;
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                odeion.add_to = None;
                 cx.notify();
             }))
             .child(
@@ -5689,7 +5689,7 @@ impl Riff {
                                     .child(div().text_color(rgb(t.text)).child("Add to a playlist"))
                                     .child(div().truncate().text_sm().text_color(rgb(t.text_dim)).child(title)),
                             )
-                            .child(self.button("picker-close", "x", "Close", &[], false, cx, |riff, _, _| riff.add_to = None)),
+                            .child(self.button("picker-close", "x", "Close", &[], false, cx, |odeion, _, _| odeion.add_to = None)),
                     )
                     .children(rows)
                     .child(new_row)
@@ -5711,7 +5711,7 @@ impl Riff {
         let named = self.playlists.get(i)?;
         let songs: Vec<&Track> = named.songs.iter().filter_map(|p| self.by_path.get(p).map(|&j| &self.tracks[j])).collect();
         let seconds = songs.iter().map(|t| t.seconds).sum::<Option<u64>>();
-        let small = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff)| {
+        let small = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Odeion)| {
             div()
                 .id(id)
                 .size(px(28.))
@@ -5723,8 +5723,8 @@ impl Riff {
                 .hover(|d| d.bg(rgb(t.hover)))
                 .child(ui::icon(icon, 14., t.text))
                 .tooltip(self.tip(what, &[]))
-                .on_click(cx.listener(move |riff, _, _, cx| {
-                    act(riff);
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    act(odeion);
                     cx.notify();
                 }))
         };
@@ -5750,8 +5750,8 @@ impl Riff {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(self.choice("playlist-rename-cancel", "Cancel", "Esc", t.text, cx, |riff| riff.renaming_playlist = None))
-                .child(self.choice("playlist-rename-save", "Save", "Enter", t.accent_text, cx, |riff| riff.rename_playlist()))
+                .child(self.choice("playlist-rename-cancel", "Cancel", "Esc", t.text, cx, |odeion| odeion.renaming_playlist = None))
+                .child(self.choice("playlist-rename-save", "Save", "Enter", t.accent_text, cx, |odeion| odeion.rename_playlist()))
         } else if self.deleting_playlist {
             div()
                 .flex()
@@ -5769,22 +5769,22 @@ impl Riff {
                         .text_color(rgb(t.danger))
                         .hover(|d| d.bg(rgb(t.hover)))
                         .child("Delete for good")
-                        .on_click(cx.listener(|riff, _, _, cx| {
-                            riff.delete_playlist();
+                        .on_click(cx.listener(|odeion, _, _, cx| {
+                            odeion.delete_playlist();
                             cx.notify();
                         })),
                 )
-                .child(small("delete-cancel", "x", "Keep it", |riff| riff.deleting_playlist = false))
+                .child(small("delete-cancel", "x", "Keep it", |odeion| odeion.deleting_playlist = false))
         } else {
             div()
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(small("playlist-rename", "pencil", "Rename the playlist", |riff| {
-                    let name = riff.playlist_view.and_then(|i| riff.playlists.get(i)).map(|p| p.name.clone());
-                    riff.renaming_playlist = name;
+                .child(small("playlist-rename", "pencil", "Rename the playlist", |odeion| {
+                    let name = odeion.playlist_view.and_then(|i| odeion.playlists.get(i)).map(|p| p.name.clone());
+                    odeion.renaming_playlist = name;
                 }))
-                .child(small("playlist-delete", "trash-2", "Delete the playlist", |riff| riff.deleting_playlist = true))
+                .child(small("playlist-delete", "trash-2", "Delete the playlist", |odeion| odeion.deleting_playlist = true))
         };
         Some(
             div()
@@ -5797,8 +5797,8 @@ impl Riff {
                 .when(!renaming, |d| d.on_mouse_down(MouseButton::Right, opens_menu(|| Menu::shown(Shown::Playlist), cx)))
                 // While renaming, a click anywhere else cancels, as Esc does.
                 .when(renaming, |d| {
-                    d.on_mouse_down_out(cx.listener(|riff, _, _, cx| {
-                        riff.renaming_playlist = None;
+                    d.on_mouse_down_out(cx.listener(|odeion, _, _, cx| {
+                        odeion.renaming_playlist = None;
                         cx.notify();
                     }))
                 })
@@ -5963,7 +5963,7 @@ impl Riff {
         let eq = self.settings.eq;
         let name = crate::eq::name_of(&eq, &self.settings.eq_presets);
         let saved = self.settings.eq_presets.iter().any(|p| p.name == name);
-        let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff)| {
+        let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Odeion)| {
             div()
                 .id(id)
                 .size(px(28.))
@@ -5975,8 +5975,8 @@ impl Riff {
                 .hover(|d| d.bg(rgb(t.hover)))
                 .child(ui::icon(icon, 14., t.text))
                 .tooltip(self.tip(what, &[]))
-                .on_click(cx.listener(move |riff, _, _, cx| {
-                    act(riff);
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    act(odeion);
                     cx.notify();
                 }))
         };
@@ -6025,23 +6025,23 @@ impl Riff {
                         .child(fill)
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                            cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
-                                riff.eq_sheet = Some(i);
+                                odeion.eq_sheet = Some(i);
                                 if e.click_count == 2 {
                                     // A double click puts it back to 0.
-                                    riff.set_eq_column(i, 0, true);
+                                    odeion.set_eq_column(i, 0, true);
                                 } else {
-                                    riff.eq_drag_to(i, pressed.get(), e.position.y, false);
-                                    riff.eq_drag = Some((i, pressed.clone()));
+                                    odeion.eq_drag_to(i, pressed.get(), e.position.y, false);
+                                    odeion.eq_drag = Some((i, pressed.clone()));
                                 }
                                 cx.notify();
                             }),
                         )
-                        .on_scroll_wheel(cx.listener(move |riff, e: &gpui::ScrollWheelEvent, _, cx| {
+                        .on_scroll_wheel(cx.listener(move |odeion, e: &gpui::ScrollWheelEvent, _, cx| {
                             let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
                             if dy != 0. {
-                                riff.nudge_eq(i, if dy < 0. { 1 } else { -1 });
+                                odeion.nudge_eq(i, if dy < 0. { 1 } else { -1 });
                                 cx.notify();
                             }
                         })),
@@ -6062,8 +6062,8 @@ impl Riff {
                 .flex()
                 .items_center()
                 .gap_2()
-                .on_mouse_down_out(cx.listener(|riff, _, _, cx| {
-                    riff.eq_naming = None;
+                .on_mouse_down_out(cx.listener(|odeion, _, _, cx| {
+                    odeion.eq_naming = None;
                     cx.notify();
                 }))
                 .child(div().text_sm().text_color(rgb(t.text_dim)).child("Save as"))
@@ -6080,13 +6080,13 @@ impl Riff {
                         .text_color(rgb(t.text))
                         .child(format!("{typed}▏")),
                 )
-                .child(self.choice("eq-name-cancel", "Cancel", "Esc", t.text, cx, |riff| riff.eq_naming = None))
-                .child(self.choice("eq-name-save", "Save", "Enter", t.accent_text, cx, |riff| riff.save_eq_named())),
+                .child(self.choice("eq-name-cancel", "Cancel", "Esc", t.text, cx, |odeion| odeion.eq_naming = None))
+                .child(self.choice("eq-name-save", "Save", "Enter", t.accent_text, cx, |odeion| odeion.save_eq_named())),
             None => div()
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(button("eq-prev", "chevron-left", "Previous preset", |riff| riff.eq_step(false)))
+                .child(button("eq-prev", "chevron-left", "Previous preset", |odeion| odeion.eq_step(false)))
                 .child(
                     div()
                         .w(px(150.))
@@ -6096,20 +6096,20 @@ impl Riff {
                         .text_color(rgb(if eq.on { t.text } else { t.text_dim }))
                         .child(name.clone()),
                 )
-                .child(button("eq-next", "chevron-right", "Next preset", |riff| riff.eq_step(true)))
+                .child(button("eq-next", "chevron-right", "Next preset", |odeion| odeion.eq_step(true)))
                 .child(div().flex_1())
-                .child(button("eq-save", "bookmark-plus", "Save as a preset", |riff| {
-                    let name = crate::eq::name_of(&riff.settings.eq, &riff.settings.eq_presets);
-                    let saved = riff.settings.eq_presets.iter().any(|p| p.name == name);
-                    riff.eq_naming = Some(if saved { name } else { String::new() });
+                .child(button("eq-save", "bookmark-plus", "Save as a preset", |odeion| {
+                    let name = crate::eq::name_of(&odeion.settings.eq, &odeion.settings.eq_presets);
+                    let saved = odeion.settings.eq_presets.iter().any(|p| p.name == name);
+                    odeion.eq_naming = Some(if saved { name } else { String::new() });
                 }))
                 .when(saved, |d| {
-                    d.child(button("eq-remove", "bookmark-minus", "Remove this preset", |riff| riff.remove_eq_preset()))
+                    d.child(button("eq-remove", "bookmark-minus", "Remove this preset", |odeion| odeion.remove_eq_preset()))
                 }),
         };
         overlay("eq-sheet")
-            .on_click(cx.listener(|riff, _, _, cx| {
-                (riff.eq_sheet, riff.eq_naming) = (None, None);
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                (odeion.eq_sheet, odeion.eq_naming) = (None, None);
                 cx.notify();
             }))
             .child(
@@ -6151,8 +6151,8 @@ impl Riff {
                                     .hover(|d| d.bg(rgb(t.hover)))
                                     .child(if eq.on { "on" } else { "off" })
                                     .tooltip(self.tip("EQ on or off (e)", &[]))
-                                    .on_click(cx.listener(|riff, _, _, cx| {
-                                        riff.change_eq(true, |eq| eq.on = !eq.on);
+                                    .on_click(cx.listener(|odeion, _, _, cx| {
+                                        odeion.change_eq(true, |eq| eq.on = !eq.on);
                                         cx.notify();
                                     })),
                             )
@@ -6205,9 +6205,9 @@ impl Riff {
                     .cursor_pointer()
                     .hover(|d| d.bg(rgb(t.hover)))
                     .child(ui::icon(icon, 14., t.text))
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        riff.trainer_sheet = Some(i);
-                        riff.nudge_trainer(field, up);
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        odeion.trainer_sheet = Some(i);
+                        odeion.nudge_trainer(field, up);
                         cx.notify();
                     }))
             };
@@ -6233,8 +6233,8 @@ impl Riff {
         });
         let rows: Vec<_> = rows.collect();
         overlay("trainer-sheet")
-            .on_click(cx.listener(|riff, _, _, cx| {
-                riff.trainer_sheet = None;
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                odeion.trainer_sheet = None;
                 cx.notify();
             }))
             .child(
@@ -6255,7 +6255,7 @@ impl Riff {
                         self.sheet_header(
                             "trending-up",
                             "Speed trainer",
-                            self.button("trainer-close", "x", "Close", &[], false, cx, |riff, _, _| riff.trainer_sheet = None),
+                            self.button("trainer-close", "x", "Close", &[], false, cx, |odeion, _, _| odeion.trainer_sheet = None),
                         )
                         .pb_3(),
                     )
@@ -6311,8 +6311,8 @@ impl Riff {
                 .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(key))
         };
         overlay("naming")
-            .on_click(cx.listener(|riff, _, _, cx| {
-                (riff.naming, riff.renaming) = (None, None);
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                (odeion.naming, odeion.renaming) = (None, None);
                 cx.notify();
             }))
             .child(
@@ -6361,12 +6361,12 @@ impl Riff {
                             .flex()
                             .justify_end()
                             .gap_2()
-                            .child(action("naming-cancel", "Cancel", "Esc", false).on_click(cx.listener(|riff, _, _, cx| {
-                                (riff.naming, riff.renaming) = (None, None);
+                            .child(action("naming-cancel", "Cancel", "Esc", false).on_click(cx.listener(|odeion, _, _, cx| {
+                                (odeion.naming, odeion.renaming) = (None, None);
                                 cx.notify();
                             })))
-                            .child(action("naming-save", "Save", "Enter", true).on_click(cx.listener(|riff, _, _, cx| {
-                                riff.name_region();
+                            .child(action("naming-save", "Save", "Enter", true).on_click(cx.listener(|odeion, _, _, cx| {
+                                odeion.name_region();
                                 cx.notify();
                             }))),
                     ),
@@ -6412,8 +6412,8 @@ impl Riff {
                     },
                     tip,
                 ))
-                .on_click(cx.listener(move |riff, _, _, cx| {
-                    riff.go_to(to);
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    odeion.go_to(to);
                     cx.notify();
                 }))
         };
@@ -6453,8 +6453,8 @@ impl Riff {
                     d.child(div().font_family(MONO).text_xs().text_color(rgb(t.accent_text)).child(self.queue.len().to_string()))
                 })
                 .tooltip(self.tip("The queue", &[Action::QueueFocus]))
-                .on_click(cx.listener(|riff, _, _, cx| {
-                    riff.sidebar = true;
+                .on_click(cx.listener(|odeion, _, _, cx| {
+                    odeion.sidebar = true;
                     cx.notify();
                 }));
             return div()
@@ -6488,8 +6488,8 @@ impl Riff {
                         .hover(|d| d.bg(rgb(t.hover)))
                         .child(ui::icon("list-music", 14., if self.playlist_view.is_some() { t.accent } else { t.text_dim }))
                         .tooltip(self.tip("Playlists", &[]))
-                        .on_click(cx.listener(|riff, _, _, cx| {
-                            riff.sidebar = true;
+                        .on_click(cx.listener(|odeion, _, _, cx| {
+                            odeion.sidebar = true;
                             cx.notify();
                         })),
                 )
@@ -6523,8 +6523,8 @@ impl Riff {
                     .child(div().flex_1().min_w_0().truncate().child(p.name.clone()))
                     .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(count.to_string()))
                     .tooltip(self.tip("Open it; right-click to play, rename or delete it", &[]))
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        riff.open_playlist(i);
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        odeion.open_playlist(i);
                         cx.notify();
                     }))
                     .on_mouse_down(MouseButton::Right, opens_menu(move || Menu::playlist(i), cx))
@@ -6540,7 +6540,7 @@ impl Riff {
             .filter_map(|(i, path)| {
                 let track = self.track_at(path)?;
                 let on = lit == Some(i);
-                let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff, usize)| {
+                let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Odeion, usize)| {
                     div()
                         .id((id, i))
                         .size(px(HIT))
@@ -6553,9 +6553,9 @@ impl Riff {
                         .hover(|d| d.bg(rgb(t.hover)))
                         .child(ui::icon(icon, 13., t.text))
                         .tooltip(self.tip(what, &[]))
-                        .on_click(cx.listener(move |riff, _, _, cx| {
+                        .on_click(cx.listener(move |odeion, _, _, cx| {
                             cx.stop_propagation();
-                            act(riff, i);
+                            act(odeion, i);
                             cx.notify();
                         }))
                 };
@@ -6575,14 +6575,14 @@ impl Riff {
                         .when(!on, |d| d.hover(|d| d.bg(rgb(t.hover))))
                         // Its buttons show only under the pointer, so the tooltip says so.
                         .tooltip(self.tip("Click to play it now; to the top and remove at its right; right-click for more", &[]))
-                        .on_click(cx.listener(move |riff, _, _, cx| {
-                            riff.play_queued(i);
+                        .on_click(cx.listener(move |odeion, _, _, cx| {
+                            odeion.play_queued(i);
                             cx.notify();
                         }))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
-                                riff.menu = Some((Menu::queued(i), e.position));
+                            cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
+                                odeion.menu = Some((Menu::queued(i), e.position));
                                 cx.notify();
                             }),
                         )
@@ -6618,9 +6618,9 @@ impl Riff {
                                 .pl_2()
                                 .bg(rgb(if on { t.selection } else { t.hover }))
                                 .when(!on, |d| d.opacity(0.).group_hover("queue-row", |s| s.opacity(1.)))
-                                .child(button("queue-top", "arrow-up-to-line", "To the top", |riff, i| riff.queue.to_top(i)))
-                                .child(button("queue-remove", "x", "Remove from the queue", |riff, i| {
-                                    riff.queue.remove(i);
+                                .child(button("queue-top", "arrow-up-to-line", "To the top", |odeion, i| odeion.queue.to_top(i)))
+                                .child(button("queue-remove", "x", "Remove from the queue", |odeion, i| {
+                                    odeion.queue.remove(i);
                                 })),
                         ),
                 )
@@ -6707,7 +6707,7 @@ impl Riff {
                             }))
                             // Clearing asks once more: "clear all", or keep it.
                             .when(!self.queue.is_empty(), |d| {
-                                let text = |id: &'static str, label: &'static str, colour: u32, click: fn(&mut Riff)| {
+                                let text = |id: &'static str, label: &'static str, colour: u32, click: fn(&mut Odeion)| {
                                     div()
                                         .id(id)
                                         .h(px(HIT))
@@ -6719,18 +6719,18 @@ impl Riff {
                                         .text_color(rgb(colour))
                                         .hover(|d| d.bg(rgb(t.hover)))
                                         .child(label)
-                                        .on_click(cx.listener(move |riff, _, _, cx| {
-                                            click(riff);
+                                        .on_click(cx.listener(move |odeion, _, _, cx| {
+                                            click(odeion);
                                             cx.notify();
                                         }))
                                 };
                                 match self.clearing_queue {
                                     true => d
-                                        .child(text("queue-clear-all", "clear all", t.danger, |riff| {
-                                            (riff.queue, riff.queue_at, riff.clearing_queue) = (Queue::default(), None, false);
+                                        .child(text("queue-clear-all", "clear all", t.danger, |odeion| {
+                                            (odeion.queue, odeion.queue_at, odeion.clearing_queue) = (Queue::default(), None, false);
                                         }))
-                                        .child(text("queue-keep", "keep", t.text, |riff| riff.clearing_queue = false)),
-                                    false => d.child(text("queue-clear", "clear", t.text_dim, |riff| riff.clearing_queue = true)),
+                                        .child(text("queue-keep", "keep", t.text, |odeion| odeion.clearing_queue = false)),
+                                    false => d.child(text("queue-clear", "clear", t.text_dim, |odeion| odeion.clearing_queue = true)),
                                 }
                             }),
                     )
@@ -6862,8 +6862,8 @@ impl Riff {
                             .text_color(rgb(t.text_dim))
                             .child(format!("{} songs", ui::count(counts[i]))),
                     })
-                    .on_click(cx.listener(move |riff, _, _, cx| {
-                        if let Some(prefs) = &mut riff.prefs {
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        if let Some(prefs) = &mut odeion.prefs {
                             prefs.row = i;
                         }
                         cx.notify();
@@ -6880,9 +6880,9 @@ impl Riff {
                             .tooltip(self.tip("Remove this folder", &[]))
                             .hover(|d| d.bg(rgb(t.hover)))
                             .child(ui::icon("x", 14., t.text_dim))
-                            .on_click(cx.listener(move |riff, _, _, cx| {
+                            .on_click(cx.listener(move |odeion, _, _, cx| {
                                 cx.stop_propagation();
-                                riff.remove_folder(i);
+                                odeion.remove_folder(i);
                                 cx.notify();
                             })),
                     ),
@@ -6891,8 +6891,8 @@ impl Riff {
         body = body
             .child(
                 row(("add", 0), lit(folders.len()), "plus", "Add folder…".into()).on_click(
-                    cx.listener(|riff, _, _, cx| {
-                        riff.pick_folders(cx);
+                    cx.listener(|odeion, _, _, cx| {
+                        odeion.pick_folders(cx);
                         cx.notify();
                     }),
                 ),
@@ -6901,10 +6901,10 @@ impl Riff {
             .child(
                 row(("appearance", 0), lit(folders.len() + 1), "palette", match theme::is_own(&self.settings.theme) {
                     true => format!("Appearance: {}", self.settings.appearance.label()),
-                    false => format!("Appearance: from the editor theme; Enter for riff's {}", self.settings.appearance.label()),
+                    false => format!("Appearance: from the editor theme; Enter for Odeion's {}", self.settings.appearance.label()),
                 })
-                    .on_click(cx.listener(|riff, _, _, cx| {
-                        riff.next_appearance(cx);
+                    .on_click(cx.listener(|odeion, _, _, cx| {
+                        odeion.next_appearance(cx);
                         cx.notify();
                     })),
             );
@@ -6916,8 +6916,8 @@ impl Riff {
         body = match &prefs.picker {
             None => body.child(
                 row(("theme", 0), lit(folders.len() + 2), "palette", theme_label)
-                    .on_click(cx.listener(|riff, _, _, cx| {
-                        riff.open_picker(cx);
+                    .on_click(cx.listener(|odeion, _, _, cx| {
+                        odeion.open_picker(cx);
                         cx.notify();
                     })),
             ),
@@ -6951,9 +6951,9 @@ impl Riff {
                     div()
                         .flex()
                         .flex_col()
-                        .on_scroll_wheel(cx.listener(|riff, e: &gpui::ScrollWheelEvent, _, cx| {
+                        .on_scroll_wheel(cx.listener(|odeion, e: &gpui::ScrollWheelEvent, _, cx| {
                             let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
-                            let Some(picker) = riff.prefs.as_mut().and_then(|p| p.picker.as_mut()) else { return };
+                            let Some(picker) = odeion.prefs.as_mut().and_then(|p| p.picker.as_mut()) else { return };
                             let rows = ui::wheel_rows(&mut picker.wheel, dy, 20.);
                             let n = picker.shown().len();
                             if rows == 0 || n == 0 {
@@ -6967,13 +6967,13 @@ impl Riff {
                         }))
                         .children(shown.into_iter().enumerate().skip(first).take(PICKER_ROWS).flat_map(|(i, theme)| {
                             let chosen = theme.clone();
-                            // Riff's own first, the editor themes under a heading of their own.
+                            // Odeion's own first, the editor themes under a heading of their own.
                             let heading = (theme.editor && (i == first || !editors[i - 1]))
                                 .then(|| title("Editor themes (experimental)").into_any_element());
                             let row = row(("pick", i), i == picker.selected, "palette", theme.name.clone())
                                 .children((theme.saved() == self.settings.theme).then(|| ui::icon("check", 14., t.text_dim)))
-                                .on_click(cx.listener(move |riff, _, _, cx| {
-                                    riff.keep_theme(chosen.clone(), cx);
+                                .on_click(cx.listener(move |odeion, _, _, cx| {
+                                    odeion.keep_theme(chosen.clone(), cx);
                                     cx.notify();
                                 }))
                                 .into_any_element();
@@ -6985,8 +6985,8 @@ impl Riff {
         let keyboard_label = if self.vim() { "Keyboard: Vim" } else { "Keyboard: Mac" };
         body = body.child(title("Keys")).child(
             row(("keyboard", 0), lit(folders.len() + 3), "keyboard", keyboard_label.into()).on_click(
-                cx.listener(|riff, _, _, cx| {
-                    riff.toggle_keyboard();
+                cx.listener(|odeion, _, _, cx| {
+                    odeion.toggle_keyboard();
                     cx.notify();
                 }),
             ),
@@ -7000,8 +7000,8 @@ impl Riff {
         body = body.child(title("Output"));
         body = match prefs.choosing {
             None => body.child(
-                row(("output", 0), lit(folders.len() + 4), "headphones", output).on_click(cx.listener(|riff, _, _, cx| {
-                    riff.open_outputs();
+                row(("output", 0), lit(folders.len() + 4), "headphones", output).on_click(cx.listener(|odeion, _, _, cx| {
+                    odeion.open_outputs();
                     cx.notify();
                 })),
             ),
@@ -7012,8 +7012,8 @@ impl Riff {
                 body.children(entries.enumerate().map(|(i, (name, id))| {
                     row(("pick-output", i), i == at, "headphones", name)
                         .children((id == self.settings.output).then(|| ui::icon("check", 14., t.text_dim)))
-                        .on_click(cx.listener(move |riff, _, _, cx| {
-                            riff.choose_output(i);
+                        .on_click(cx.listener(move |odeion, _, _, cx| {
+                            odeion.choose_output(i);
                             cx.notify();
                         }))
                 }))
@@ -7023,15 +7023,15 @@ impl Riff {
         let custom = custom_data_dir();
         let label = if custom { tilde(&data) } else { format!("The default, {}", tilde(&data)) };
         body = body.child(title("Data")).child(
-            row(("data", 0), lit(folders.len() + 5), "folder", label).on_click(cx.listener(|riff, _, _, cx| {
-                riff.pick_data_dir(cx);
+            row(("data", 0), lit(folders.len() + 5), "folder", label).on_click(cx.listener(|odeion, _, _, cx| {
+                odeion.pick_data_dir(cx);
                 cx.notify();
             })),
         );
         if custom {
             body = body.child(
                 row(("data", 1), lit(folders.len() + 6), "x", "Back to the default folder".into()).on_click(
-                    cx.listener(|riff, _, _, cx| riff.switch_data_dir(None, cx)),
+                    cx.listener(|odeion, _, _, cx| odeion.switch_data_dir(None, cx)),
                 ),
             );
         }
@@ -7043,8 +7043,8 @@ impl Riff {
         };
 
         overlay("prefs")
-            .on_click(cx.listener(|riff, _, _, cx| {
-                riff.close_prefs();
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                odeion.close_prefs();
                 cx.notify();
             }))
             .child(
@@ -7296,8 +7296,8 @@ fn overlay(id: &'static str) -> Stateful<Div> {
 }
 
 /// A folder as people write it: `~/Music` rather than `/Users/tim/Music`.
-impl Riff {
-    /// The list before any folder is added: what riff wants, and a button for it.
+impl Odeion {
+    /// The list before any folder is added: what odeion wants, and a button for it.
     /// The first of an action's keys in `mode`, for a hint ("or press p").
     fn first_key(&self, action: Action, mode: keys::Mode) -> Option<&'static str> {
         keys::keys_for(action, mode, self.settings.keyboard).first().copied()
@@ -7370,11 +7370,11 @@ impl Riff {
                 .child(ui::icon(icon, 14., t.accent))
                 .child(div().text_sm().text_color(rgb(t.accent_text)).child(label))
                 .tooltip(self.tip(tip, keys))
-                .on_click(cx.listener(move |riff, _, _, cx| {
+                .on_click(cx.listener(move |odeion, _, _, cx| {
                     match button {
-                        empty::Button::AddFolder => riff.pick_folders(cx),
-                        empty::Button::Settings => riff.act(Action::Settings, cx),
-                        empty::Button::SearchEverything => riff.widen_search(),
+                        empty::Button::AddFolder => odeion.pick_folders(cx),
+                        empty::Button::Settings => odeion.act(Action::Settings, cx),
+                        empty::Button::SearchEverything => odeion.widen_search(),
                     }
                     cx.notify();
                 }))
@@ -7403,7 +7403,7 @@ fn system_dark(appearance: gpui::WindowAppearance) -> bool {
     matches!(appearance, gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark)
 }
 
-/// Whether riff keeps its data somewhere other than the default this run.
+/// Whether odeion keeps its data somewhere other than the default this run.
 fn custom_data_dir() -> bool {
     state::data_dir() != state::default_data_dir()
 }
@@ -7416,7 +7416,7 @@ fn tilde(path: &std::path::Path) -> String {
     }
 }
 
-impl Render for Riff {
+impl Render for Odeion {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The practice view glides with the music: drawn every frame while it plays, the
         // playhead smoothed between the player's position updates.
@@ -7460,21 +7460,21 @@ impl Render for Riff {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .on_mouse_move(cx.listener(Self::drag))
-            .on_mouse_up(MouseButton::Left, cx.listener(|riff, _, _, cx| {
+            .on_mouse_up(MouseButton::Left, cx.listener(|odeion, _, _, cx| {
                 // `|`, not `||`: both drags end, whichever was on.
-                if riff.scrubbing.take().is_some()
-                    | riff.grab.take().is_some()
-                    | riff.drop_slider()
-                    | riff.drop_pan()
-                    | riff.drop_sweep()
+                if odeion.scrubbing.take().is_some()
+                    | odeion.grab.take().is_some()
+                    | odeion.drop_slider()
+                    | odeion.drop_pan()
+                    | odeion.drop_sweep()
                 {
                     cx.notify();
                 }
-                if riff.eq_drag.take().is_some() {
-                    riff.save_settings();
+                if odeion.eq_drag.take().is_some() {
+                    odeion.save_settings();
                     cx.notify();
                 }
-                riff.drop_edge(cx)
+                odeion.drop_edge(cx)
             }))
             .relative()
             .size_full()
@@ -7567,8 +7567,8 @@ impl Render for Riff {
                                                         uniform_list(
                                                             "library",
                                                             self.rows.len(),
-                                                            cx.processor(|riff, range: std::ops::Range<usize>, _window, cx| {
-                                                                range.map(|ix| riff.render_row(ix, cx)).collect::<Vec<_>>()
+                                                            cx.processor(|odeion, range: std::ops::Range<usize>, _window, cx| {
+                                                                range.map(|ix| odeion.render_row(ix, cx)).collect::<Vec<_>>()
                                                             }),
                                                         )
                                                         .track_scroll(&self.scroll)

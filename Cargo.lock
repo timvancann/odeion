@@ -3815,6 +3815,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "odeion"
+version = "0.2.0"
+dependencies = [
+ "gpui-pre",
+ "gpui-pre-platform",
+ "image",
+ "lofty",
+ "rodio",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "signalsmith-stretch",
+ "souvlaki",
+ "symphonia",
+]
+
+[[package]]
 name = "ogg_pager"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4566,23 +4583,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 dependencies = [
  "bytemuck",
-]
-
-[[package]]
-name = "riff"
-version = "0.1.0"
-dependencies = [
- "gpui-pre",
- "gpui-pre-platform",
- "image",
- "lofty",
- "rodio",
- "rustfft",
- "serde",
- "serde_json",
- "signalsmith-stretch",
- "souvlaki",
- "symphonia",
 ]
 
 [[package]]

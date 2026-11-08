@@ -18,7 +18,7 @@ jobs:
       - run: cargo test
       - run: cargo build --release
 
-  # Windows is a trial (2026-11-08): it builds riff.exe to try, warnings allowed, and
+  # Windows is a trial (2026-11-08): it builds odeion.exe to try, warnings allowed, and
   # its tests don't fail the run yet.
   windows:
     runs-on: windows-latest
@@ -29,7 +29,7 @@ jobs:
       - run: cargo build --release
       - uses: actions/upload-artifact@v4
         with:
-          name: riff-windows
-          path: target/release/riff.exe
+          name: odeion-windows
+          path: target/release/odeion.exe
       - run: cargo test
         continue-on-error: true

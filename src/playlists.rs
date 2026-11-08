@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn playlists_survive_a_save_and_a_missing_file_is_none() {
-        let file = std::env::temp_dir().join(format!("riff-playlists-{}.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("odeion-playlists-{}.json", std::process::id()));
         let mut p = Playlists::default();
         p.create("Gig").unwrap();
         p.add(0, Path::new("/m/a.mp3"));

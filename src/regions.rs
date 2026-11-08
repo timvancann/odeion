@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn regions_survive_a_save() {
-        let file = std::env::temp_dir().join(format!("riff-regions-{}.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("odeion-regions-{}.json", std::process::id()));
         let mut r = Regions::default();
         r.save(Path::new("/m/a.mp3"), region("Solo", 1.5, 2.25));
         r.store(&file).unwrap();

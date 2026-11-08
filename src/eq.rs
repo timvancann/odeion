@@ -86,7 +86,7 @@ fn preset(name: &str, preamp: i8, bands: [i8; 10]) -> Preset {
     Preset { name: name.into(), preamp, bands }
 }
 
-/// The presets riff comes with. Boosting ones lower the preamp a little to leave room.
+/// The presets Odeion comes with. Boosting ones lower the preamp a little to leave room.
 pub fn built_in() -> Vec<Preset> {
     vec![
         preset("Flat", 0, [0; 10]),

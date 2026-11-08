@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn beats_come_from_the_cache_until_the_song_changes() {
-        let dir = std::env::temp_dir().join(format!("riff-beats-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("odeion-beats-{}", std::process::id()));
         let song = dir.join("song.wav");
         std::fs::create_dir_all(&dir).unwrap();
         // Not audio at all: only a cache hit can produce beats for it.

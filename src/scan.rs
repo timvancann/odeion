@@ -111,9 +111,9 @@ pub fn why(e: &std::io::Error) -> String {
         ErrorKind::NotFound => "it isn't there (moved, renamed, or on a drive that isn't connected)".into(),
         // macOS's privacy settings refuse with "operation not permitted".
         ErrorKind::PermissionDenied if cfg!(target_os = "macos") => {
-            "macOS doesn't let riff in (System Settings, Privacy & Security, Files and Folders)".into()
+            "macOS doesn't let Odeion in (System Settings, Privacy & Security, Files and Folders)".into()
         }
-        ErrorKind::PermissionDenied => "riff isn't allowed to read it".into(),
+        ErrorKind::PermissionDenied => "Odeion isn't allowed to read it".into(),
         ErrorKind::NotADirectory => "it's a file, not a folder".into(),
         _ => plain(&e.to_string()),
     }
@@ -135,7 +135,7 @@ pub fn plain(error: &str) -> String {
     }
 }
 
-/// The kinds of file riff plays, as their names are usually written: "MP3", "FLAC".
+/// The kinds of file odeion plays, as their names are usually written: "MP3", "FLAC".
 pub fn formats() -> Vec<String> {
     AUDIO.iter().map(|e| e.to_uppercase()).collect()
 }
@@ -286,11 +286,24 @@ fn thumbnail(data: &[u8], covers: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
+/// The cached library. A cover is a file in `covers/` beside it, named by its content; one
+/// kept under another folder (a data folder moved or renamed) is found there again.
 pub fn load_cache(path: &Path) -> Vec<Track> {
-    std::fs::read(path)
+    let mut tracks: Vec<Track> = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let covers = path.with_file_name("covers");
+    for track in &mut tracks {
+        if let Some(cover) = &track.cover
+            && !cover.exists()
+            && let Some(name) = cover.file_name()
+            && covers.join(name).exists()
+        {
+            track.cover = Some(covers.join(name));
+        }
+    }
+    tracks
 }
 
 pub fn save_cache(path: &Path, tracks: &[Track]) {
@@ -371,6 +384,23 @@ mod tests {
     }
 
     #[test]
+    fn covers_are_found_beside_a_moved_cache() {
+        let dir = std::env::temp_dir().join(format!("odeion-covers-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("covers")).unwrap();
+        std::fs::write(dir.join("covers/abc.jpg"), b"x").unwrap();
+        let mut moved = cached("/m/A/B/01 X.mp3", 1, 1);
+        moved.cover = Some("/gone/riff/covers/abc.jpg".into());
+        let mut lost = cached("/m/A/B/02 Y.mp3", 1, 1);
+        lost.cover = Some("/gone/riff/covers/def.jpg".into());
+        save_cache(&dir.join("library.json"), &[moved, lost]);
+        let tracks = load_cache(&dir.join("library.json"));
+        assert_eq!(tracks[0].cover.as_deref(), Some(dir.join("covers/abc.jpg").as_path()));
+        // A cover that isn't there either keeps its path; nothing is invented.
+        assert_eq!(tracks[1].cover.as_deref(), Some(Path::new("/gone/riff/covers/def.jpg")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn deleted_files_drop_out() {
         let (tracks, _) = merge(&["/m".into()], vec![], vec![cached("/m/A/B/01 X.mp3", 1, 1)], &[]);
         assert!(tracks.is_empty());
@@ -414,7 +444,7 @@ mod tests {
 
     #[test]
     fn walks_audio_only_and_skips_the_music_inbox() {
-        let root = std::env::temp_dir().join(format!("riff-walk-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("odeion-walk-{}", std::process::id()));
         let album = root.join("Artist/Album");
         let inbox = root.join("Automatically Add to Music.localized");
         let media = root.join("Media.localized/Music/Band/Record");
@@ -445,7 +475,7 @@ mod tests {
     #[cfg(unix)] // shuts the folder with Unix permissions
     fn a_folder_below_that_cant_be_opened_is_listed_as_missed() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("riff-missed-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("odeion-missed-{}", std::process::id()));
         let shut = root.join("Shut");
         std::fs::create_dir_all(&shut).unwrap();
         std::fs::write(root.join("01 Song.mp3"), b"x").unwrap();
@@ -460,7 +490,7 @@ mod tests {
 
     #[test]
     fn a_listed_folder_that_cant_be_opened_is_reported() {
-        let root = std::env::temp_dir().join(format!("riff-unreadable-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("odeion-unreadable-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("01 Song.mp3"), b"x").unwrap();
         let gone = root.join("Not here");
@@ -484,12 +514,12 @@ mod tests {
         assert_eq!(plain("Unrecognized format"), "unrecognized format");
         assert_eq!(plain("MP3 frame broken"), "MP3 frame broken");
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        let says = if cfg!(target_os = "macos") { "macOS doesn't let riff in" } else { "riff isn't allowed" };
+        let says = if cfg!(target_os = "macos") { "macOS doesn't let Odeion in" } else { "Odeion isn't allowed" };
         assert!(why(&denied).starts_with(says));
     }
 
     #[test]
-    fn formats_come_from_the_extensions_riff_reads() {
+    fn formats_come_from_the_extensions_odeion_reads() {
         let formats = formats();
         assert!(formats.contains(&"MP3".to_string()) && formats.contains(&"FLAC".to_string()));
         assert!(formats.iter().all(|f| is_audio(Path::new(&format!("x.{f}")))));

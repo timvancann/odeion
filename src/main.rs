@@ -30,7 +30,7 @@ use gpui::{
 fn main() {
     gpui_platform::application()
         .with_assets(ui::Assets)
-        // On macOS GPUI keeps running without a window; riff has no menu bar or other
+        // On macOS GPUI keeps running without a window; odeion has no menu bar or other
         // way back, so closing the window quits (the window saves first, see `view`).
         .with_quit_mode(gpui::QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
@@ -56,14 +56,14 @@ fn main() {
                     // On a Mac the theme's background runs up behind the traffic lights;
                     // elsewhere the system draws its own title bar and buttons.
                     titlebar: Some(TitlebarOptions {
-                        title: Some("riff".into()),
+                        title: Some("Odeion".into()),
                         appears_transparent: cfg!(target_os = "macos"),
-                        // Centred in riff's 40 px title bar (the lights are 12 px).
+                        // Centred in odeion's 40 px title bar (the lights are 12 px).
                         traffic_light_position: Some(point(px(14.), px(14.))),
                     }),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| view::Riff::new(window, cx)),
+                |window, cx| cx.new(|cx| view::Odeion::new(window, cx)),
             )
             .unwrap();
             cx.activate(true);

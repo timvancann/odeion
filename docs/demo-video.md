@@ -23,7 +23,7 @@ it), above the two screenshots in the README.
 
 ### Library (about 25 s)
 
-1. Empty riff: "Where is your music?", pick a music folder, the songs appear.
+1. Empty Odeion: "Where is your music?", pick a music folder, the songs appear.
 2. Scroll fast, then jump with the letter rail.
 3. Play a song from the list.
 4. Search for a song (with the Mac keys, just start typing).
@@ -53,7 +53,7 @@ like real practice, and the hook comes before the slower trainer part.
 ## Before recording
 
 - **Use a demo data folder** (settings, at the bottom), so step 1 happens on an empty
-  riff and your own library stays private. A fresh data folder starts with the Mac keys
+  Odeion and your own library stays private. A fresh data folder starts with the Mac keys
   and the T3 scheme on Auto; pick Light or Dark on purpose for the video.
 - **A local music folder, not Drive**: a cloud-only first scan stalls on camera.
 - **Show the keys** with a keystroke overlay such as KeyCastr. Viewers can't see what

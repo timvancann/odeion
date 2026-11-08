@@ -1,5 +1,5 @@
-//! How riff looks: the active colours, the embedded fonts and icons, and small drawing
-//! helpers. Riff Dark keeps Jasmijn's gold, so the two read as siblings.
+//! How Odeion looks: the active colours, the embedded fonts and icons, and small drawing
+//! helpers. Gold Dark keeps Jasmijn's gold, so the two read as siblings.
 
 use gpui::{App, AssetSource, IntoElement, Result, SharedString, Styled, px, rgb, svg};
 use std::borrow::Cow;

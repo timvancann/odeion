@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Files of riff's that couldn't be read this run, each moved aside as it was found.
+/// Files of odeion's that couldn't be read this run, each moved aside as it was found.
 static SET_ASIDE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-/// Reads one of riff's JSON files; none there gives the default. One that can't be read
+/// Reads one of odeion's JSON files; none there gives the default. One that can't be read
 /// or understood (a sync conflict, a hand edit gone wrong) is renamed to
 /// `<name>.broken` first, so the next save can't overwrite what it held.
 pub fn load_json<T: DeserializeOwned + Default>(file: &Path) -> T {
@@ -36,7 +36,7 @@ pub fn broken(file: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The files moved aside so far, once: riff says so when it opens.
+/// The files moved aside so far, once: odeion says so when it opens.
 pub fn take_set_aside() -> Vec<PathBuf> {
     SET_ASIDE.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default()
 }
@@ -46,32 +46,45 @@ fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 
-/// Where riff keeps its data unless another folder is chosen in settings. It also holds
+/// Where odeion keeps its data unless another folder is chosen in settings. It also holds
 /// the note naming that other folder. Each system's usual place: Application Support on
 /// a Mac, `%APPDATA%` on Windows, `$XDG_DATA_HOME` (or `~/.local/share`) on Linux.
 pub fn default_data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
-        home().join("Library/Application Support/riff")
+        home().join("Library/Application Support/odeion")
     } else if cfg!(windows) {
-        PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("riff")
+        PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("odeion")
     } else {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
             .unwrap_or_else(|| home().join(".local/share"))
-            .join("riff")
+            .join("odeion")
     }
 }
 
-/// Where riff keeps its data this run: the folder chosen in settings, or the default.
-/// Read once, so a new choice only takes effect when riff opens again.
+/// Where odeion keeps its data this run: the folder chosen in settings, or the default.
+/// Read once, so a new choice only takes effect when odeion opens again.
 pub fn data_dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        let default = default_data_dir();
+        let default = move_from_riff(&default_data_dir());
         chosen_data_dir(&default).unwrap_or(default)
     })
     .clone()
+}
+
+/// Odeion was called riff until 2026-11-08: the default data folder of that name, beside
+/// `default`, becomes this one, once, when this one doesn't exist yet. Its note naming a
+/// chosen folder comes along, and covers are found again by `scan::load_cache`. Returns
+/// the folder to use: the old one still, if it couldn't be moved, rather than starting
+/// empty while everything sits beside it.
+pub fn move_from_riff(default: &Path) -> PathBuf {
+    let old = default.with_file_name("riff");
+    if !default.exists() && old.is_dir() && std::fs::rename(&old, default).is_err() {
+        return old;
+    }
+    default.to_path_buf()
 }
 
 /// The note in the default data folder that names the folder chosen in settings.
@@ -106,11 +119,11 @@ pub fn choose_data_dir(default: &Path, dir: Option<&Path>) -> std::io::Result<()
 #[serde(default)]
 pub struct Settings {
     pub folders: Vec<PathBuf>,
-    /// Riff's own Light or Dark, or Auto. Files from before it get Dark, what they showed.
+    /// Odeion's own Light or Dark, or Auto. Files from before it get Dark, what they showed.
     #[serde(default = "crate::theme::Appearance::before")]
     pub appearance: crate::theme::Appearance,
-    /// The scheme: "T3" (a new install's), empty for Riff, or an editor theme's name.
-    /// Files from before T3 keep Riff, what they showed; old files' "Gold" was Riff.
+    /// The scheme: "T3" (a new install's), empty for Gold, or an editor theme's name.
+    /// Files from before T3 keep Gold, what they showed (and old files' "Gold" too).
     #[serde(default)]
     pub theme: String,
     pub window: Option<Placement>,
@@ -249,6 +262,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_data_folder_from_before_the_rename_moves_once() {
+        let parent = std::env::temp_dir().join(format!("odeion-rename-{}", std::process::id()));
+        let (old, new) = (parent.join("riff"), parent.join("odeion"));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("settings.json"), b"{}").unwrap();
+        assert_eq!(move_from_riff(&new), new);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(new.join("settings.json")).unwrap(), b"{}");
+        // With both there, nothing moves: the new one is never overwritten.
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("settings.json"), b"old").unwrap();
+        assert_eq!(move_from_riff(&new), new);
+        assert_eq!(std::fs::read(new.join("settings.json")).unwrap(), b"{}");
+        assert_eq!(std::fs::read(old.join("settings.json")).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
     fn toggling_twice_unmarks() {
         let mut f = Favorites::default();
         assert!(f.toggle(Path::new("/a")));
@@ -259,8 +291,8 @@ mod tests {
 
     #[test]
     fn a_chosen_data_folder_is_kept_and_the_default_clears_it() {
-        let default = std::env::temp_dir().join(format!("riff-data-{}", std::process::id()));
-        let demo = PathBuf::from("/tmp/riff demo");
+        let default = std::env::temp_dir().join(format!("odeion-data-{}", std::process::id()));
+        let demo = PathBuf::from("/tmp/odeion demo");
         assert_eq!(chosen_data_dir(&default), None);
         choose_data_dir(&default, Some(&demo)).unwrap();
         assert_eq!(chosen_data_dir(&default), Some(demo));
@@ -281,7 +313,7 @@ mod tests {
 
     #[test]
     fn settings_survive_a_save_and_missing_fields_default() {
-        let file = std::env::temp_dir().join(format!("riff-settings-{}.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("odeion-settings-{}.json", std::process::id()));
         let s = Settings {
             folders: vec!["/music".into(), "/more".into()],
             appearance: crate::theme::Appearance::Light,
@@ -299,7 +331,7 @@ mod tests {
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s);
         std::fs::write(&file, br#"{"theme": "Tokyo Night"}"#).unwrap();
-        // No folder until one is added: riff starts empty.
+        // No folder until one is added: odeion starts empty.
         assert!(Settings::load(&file).folders.is_empty());
         // Settings from before volume and output play at full, through the system's.
         assert_eq!(Settings::load(&file).volume, 1.0);
@@ -311,7 +343,7 @@ mod tests {
 
     #[test]
     fn a_file_that_cant_be_read_is_kept_aside_not_overwritten() {
-        let file = std::env::temp_dir().join(format!("riff-broken-{}.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("odeion-broken-{}.json", std::process::id()));
         let aside = broken(&file);
         let _ = std::fs::remove_file(&aside);
         std::fs::write(&file, br#"{"folders": ["/m"], "#).unwrap();
@@ -333,7 +365,7 @@ mod tests {
     #[test]
     fn old_files_pick_the_keyboard_from_vim_and_new_ones_get_mac() {
         use crate::keys::Keyboard;
-        let file = std::env::temp_dir().join(format!("riff-keyboard-{}.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("odeion-keyboard-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&file);
         assert_eq!(Settings::load(&file).keyboard, Keyboard::Mac);
         std::fs::write(&file, br#"{"vim": true}"#).unwrap();
@@ -354,11 +386,11 @@ mod tests {
     #[test]
     fn old_files_keep_looking_as_they_did_and_new_installs_follow_macos() {
         use crate::theme::Appearance;
-        let file = std::env::temp_dir().join(format!("riff-appearance-{}.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("odeion-appearance-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&file);
         let new = Settings::load(&file);
         assert_eq!((new.appearance, new.theme.as_str()), (Appearance::Auto, crate::theme::T3));
-        // Gold, the old built-in, is riff's own Dark.
+        // Gold, the old built-in, is odeion's own Dark.
         std::fs::write(&file, br#"{"theme": "Gold"}"#).unwrap();
         let gold = Settings::load(&file);
         assert_eq!((gold.appearance, gold.theme.as_str()), (Appearance::Dark, ""));

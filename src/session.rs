@@ -1,4 +1,4 @@
-//! What riff was showing when it closed, so it opens the same way: the song that was
+//! What odeion was showing when it closed, so it opens the same way: the song that was
 //! playing (its recording, playhead and loops are in `resume.rs`), the highlighted
 //! song, the view and the practice view's grid and zoom. Kept in `session.json` in the
 //! data folder. Songs are named by path, so one that has gone is simply not restored.
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn a_session_survives_a_save_and_a_missing_file_is_a_fresh_start() {
-        let file = std::env::temp_dir().join(format!("riff-session-{}.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("odeion-session-{}.json", std::process::id()));
         let session = Session {
             playing: Some("/m/song.mp3".into()),
             selected: Some("/m/other.mp3".into()),

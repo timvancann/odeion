@@ -1,7 +1,7 @@
-//! Colours, by role. Riff's own palettes, Dark and Light (the Appearance setting picks
+//! Colours, by role. Odeion's own palettes, Dark and Light (the Appearance setting picks
 //! one, Auto following macOS), and the Zed themes installed on this Mac as editor themes
 //! (experimental): only their surfaces, text and accent are used, the practice colours
-//! (loop, sections, marker, playhead, waveform) always riff's for the theme's lightness.
+//! (loop, sections, marker, playhead, waveform) always odeion's for the theme's lightness.
 
 use crate::library::fold;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use std::sync::RwLock;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     pub name: String,
-    /// One of the installed Zed themes rather than riff's own.
+    /// One of the installed Zed themes rather than odeion's own.
     pub editor: bool,
     pub dark: bool,
     /// The window, title bar, list and input fields.
@@ -69,25 +69,25 @@ pub struct Theme {
     pub scrim: u8,
 }
 
-/// The name riff's own theme goes by in the theme picker.
-pub const OWN: &str = "Riff";
-/// Riff's default scheme, light and dark: the greys and the blue of T3 Code
+/// The name odeion's own theme goes by in the theme picker.
+pub const OWN: &str = "Gold";
+/// Odeion's default scheme, light and dark: the greys and the blue of T3 Code
 /// (github.com/pingdotgg/t3code), whose look it follows.
 pub const T3: &str = "T3";
 
 impl Theme {
-    /// What `settings.json` keeps for this theme: its name, nothing for riff's own.
+    /// What `settings.json` keeps for this theme: its name, nothing for odeion's own.
     pub fn saved(&self) -> String {
         if !self.editor && self.name == OWN { String::new() } else { self.name.clone() }
     }
 }
 
-/// Whether a saved theme is one of riff's own schemes, which follow the Appearance.
+/// Whether a saved theme is one of odeion's own schemes, which follow the Appearance.
 pub fn is_own(saved: &str) -> bool {
     saved.is_empty() || saved == T3
 }
 
-/// Riff Dark: warm near-black and the gold, a touch brighter than Jasmijn's.
+/// Gold Dark: warm near-black and the gold, a touch brighter than Jasmijn's.
 pub fn dark() -> Theme {
     Theme {
         name: OWN.to_string(),
@@ -132,7 +132,7 @@ pub fn dark() -> Theme {
     }
 }
 
-/// Riff Light: warm paper, ochre for lines, bronze for text, the bright gold only as a
+/// Gold Light: warm paper, ochre for lines, bronze for text, the bright gold only as a
 /// fill with dark text on it.
 pub fn light() -> Theme {
     Theme {
@@ -269,7 +269,7 @@ pub fn t3_dark() -> Theme {
     }
 }
 
-/// Which of riff's palettes to draw with: Auto follows macOS.
+/// Which of odeion's palettes to draw with: Auto follows macOS.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
@@ -303,7 +303,7 @@ impl Appearance {
     }
 }
 
-/// The palette of riff's own scheme `saved` (T3, else Riff) for `appearance`, with
+/// The palette of odeion's own scheme `saved` (T3, else Gold) for `appearance`, with
 /// macOS dark or not right now.
 pub fn own(saved: &str, appearance: Appearance, system_dark: bool) -> Theme {
     let dark_now = match appearance {
@@ -319,7 +319,7 @@ pub fn own(saved: &str, appearance: Appearance, system_dark: bool) -> Theme {
     }
 }
 
-/// Riff's own schemes for `appearance`, as the theme picker lists them: T3, the
+/// Odeion's own schemes for `appearance`, as the theme picker lists them: T3, the
 /// default, first.
 pub fn owns(appearance: Appearance, system_dark: bool) -> Vec<Theme> {
     vec![own(T3, appearance, system_dark), own("", appearance, system_dark)]
@@ -481,8 +481,8 @@ fn colour(value: &Value, under: u32) -> Option<u32> {
 
 /// One Zed theme (an entry of a theme file's `themes` list) as an editor theme. Its
 /// lightness from `appearance` or its background; surfaces stepped from its background
-/// as riff's own are; its text made readable; its accent only when it shows on its
-/// controls and stands apart from the practice marks. The rest is riff's palette of the
+/// as odeion's own are; its text made readable; its accent only when it shows on its
+/// controls and stands apart from the practice marks. The rest is odeion's palette of the
 /// same lightness, never the other one's.
 pub fn from_zed(theme: &Value) -> Option<Theme> {
     let name = theme["name"].as_str()?.to_string();
@@ -505,7 +505,7 @@ pub fn from_zed(theme: &Value) -> Option<Theme> {
     Some(tries.into_iter().find(readable_on).unwrap_or(fallback))
 }
 
-/// An editor theme with its surfaces stepped `scale` times as far as riff's own are.
+/// An editor theme with its surfaces stepped `scale` times as far as odeion's own are.
 fn derive(name: &str, style: &Value, background: Option<u32>, dark: bool, scale: f64) -> Theme {
     let own = if dark { self::dark() } else { light() };
     let bg = background.unwrap_or(own.bg);
@@ -559,9 +559,9 @@ pub fn zed_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Every theme on offer: riff's own schemes (`owns`) first, then the editor themes by
+/// Every theme on offer: odeion's own schemes (`owns`) first, then the editor themes by
 /// name. Unreadable files are skipped; a theme name seen twice keeps its first file, and
-/// an editor theme named like one of riff's own is left out.
+/// an editor theme named like one of odeion's own is left out.
 pub fn available(dirs: &[PathBuf], owns: Vec<Theme>) -> Vec<Theme> {
     let mut zed: Vec<Theme> = dirs
         .iter()
@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn every_palette_of_riffs_own_passes_every_contrast_check() {
+    fn every_palette_of_odeions_own_passes_every_contrast_check() {
         assert_eq!(failing(&dark(), &[]), Vec::<String>::new());
         assert_eq!(failing(&light(), &[]), Vec::<String>::new());
         assert_eq!(failing(&t3_dark(), &[]), Vec::<String>::new());
@@ -739,7 +739,7 @@ mod tests {
         assert_eq!(own("", Appearance::Dark, false), dark());
         assert_eq!(own(T3, Appearance::Auto, true), t3_dark());
         assert_eq!(own(T3, Appearance::Light, true), t3_light());
-        // A name that isn't one of riff's own (an editor theme gone) gets Riff.
+        // A name that isn't one of odeion's own (an editor theme gone) gets Gold.
         assert_eq!(own("Gone", Appearance::Dark, false), dark());
         assert_eq!(Appearance::default(), Appearance::Auto);
     }
@@ -783,7 +783,7 @@ mod tests {
     ];
 
     #[test]
-    fn an_editor_theme_keeps_its_surfaces_and_text_and_riffs_practice_colours() {
+    fn an_editor_theme_keeps_its_surfaces_and_text_and_odeions_practice_colours() {
         let t = from_zed(&tokyo()).unwrap();
         assert!(t.editor && t.dark);
         assert_eq!(t.name, "Tokyo Night");
@@ -793,10 +793,10 @@ mod tests {
         // Lighter step by step, in its own blue.
         assert!(luminance(t.bg) < luminance(t.surface) && luminance(t.surface) < luminance(t.raised));
         assert!(luminance(t.raised) < luminance(t.hover) && luminance(t.hover) < luminance(t.track));
-        // Its cyan accent is too like the loop's: riff's gold instead.
+        // Its cyan accent is too like the loop's: odeion's gold instead.
         assert_eq!(t.accent, dark().accent);
-        for (mine, riffs) in [(t.loops, dark().loops), (t.section, dark().section), (t.marker, dark().marker), (t.playhead, dark().playhead), (t.wave_played, dark().wave_played), (t.danger, dark().danger)] {
-            assert_eq!(mine, riffs);
+        for (mine, odeions) in [(t.loops, dark().loops), (t.section, dark().section), (t.marker, dark().marker), (t.playhead, dark().playhead), (t.wave_played, dark().wave_played), (t.danger, dark().danger)] {
+            assert_eq!(mine, odeions);
         }
         assert_eq!(failing(&t, EDITOR_CHECKS), Vec::<String>::new());
         assert_eq!(t.saved(), "Tokyo Night");
@@ -809,7 +809,7 @@ mod tests {
         // Its muted text was too faint; nudged darker until it reads.
         assert_ne!(t.text_dim, 0x9699a3);
         assert_eq!(failing(&t, EDITOR_CHECKS), Vec::<String>::new());
-        // Its dark red accent is too like the marker: riff's ochre, darkened to show on
+        // Its dark red accent is too like the marker: odeion's ochre, darkened to show on
         // this theme's greyer controls.
         assert_ne!(t.accent, 0x8c4351);
         assert!((oklch(t.accent)[2] - oklch(light().accent)[2]).abs() < 0.1);
@@ -875,7 +875,7 @@ mod tests {
         let names = |q: &str| -> Vec<String> { filter(&themes, q).into_iter().map(|t| t.name.clone()).collect() };
         assert_eq!(names(""), [OWN, "Tokyo Night", "Tokyo Night Light"]);
         assert_eq!(names("light tok"), ["Tokyo Night Light"]);
-        assert_eq!(names("RIFF"), [OWN]);
+        assert_eq!(names("GOLD"), [OWN]);
         assert!(names("dracula").is_empty());
     }
 
@@ -885,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn riffs_own_saves_as_nothing_and_t3_by_name() {
+    fn odeions_own_saves_as_nothing_and_t3_by_name() {
         assert_eq!(dark().saved(), "");
         assert_eq!(light().saved(), "");
         assert_eq!(t3_dark().saved(), T3);
@@ -893,8 +893,8 @@ mod tests {
     }
 
     #[test]
-    fn every_variant_in_a_file_commented_files_too_and_riff_first() {
-        let dir = std::env::temp_dir().join(format!("riff-themes-{}", std::process::id()));
+    fn every_variant_in_a_file_commented_files_too_and_odeion_first() {
+        let dir = std::env::temp_dir().join(format!("odeion-themes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("tokyo.json"), json!({"themes": [tokyo(), tokyo_light()]}).to_string()).unwrap();
         std::fs::write(
@@ -904,7 +904,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("broken.json"), b"{not json").unwrap();
         std::fs::write(dir.join("notes.txt"), b"ignored").unwrap();
-        // An editor theme can't take the name of one of riff's own.
+        // An editor theme can't take the name of one of odeion's own.
         std::fs::write(
             dir.join("t3.json"),
             json!({"themes": [{"name": T3, "style": {"background": "#222"}}]}).to_string(),

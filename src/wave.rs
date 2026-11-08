@@ -23,7 +23,7 @@ const THREADS: usize = 8;
 const WARM_UP: f64 = 1.0;
 /// The most points read, 64 MB of them: over 6 hours at 44.1 kHz, 1.5 at 192. A damaged
 /// or crafted file can claim any length, sample rate or timestamp; trusting it would size
-/// the waveform to match and abort riff. A file claiming more is read from its packets,
+/// the waveform to match and abort odeion. A file claiming more is read from its packets,
 /// and stops here.
 const MOST: usize = 1 << 23;
 
@@ -324,7 +324,7 @@ mod tests {
         out.extend_from_slice(b"data");
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
         out.extend_from_slice(&data);
-        let path = std::env::temp_dir().join(format!("riff-wave-{}-{click}.wav", std::process::id()));
+        let path = std::env::temp_dir().join(format!("odeion-wave-{}-{click}.wav", std::process::id()));
         std::fs::write(&path, out).unwrap();
         path
     }

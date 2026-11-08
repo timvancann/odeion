@@ -1,7 +1,7 @@
 # Demo script
 
 What to say and what to press, in the recording order from `demo-video.md`. The video
-is for someone who found riff on GitHub and wants to know whether it's for them. Riff
+is for someone who found Odeion on GitHub and wants to know whether it's for them. Odeion
 is two things in one, a music player and library and a practice tool, so the video shows
 the player first and then the practice view, and says so at each turn. The lines say
 why a step matters and name what a key did when the screen doesn't show it
@@ -22,16 +22,16 @@ the solo, the stems on.
 | Say | Press |
 |---|---|
 | "This is the solo I can't play yet." | (the loop plays) |
-| "So riff loops it for me, over and over, and takes the guitar out." | `3` (the guitar's stem number) |
+| "So Odeion loops it for me, over and over, and takes the guitar out." | `3` (the guitar's stem number) |
 | "Now it's my turn." | (let it loop once more) |
 
 ## Intro
 
-Recorded at the start, over the empty riff.
+Recorded at the start, over the empty Odeion.
 
 | Say | Press |
 |---|---|
-| "This is riff. Half of it is a music player: your whole music folder, quick to search, with playlists and a queue. Put it on and listen." | |
+| "This is Odeion. Half of it is a music player: your whole music folder, quick to search, with playlists and a queue. Put it on and listen." | |
 | "The other half is a practice tool. Loop the hard part, slow it down, let a trainer speed it back up, or split the song into stems and take out the part you're learning." | |
 | "Same app, same songs, whether you're listening or learning. Everything is on the keyboard, and every key is a button too. First, the player." | |
 
@@ -40,7 +40,7 @@ Recorded at the start, over the empty riff.
 | | Say | Press |
 |---|---|---|
 | 1 | "It starts out empty and asks one thing: where's your music?" | `Enter`, pick the folder |
-| | "Riff reads the folder where it is. Nothing gets imported or copied, and from now on it opens instantly." | (let the scan finish) |
+| | "Odeion reads the folder where it is. Nothing gets imported or copied, and from now on it opens instantly." | (let the scan finish) |
 | 2 | "Scrolling is fine, but the letters on the right are faster." | scroll, then drag down the letter rail |
 | 3 | "Enter plays." | `↓` `↓` `Enter` |
 | 4 | "To find something, there's no box to click. Just start typing." | type part of a title |
@@ -60,9 +60,9 @@ Recorded at the start, over the empty riff.
 | 9 | "That's the player. When I want to learn a song, Tab takes it into practice. The whole song is on top, a close-up below it." | `Tab` |
 | 10 | "To loop the hard bit, drag across it. The loop is exact, so there's no hiccup where it jumps back." | drag across the waveform |
 | 11 | "The edges drag too. With the grid off, they go wherever I drop them." | drag a loop edge |
-| | "G turns on the beat grid. Riff found the beats when the song started, and now the edges snap to them. Even on old recordings where the band drifts." | `g`, drag the edge again |
+| | "G turns on the beat grid. Odeion found the beats when the song started, and now the edges snap to them. Even on old recordings where the band drifts." | `g`, drag the edge again |
 | 12 | "R saves the loop as a section, with a name, so it's still there tomorrow." | `r`, type `Solo`, `Enter` |
-| 13 | "I had this song split into stems: guitar, bass, drums and vocals. Drop the folder on the song and riff lines them up with it." | drag the stems folder onto the waveform |
+| 13 | "I had this song split into stems: guitar, bass, drums and vocals. Drop the folder on the song and Odeion lines them up with it." | drag the stems folder onto the waveform |
 | | "V switches between the original and the stems." | `v` |
 | | "Each stem has a number. Three takes the guitar out." | `3` |
 | | "Option-Two plays just the bass." | `⌥2` |
@@ -79,4 +79,4 @@ Recorded at the start, over the empty riff.
 | Say | Press |
 |---|---|
 | "Command-Question-mark lists every key. If you'd rather use the mouse, everything has a button and a right-click menu." | `⌘?`, then `Esc` |
-| "Put on an album, or learn the solo on track three. Riff is free for non-commercial use, and the code is on GitHub. That's riff." | `Space` |
+| "Put on an album, or learn the solo on track three. Odeion is free for non-commercial use, and the code is on GitHub. That's Odeion." | `Space` |

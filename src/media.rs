@@ -1,5 +1,5 @@
 //! The Mac's media keys and Now Playing: macOS sends play, pause, next and previous to
-//! whichever app last reported a song, so riff reports one and listens.
+//! whichever app last reported a song, so odeion reports one and listens.
 
 use crate::library::Track;
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
@@ -22,8 +22,8 @@ pub struct Media {
 impl Media {
     pub fn new() -> Option<Media> {
         let mut controls = MediaControls::new(PlatformConfig {
-            display_name: "riff",
-            dbus_name: "riff",
+            display_name: "Odeion",
+            dbus_name: "odeion",
             hwnd: None,
         })
         .ok()?;

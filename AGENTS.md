@@ -1,30 +1,31 @@
 # Working in this repo
 
-Riff is Tim's practice player: find a song in his music folder, play it, and practise
+Odeion (called riff until 2026-11-08, when Tim renamed it: "riff" was already the name
+of many repos and apps) is Tim's practice player: find a song in his music folder, play it, and practise
 it: loops to the sample, a marker, a waveform with beats, named sections, slow-down, and other
 recordings of the song (backing tracks, stem sets) to switch between. It began as a way
 into Transcribe! (whose file finding is painful) and grew into the practice tool, by
-Tim's choice. The Transcribe! button was removed on 2026-10-08: riff now does
+Tim's choice. The Transcribe! button was removed on 2026-10-08: Odeion now does
 everything Tim used it for. Practice features
-are in scope; ask before adding anything that turns riff into an editor or a DAW.
+are in scope; ask before adding anything that turns Odeion into an editor or a DAW.
 
 A single GPUI app on `gpui-pre` 0.3.9, the maintained snapshot of Zed's GPUI (pinned
 exactly, the version rsdisk and `gpui-component` 0.7.3 use; renamed to `gpui` in
 `Cargo.toml` so code says `gpui::`). Jasmijn's desktop app, whose patterns this copies,
-moves to the same version. Riff is macOS only, no network, no accounts.
+moves to the same version. Odeion is macOS only, no network, no accounts.
 
-**Riff is going public** (Tim, 2026-10-09), source-available under the PolyForm
+**Odeion is going public** (Tim, 2026-10-09), source-available under the PolyForm
 Noncommercial 1.0.0 licence (Tim, 2026-11-07, replacing the GPL-3.0: free for
 noncommercial use, commercial use needs his permission). Tim is still its
 main user and the keymap and design stay his, but the code is written for other people
 too:
 
 - Nothing personal in the code: no paths, names or accounts of Tim's. Defaults suit
-  anyone (riff starts with no music folder and asks for one); Tim's setup lives in his
+  anyone (Odeion starts with no music folder and asks for one); Tim's setup lives in his
   `settings.json`, never in the source.
-- `README.md` is for people who find the repo: what riff does, its inspiration and
+- `README.md` is for people who find the repo: what Odeion does, its inspiration and
   acknowledgements, no keymap (the ⌘? sheet is the reference). A feature that changes
-  what riff does updates the README in the same commit, and a new dependency or
+  what Odeion does updates the README in the same commit, and a new dependency or
   borrowed algorithm gets a line in its acknowledgements.
 - Screenshots in `docs/screenshots/` (`library.png`, `stems.png`) are Tim's to take.
 - Bundled assets need a licence that allows it, with the licence file beside them
@@ -45,9 +46,9 @@ and draws:
   way the songs known there stay listed as they were (`Walked::missed`), never taken
   for deleted: a Drive folder that didn't answer once would otherwise lose its songs'
   tags and covers to a slow re-read.
-- `empty.rs`: what riff says where there is nothing to show, each case in its own
+- `empty.rs`: what Odeion says where there is nothing to show, each case in its own
   words: the empty list (no folder, first scan with a live count, unreadable folders,
-  no songs with the formats riff plays, a search finding nothing, an empty playlist;
+  no songs with the formats Odeion plays, a search finding nothing, an empty playlist;
   `empty::why` picks which), the practice view before a waveform, no loop, the
   now-playing card before the first song, and the can't-read and can't-play messages.
   Keys come in from `keys::keys_for`, never written there.
@@ -91,11 +92,11 @@ and draws:
 - `resume.rs`: where each song was left (`resume.json`): its recording (song or
   variation), speed, playhead and each recording's loop, marker and stem levels. Old
   entries' slow-down preset (an index) is read as its percentage.
-- `session.rs`: what riff showed when it closed (`session.json`): the playing song,
-  the highlighted one, practice, album or artist view, grid and zoom. Riff opens that
+- `session.rs`: what Odeion showed when it closed (`session.json`): the playing song,
+  the highlighted one, practice, album or artist view, grid and zoom. Odeion opens that
   way, the song paused where it was (its recording, loops and playhead come from
   `resume.json`), never playing on its own. Saved within a second of a change, on ⌘Q
-  and when the window closes. Closing the window quits riff (`QuitMode::LastWindowClosed`
+  and when the window closes. Closing the window quits Odeion (`QuitMode::LastWindowClosed`
   in `main.rs`): GPUI's macOS default left a windowless process with no way back.
 - `regions.rs`: sections (still "regions" in the code and `regions.json`): named
   stretches per recording, in order; renaming the same stretch, dragging an edge,
@@ -104,22 +105,25 @@ and draws:
   app that last reported a song, not as key presses, so this is the only way in.
 - `state.rs`: paths, settings, favourites, and the data folder: the default, or one
   chosen in settings, named by a `data-folder` note in the default folder and read once
-  per run. Every JSON file of riff's loads through `state::load_json`: one that can't
-  be read is renamed `<name>.broken` before riff starts it afresh, and riff says so
+  per run. The default is each system's usual place (`odeion` in Application Support,
+  `%APPDATA%` or `~/.local/share`); the old `riff` folder beside it moves there once
+  (`move_from_riff`), and covers are found again beside a moved cache
+  (`scan::load_cache`). Every JSON file of Odeion's loads through `state::load_json`: one that can't
+  be read is renamed `<name>.broken` before Odeion starts it afresh, and Odeion says so
   when it opens, so a save never overwrites what it held. Quitting (⌘Q or closing the
   window) is held back when saving fails, the error showing; another quit within 10 s
   (`QUIT_AGAIN`) goes ahead. A session that failed to save is tried again.
 - `theme.rs`: colours by role (`bg`, `selection`, `accent_text`, `loops`, `marker`...).
-  Two schemes of riff's own, each a Light and a Dark picked by Appearance: Auto
+  Two schemes of Odeion's own, each a Light and a Dark picked by Appearance: Auto
   (follows macOS live), Light or Dark; Auto is the default. **T3**, the default for new
   installs (Tim, 2026-11-08): T3 Code's zinc greys and primary blue, read from its
-  stylesheet; the played wave is the blue, so its sections are amber. **Riff**:
-  Jasmijn's gold (Tim approved these palettes, the red marker and the cyan loop on
+  stylesheet; the played wave is the blue, so its sections are amber. **Gold** (riff's
+  own scheme before the rename, called Gold in the oldest settings too): Jasmijn's gold (Tim approved these palettes, the red marker and the cyan loop on
   2026-11-07, from screenshots); settings files from before T3 keep it. Saved as "T3"
   or "" (`Theme::saved`, `is_own`). Installed Zed themes are editor themes
   (experimental): only their surfaces, text and an accent that shows and stands apart
   from the practice marks; loop, sections, marker, playhead and waveform always come
-  from Riff's palette of the same lightness. Tests hold every palette of riff's own to
+  from Gold's palette of the same lightness. Tests hold every palette of Odeion's own to
   the contrast minimums (body text 7:1, dim 4.5:1, marks 3:1) and its marks apart with
   red-green colour blindness. `view.rs` only reads roles.
 
@@ -127,13 +131,13 @@ New behaviour gets its rule and tests in one of these, not in `view.rs`.
 
 ## The music library
 
-Riff scans the folders listed in ⌘, settings (`settings.json` in the data folder below),
+Odeion scans the folders listed in ⌘, settings (`settings.json` in the data folder below),
 none at first: the empty list asks for one (a button, or Enter). A track's Artist/Album
 path is read from the deepest listed folder holding it. Tags and embedded covers win
 over the path. A listed folder a scan can't open shows an error ("can't read
 ~/Music: ...") and "can't read" beside it in settings.
 
-Tim's library, the one riff is tested on, is a Google Drive folder laid out
+Tim's library, the one Odeion is tested on, is a Google Drive folder laid out
 `Artist/Album/NN Title.ext`, about 2,700 tracks of mp3, flac, wav and aiff, with
 correct tags and covers.
 
@@ -141,7 +145,7 @@ correct tags and covers.
   header took 1.6s and pulled about 4 MB. A full tag scan is then slow, and that is
   expected, not a bug. Tim has made the folder available offline, but new music arrives
   cloud-only.
-- **The cache makes startup instant.** `~/Library/Application Support/riff/` holds
+- **The cache makes startup instant.** `~/Library/Application Support/odeion/` holds
   `library.json` (tracks, re-read only when size or mtime changes), `covers/` (256px
   JPEG thumbnails named by content hash) and `favorites.json`. Deleting `library.json`
   forces a full rescan.
@@ -166,7 +170,7 @@ add a key to both or they fail.
   (`keys::starts_search`; Space and symbols like `+` `` ` `` `?` keep their commands),
   and the vim letters below don't exist. A key added to both goes in the shared column;
   plain arrows never replace Vim's hjkl.
-- **Modes, like vim**: the library (finding and playing songs; riff opens here unless
+- **Modes, like vim**: the library (finding and playing songs; Odeion opens here unless
   it was left in practice), search inside it, and practice (the practice view; the mode
   *is* the view). Tab or ⌘2 enters practice, Esc, Tab or ⌘1 leaves (Vim's `p` both); the title bar's
   Library / Practice switch does the same. Typing on the ⌘? sheet finds keys
@@ -200,7 +204,7 @@ add a key to both or they fail.
   keys have ↑ ↓ ⇧↑ ⇧↓ pitch and `l` for the loop.
 - **The ⌘ shortcuts always work, the same in both**: ⌘F search, ⌘P search on or off,
   ⌘D favourite, ⌘A album, ⇧⌘A artist, ⌘S shuffle, ⌘L to the playing song (in
-  practice, Follow), ⌘← ⌘→ previous and next, ⌘H hides riff (`cx.hide()`), ⌘1 ⌘2
+  practice, Follow), ⌘← ⌘→ previous and next, ⌘H hides Odeion (`cx.hide()`), ⌘1 ⌘2
   library or practice, ⌘O add a variation, ⌘N add to a playlist, ⌘E or ⌥⌘E the EQ,
   ⌘B or ⌃⌘S the sidebar, ⌘, settings, ⌘? keys, ⌘Q. In the library and search, arrows
   and ⌃J ⌃K move, Home End or ⌘↑ ⌘↓ go to the top or bottom, ⌥Enter queues and
@@ -238,7 +242,7 @@ add a key to both or they fail.
   Each entry is an `Action` showing its keys, done on what was clicked rather than at
   the playhead. They open at the pointer, take `j k` / ↑ ↓ and Enter, and close on Esc
   or a click elsewhere, which does nothing else. A ctrl-click opens them too, with no
-  code of riff's: GPUI's macOS layer turns a ctrl-left press into a right press. A
+  code of Odeion's: GPUI's macOS layer turns a ctrl-left press into a right press. A
   right-click on something inside another surface with a menu stops there
   (`opens_menu`), so the speed control and progress bar don't also open the card's.
 - **The practice view**: the list gives way to the song's loudness contour
@@ -249,9 +253,9 @@ add a key to both or they fail.
   (`wave::zoom_fit`). Dragging the box on the contour moves the detail view
   without moving the playhead (Tim, 2026-10-29: the view was tied to the playhead); it
   stays there until the toolbar's Follow, a section, `o` or another song, and a click
-  in the box that doesn't move still seeks (`wave::pan`, `Riff::panned`).
+  in the box that doesn't move still seeks (`wave::pan`, `Odeion::panned`).
   Under the waveform, the controls Tim reaches for with a guitar on his lap are large
-  buttons with names (`Riff::big`, 44 px): previous section, section start (the
+  buttons with names (`Odeion::big`, 44 px): previous section, section start (the
   section in play's start, else the loop's, never the marker: `Regions::restart`),
   play/pause, next section, loop, and replay (named for where `o` goes); the finer loop
   tools stay icons beside them. Section start has no key yet; Follow is ⌘L. Over the
@@ -350,7 +354,7 @@ add a key to both or they fail.
   the speakers and headphones; flat or off, samples pass straight through.
 - **Volume**: ⌥↑ ⌥↓ in 5% steps in every mode, and the slider beside the speed buttons
   (drag or scroll), from silent to full, no boost. Kept in settings.
-- **The output follows the system**: every second riff asks which device should play
+- **The output follows the system**: every second Odeion asks which device should play
   (the one chosen in settings while it is connected, otherwise the system's) and, when
   that changed, reopens the output and carries on from the same moment, playing or
   paused. Opening the stems again takes a moment, so a switch isn't seamless. That
@@ -358,30 +362,30 @@ add a key to both or they fail.
   `output_devices()` on a timer: cpal asks every device which formats it plays, about
   half a second here, and doing that every second made playback drop out.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker),
-  Appearance (Enter or a click cycles Auto, Light, Dark; it means riff's own theme, so
-  from an editor theme the first press goes back to riff's own), the
-  theme picker (T3 and Riff first, then "Editor themes (experimental)"), which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
+  Appearance (Enter or a click cycles Auto, Light, Dark; it means Odeion's own theme, so
+  from an editor theme the first press goes back to Odeion's own), the
+  theme picker (T3 and Gold first, then "Editor themes (experimental)"), which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
   Esc restores; it shows 8 themes, so the wheel over them moves the highlight too, and
   a click keeps one), the keyboard (Mac or Vim; Enter, Space or a click switches), and
   the output: Enter or a click opens a picker
   (the system's output, then each device, listed on a thread when it opens), ↑↓ or
   `j k` move, Enter or a click plays through it, Esc closes.
   Last, the data folder (for Tim's demos, kept apart from his own data): pick another
-  folder or go back to the default, and riff saves where everything is, then reopens
+  folder or go back to the default, and Odeion saves where everything is, then reopens
   from the new folder (`open -n` on the bundle, or the binary again from source).
-- **Every action has a button too**, built with `Riff::tool` (an icon, a tooltip and
-  the action, done through `Riff::act` exactly as its key would). Tooltips list keys
+- **Every action has a button too**, built with `Odeion::tool` (an icon, a tooltip and
+  the action, done through `Odeion::act` exactly as its key would). Tooltips list keys
   from `keys::keys_for`, which reads the ⌘? sheet through the real keymap, so they stay
   right if keys are ever remapped; never write a key into a tooltip by hand. A control
   that isn't an action (a sheet's ×, a menu opened by a click, a delete that asks
-  first) is `Riff::button`, its tooltip still naming the keys that do the same. Every
+  first) is `Odeion::button`, its tooltip still naming the keys that do the same. Every
   sheet has a × in its header. Icons live
-  in `assets/icons/`: Lucide's where one fits, riff's own (loop edges, widen, narrow,
+  in `assets/icons/`: Lucide's where one fits, Odeion's own (loop edges, widen, narrow,
   slide, beats, sections) drawn in the same stroke style from the loop's brackets. The
-  design is the "Riff controls and icons" canvas.
+  design is the "Riff controls and icons" canvas (named before the rename).
 - GPUI apps get no menu bar, so ⌘Q, ⌘M (minimise), ⌃⌘F (full screen) and every other
   ⌘ shortcut are handled by hand, and none collide with system menu items. ⌘H hides
-  riff the same way, through `cx.hide()`.
+  Odeion the same way, through `cx.hide()`.
 - **The letter rail** beside the full library (not in search, album or artist views):
   click or drag along `# A–Z` and the list glides (220 ms, eased, by setting the scroll
   offset each frame) to that letter's first artist below the favourites, highlighting
@@ -394,7 +398,7 @@ add a key to both or they fail.
   pushes it up, Tim's condition for this view). Search, album and artist views aren't
   grouped; album and artist views drop the columns their header already names. Artist
   rows are part of a section's run, so playing a song still queues up the whole list.
-- **The list has a scrollbar like Zed's**, drawn by riff (GPUI has none): a thin
+- **The list has a scrollbar like Zed's**, drawn by Odeion (GPUI has none): a thin
   thumb shown while the list moves and for a second after, or with the pointer on it.
   Dragging the thumb scrolls directly; a click elsewhere on the track glides there.
 - **The queue and the sidebar** (plan 02): ⌥Enter queues the highlighted song,
@@ -419,26 +423,26 @@ add a key to both or they fail.
 - **The app comes from `gpui-pre-platform`** (`gpui_platform::application()`):
   `gpui::Application` has no `new()` since 0.3. That crate needs its `font-kit`
   feature, or macOS draws no text at all. It also has `runtime_shaders`, which
-  compiles the Metal shaders when riff starts instead of at build time: the build-time
+  compiles the Metal shaders when Odeion starts instead of at build time: the build-time
   path needs the Metal toolchain, and `metal` failed here ("missing Metal Toolchain")
   even with the component installed. Drop the feature once `xcrun metal --version`
   works.
 
 ## Running and checking
 
-`just run` runs from source; `just install` builds `Riff.app` (icon rendered from
+`just run` runs from source; `just install` builds `Odeion.app` (icon rendered from
 `bundle/icon.svg` with resvg) into `~/Applications`. A pushed `v*` tag matching
-`Cargo.toml`'s version publishes a universal `Riff-<version>.zip` as a GitHub release
+`Cargo.toml`'s version publishes a universal `Odeion-<version>.zip` as a GitHub release
 (`.github/workflows/release.yml`), signed and notarized once the Apple secrets are set;
 `docs/releasing.md` has the steps.
 
-Tim uses riff while you work on it. **Leave his running instance alone**: restarting it
+Tim uses Odeion while you work on it. **Leave his running instance alone**: restarting it
 cuts off whatever he is practising. Build, then tell him to restart. Playing audio
 makes noise in his room, so verify decoding without an output device (rodio's
 `Decoder` plus `try_seek` in a throwaway test) and leave listening to him. To see the
 UI, screenshot the window with `screencapture -l<window id>`; driving keys would steal
-his keyboard focus. So does merely opening a second riff window: whatever Tim is typing
-elsewhere then lands in it as riff keys (a stray `1` muted a stem, a `v` switched
+his keyboard focus. So does merely opening a second Odeion window: whatever Tim is typing
+elsewhere then lands in it as Odeion keys (a stray `1` muted a stem, a `v` switched
 recordings). Only open one when he isn't typing, or ask first.
 
 Before committing: `cargo test && cargo build --release`, no warnings (the
@@ -473,15 +477,15 @@ Ideas Tim liked but hasn't asked for yet. Check with him before building one.
   up songs or an album with missing tags or no cover on MusicBrainz and the Cover Art
   Archive (by the MusicBrainz IDs already in the tags when there are some), show the
   match, and write it into the files only after the user confirms. It breaks the
-  README's "riff never writes next to your songs" and is network access, so both lines
+  README's "Odeion never writes next to your songs" and is network access, so both lines
   change with it. Tags in FLAC are Vorbis comments with a PICTURE block, not ID3; the
   audio must stay byte-identical (FLAC's stored MD5 checks that). MusicBrainz asks for a
   descriptive User-Agent and at most one request a second.
-- **Stems from Moises, in riff** (Tim, 2026-11-07, waiting on API access): split a
+- **Stems from Moises, in Odeion** (Tim, 2026-11-07, waiting on API access): split a
   song into stems through the Moises developer API (now Music.AI) and add them as a
   variation. Bring your own key: each user's key in the macOS Keychain, never in
   `settings.json` or the source, and the feature off until a key is set. It would be
-  riff's first network access, so the "no network" lines here and in the README change
+  Odeion's first network access, so the "no network" lines here and in the README change
   with it; nothing uploads without a deliberate action on one song, after saying the
-  file goes to Moises. Downloaded stems are untrusted files: riff names them, caps
+  file goes to Moises. Downloaded stems are untrusted files: Odeion names them, caps
   their size and checks they decode before linking them.
