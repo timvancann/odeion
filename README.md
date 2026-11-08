@@ -32,8 +32,15 @@ loop the solo, slow it down, mute the guitar and play along.
 
 ## Getting started
 
-You need macOS, [Rust](https://rustup.rs), [just](https://github.com/casey/just) and
-[resvg](https://github.com/linebender/resvg) (for the app icon).
+Download the latest `Riff-<version>.zip` from
+[Releases](https://github.com/timvancann/riff/releases), unzip it and drag Riff into
+Applications. It runs on macOS 13 or later, Apple silicon and Intel. If macOS says it
+can't check the app, open it once, then click Open Anyway in System Settings, Privacy &
+Security.
+
+Or build it yourself, with [Rust](https://rustup.rs),
+[just](https://github.com/casey/just) and
+[resvg](https://github.com/linebender/resvg) (for the app icon):
 
 ```sh
 just run       # run from source

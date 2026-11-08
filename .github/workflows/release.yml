@@ -1,0 +1,106 @@
+name: Release
+
+# Push a tag like v0.2.0 (the version in Cargo.toml) and this builds Riff.app for Apple
+# silicon and Intel in one, and publishes it as a GitHub release. With the signing
+# secrets set (docs/releasing.md) the app is signed and notarized, so it opens like any
+# other; without them it is only ad-hoc signed and macOS asks once before opening it.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: -D warnings
+      # The oldest macOS riff runs on, as Info.plist's LSMinimumSystemVersion says.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag matches Cargo.toml
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $cargo_version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: brew install resvg
+
+      - run: cargo test
+
+      - name: Build for Apple silicon and Intel
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create -output target/riff-universal \
+            target/aarch64-apple-darwin/release/riff \
+            target/x86_64-apple-darwin/release/riff
+
+      - name: Bundle Riff.app
+        run: RIFF_BINARY=target/riff-universal RIFF_VERSION="$VERSION" tools/bundle.sh
+
+      - name: Sign and notarize
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ -z "$CERTIFICATE" ]; then
+            echo "::warning::No signing secrets: the release is ad-hoc signed only. See docs/releasing.md."
+            echo "SIGNED=no" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -base64 24)"
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          # Apple's Developer ID intermediate, so the chain is whole on a fresh runner.
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          # Ours first, then the ones already there (one word each, so unquoted).
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" target/Riff.app
+          codesign --verify --strict --verbose=2 target/Riff.app
+
+          ditto -c -k --keepParent target/Riff.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --wait \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          xcrun stapler staple target/Riff.app
+          echo "SIGNED=yes" >> "$GITHUB_ENV"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip="Riff-$VERSION.zip"
+          ditto -c -k --keepParent target/Riff.app "$zip"
+          if [ "$SIGNED" = yes ]; then
+            notes="Download $zip, unzip it and drag Riff into Applications."
+          else
+            notes="Download $zip, unzip it and drag Riff into Applications. This build isn't notarized by Apple, so macOS blocks it the first time: open it once, then go to System Settings, Privacy & Security, and click Open Anyway. Or run \`xattr -dr com.apple.quarantine /Applications/Riff.app\` in Terminal."
+          fi
+          gh release create "$GITHUB_REF_NAME" "$zip" --title "riff $VERSION" \
+            --notes "$notes" --generate-notes

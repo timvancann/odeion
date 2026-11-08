@@ -427,7 +427,10 @@ add a key to both or they fail.
 ## Running and checking
 
 `just run` runs from source; `just install` builds `Riff.app` (icon rendered from
-`bundle/icon.svg` with resvg) into `~/Applications`.
+`bundle/icon.svg` with resvg) into `~/Applications`. A pushed `v*` tag matching
+`Cargo.toml`'s version publishes a universal `Riff-<version>.zip` as a GitHub release
+(`.github/workflows/release.yml`), signed and notarized once the Apple secrets are set;
+`docs/releasing.md` has the steps.
 
 Tim uses riff while you work on it. **Leave his running instance alone**: restarting it
 cuts off whatever he is practising. Build, then tell him to restart. Playing audio

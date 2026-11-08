@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Builds target/Riff.app: the release binary, Info.plist and the icon.
 # The icon is generated from bundle/icon.svg (needs resvg and Apple's iconutil).
+# RIFF_BINARY uses a binary built already (the release workflow's universal one);
+# RIFF_VERSION sets the version the app shows (else Cargo.toml's).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --release
+binary="${RIFF_BINARY:-target/release/riff}"
+if [ -z "${RIFF_BINARY:-}" ]; then
+    cargo build --release
+fi
 
 app=target/Riff.app
 iconset=target/Riff.iconset
@@ -18,8 +23,12 @@ done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/Riff.icns"
 rm -rf "$iconset"
 
-cp target/release/riff "$app/Contents/MacOS/riff"
+cp "$binary" "$app/Contents/MacOS/riff"
 cp bundle/Info.plist "$app/Contents/Info.plist"
+version="${RIFF_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
+for key in CFBundleShortVersionString CFBundleVersion; do
+    /usr/libexec/PlistBuddy -c "Set :$key $version" "$app/Contents/Info.plist"
+done
 # Ad-hoc signature, so macOS treats it as one app (permissions, Gatekeeper on this Mac).
 codesign --force --sign - "$app" >/dev/null
 echo "$app"
