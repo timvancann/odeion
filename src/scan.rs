@@ -110,9 +110,10 @@ pub fn why(e: &std::io::Error) -> String {
     match e.kind() {
         ErrorKind::NotFound => "it isn't there (moved, renamed, or on a drive that isn't connected)".into(),
         // macOS's privacy settings refuse with "operation not permitted".
-        ErrorKind::PermissionDenied => {
+        ErrorKind::PermissionDenied if cfg!(target_os = "macos") => {
             "macOS doesn't let riff in (System Settings, Privacy & Security, Files and Folders)".into()
         }
+        ErrorKind::PermissionDenied => "riff isn't allowed to read it".into(),
         ErrorKind::NotADirectory => "it's a file, not a folder".into(),
         _ => plain(&e.to_string()),
     }
@@ -482,8 +483,9 @@ mod tests {
         assert_eq!(plain("Input/output error (os error 5)"), "input/output error");
         assert_eq!(plain("Unrecognized format"), "unrecognized format");
         assert_eq!(plain("MP3 frame broken"), "MP3 frame broken");
-        let denied = std::io::Error::from_raw_os_error(1);
-        assert!(why(&denied).starts_with("macOS doesn't let riff in"));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let says = if cfg!(target_os = "macos") { "macOS doesn't let riff in" } else { "riff isn't allowed" };
+        assert!(why(&denied).starts_with(says));
     }
 
     #[test]
