@@ -1,5 +1,11 @@
 # Odeion
 
+[![Download for macOS](https://img.shields.io/badge/download-macOS-2350d6?logo=apple&logoColor=white)](https://github.com/timvancann/odeion/releases/latest/download/Odeion-macOS.zip)
+[![Latest release](https://img.shields.io/github/v/release/timvancann/odeion?label=release&color=2350d6)](https://github.com/timvancann/odeion/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/timvancann/odeion/total?color=2350d6)](https://github.com/timvancann/odeion/releases)
+[![CI](https://github.com/timvancann/odeion/actions/workflows/ci.yml/badge.svg)](https://github.com/timvancann/odeion/actions/workflows/ci.yml)
+[![Licence: PolyForm Noncommercial](https://img.shields.io/badge/licence-PolyForm%20Noncommercial-18181b)](LICENSE)
+
 A music player and a practice tool in one. Listen to your own library, or loop the
 solo, slow it down, mute the guitar and play along.
 
@@ -35,9 +41,9 @@ hear music and musicians came to play it.
 
 ## Getting started
 
-Download the latest `Odeion-<version>.zip` from
-[Releases](https://github.com/timvancann/odeion/releases), unzip it and drag Odeion into
-Applications. It runs on macOS 13 or later, Apple silicon and Intel. If macOS says it
+[Download the latest Odeion for macOS](https://github.com/timvancann/odeion/releases/latest/download/Odeion-macOS.zip)
+(or pick a version from [Releases](https://github.com/timvancann/odeion/releases)), unzip
+it and drag Odeion into Applications. It runs on macOS 13 or later, Apple silicon and Intel. If macOS says it
 can't check the app, open it once, then click Open Anyway in System Settings, Privacy &
 Security.
 

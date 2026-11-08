@@ -104,10 +104,13 @@ jobs:
         run: |
           zip="Odeion-$VERSION.zip"
           ditto -c -k --keepParent target/Odeion.app "$zip"
+          # The same zip under a name that never changes, for the README's download link:
+          # releases/latest/download/Odeion-macOS.zip is always the newest.
+          cp "$zip" Odeion-macOS.zip
           if [ "$SIGNED" = yes ]; then
             notes="Download $zip, unzip it and drag Odeion into Applications."
           else
             notes="Download $zip, unzip it and drag Odeion into Applications. This build isn't notarized by Apple, so macOS blocks it the first time: open it once, then go to System Settings, Privacy & Security, and click Open Anyway. Or run \`xattr -dr com.apple.quarantine /Applications/Odeion.app\` in Terminal."
           fi
-          gh release create "$GITHUB_REF_NAME" "$zip" --title "Odeion $VERSION" \
+          gh release create "$GITHUB_REF_NAME" "$zip" Odeion-macOS.zip --title "Odeion $VERSION" \
             --notes "$notes" --generate-notes
