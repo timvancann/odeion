@@ -18,6 +18,30 @@ jobs:
       - run: cargo test
       - run: cargo build --release
 
+  # The release build, done on every push to main: it checks the universal build still
+  # works, and leaves the build cache the Release workflow reads (shared key "release";
+  # the release job only reads it, so it never runs anything a pull request wrote: caches
+  # for main are written only by pushes to main). Same toolchain, flags and target as
+  # release.yml, or the cache wouldn't match.
+  release-cache:
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: -D warnings
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release
+      - run: cargo test
+      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+
   # Windows is a trial (2026-11-08): it builds odeion.exe to try, warnings allowed, and
   # its tests don't fail the run yet.
   windows:
