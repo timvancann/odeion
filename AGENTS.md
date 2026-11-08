@@ -12,7 +12,10 @@ are in scope; ask before adding anything that turns Odeion into an editor or a D
 A single GPUI app on `gpui-pre` 0.3.9, the maintained snapshot of Zed's GPUI (pinned
 exactly, the version rsdisk and `gpui-component` 0.7.3 use; renamed to `gpui` in
 `Cargo.toml` so code says `gpui::`). Jasmijn's desktop app, whose patterns this copies,
-moves to the same version. Odeion is macOS only, no network, no accounts.
+moves to the same version. Odeion is made on and for macOS, with a Windows build in
+trial (CI builds `odeion.exe`; Ctrl stands in for ⌘), no accounts, and no network except
+one request when the user chooses Check for Updates (`update.rs`, Tim 2026-11-08):
+never on its own, nothing about the user sent.
 
 **Odeion is going public** (Tim, 2026-10-09), source-available under the PolyForm
 Noncommercial 1.0.0 licence (Tim, 2026-11-07, replacing the GPL-3.0: free for
@@ -383,9 +386,14 @@ add a key to both or they fail.
   in `assets/icons/`: Lucide's where one fits, Odeion's own (loop edges, widen, narrow,
   slide, beats, sections) drawn in the same stroke style from the loop's brackets. The
   design is the "Riff controls and icons" canvas (named before the rename).
-- GPUI apps get no menu bar, so ⌘Q, ⌘M (minimise), ⌃⌘F (full screen) and every other
-  ⌘ shortcut are handled by hand, and none collide with system menu items. ⌘H hides
-  Odeion the same way, through `cx.hide()`.
+- The menu bar has one menu, Odeion (`main.rs`, `menu_bar`, Tim 2026-11-08): the
+  version, Check for Updates… (asks GitHub's API for the latest release on a
+  background thread, then a native dialog says "You're on the latest version" or offers
+  the Mac zip with Download; `update.rs` compares versions, `view.rs` only asks and
+  shows), Settings…, Keyboard Shortcuts, Hide and Quit. Its entries
+  aren't bound to keys, so they show no shortcuts: ⌘Q, ⌘M (minimise), ⌃⌘F (full
+  screen) and every other ⌘ shortcut are handled by hand, as before, and none collide
+  with system menu items. ⌘H hides Odeion through `cx.hide()`.
 - **The letter rail** beside the full library (not in search, album or artist views):
   click or drag along `# A–Z` and the list glides (220 ms, eased, by setting the scroll
   offset each frame) to that letter's first artist below the favourites, highlighting
@@ -485,7 +493,7 @@ Ideas Tim liked but hasn't asked for yet. Check with him before building one.
   song into stems through the Moises developer API (now Music.AI) and add them as a
   variation. Bring your own key: each user's key in the macOS Keychain, never in
   `settings.json` or the source, and the feature off until a key is set. It would be
-  Odeion's first network access, so the "no network" lines here and in the README change
-  with it; nothing uploads without a deliberate action on one song, after saying the
+  Odeion's first network access beyond the update check, so the network lines here and
+  in the README change with it; nothing uploads without a deliberate action on one song, after saying the
   file goes to Moises. Downloaded stems are untrusted files: Odeion names them, caps
   their size and checks they decode before linking them.

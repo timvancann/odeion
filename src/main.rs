@@ -18,14 +18,31 @@ mod state;
 mod theme;
 mod trainer;
 mod ui;
+mod update;
 mod variations;
 mod view;
 mod wave;
 
 use gpui::{
-    App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px,
-    size,
+    App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*,
+    px, size,
 };
+
+/// The Odeion menu in the macOS menu bar: the version, updates (`update.rs`, done in the
+/// window), settings, the keys, hide and quit.
+fn menu_bar(cx: &mut App) {
+    cx.on_action(|_: &view::HideOdeion, cx| cx.hide());
+    cx.set_menus([Menu::new("Odeion").items([
+        MenuItem::action(concat!("Odeion ", env!("CARGO_PKG_VERSION")), view::Version).disabled(true),
+        MenuItem::action("Check for Updates…", view::CheckForUpdates),
+        MenuItem::separator(),
+        MenuItem::action("Settings…", view::OpenSettings),
+        MenuItem::action("Keyboard Shortcuts", view::ShowKeys),
+        MenuItem::separator(),
+        MenuItem::action("Hide Odeion", view::HideOdeion),
+        MenuItem::action("Quit Odeion", view::QuitOdeion),
+    ])]);
+}
 
 fn main() {
     gpui_platform::application()
@@ -35,6 +52,7 @@ fn main() {
         .with_quit_mode(gpui::QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             ui::load_fonts(cx);
+            menu_bar(cx);
             // Where the window was left, if that display is still connected.
             let settings = state::Settings::load(&view::settings_file());
             let saved = settings.window.and_then(|w| {

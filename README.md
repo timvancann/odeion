@@ -1,7 +1,7 @@
 # Odeion
 
-A music player and a practice tool in one, for macOS. Listen to your own library, or
-loop the solo, slow it down, mute the guitar and play along.
+A music player and a practice tool in one. Listen to your own library, or loop the
+solo, slow it down, mute the guitar and play along.
 
 Named after the odeion, the small concert hall of ancient Greece, where people came to
 hear music and musicians came to play it.
@@ -54,7 +54,8 @@ On first start Odeion asks for the folder your music is in. Add more in settings
 
 Your music stays where it is: Odeion never writes next to your songs. Its cache, loops,
 sections, playlists and settings live in `~/Library/Application Support/odeion/`, or in
-another folder you choose in settings.
+another folder you choose in settings. Odeion only goes online when you choose Check for
+Updates in its menu, to ask GitHub for the latest release.
 
 ## Inspiration
 
@@ -83,6 +84,7 @@ Odeion stands on these projects:
 - [Lofty](https://github.com/Serial-ATA/lofty-rs) for tags and covers.
 - [RustFFT](https://github.com/ejmahler/RustFFT) for the spectra behind beat finding.
 - [souvlaki](https://github.com/Sinono3/souvlaki) for media keys and Now Playing.
+- [ureq](https://github.com/algesten/ureq) for checking for updates.
 - Beat finding follows Böck and Widmer's SuperFlux onset detector and Dan Ellis's
   dynamic-programming beat tracker.
 - The EQ's filters use Robert Bristow-Johnson's Audio EQ Cookbook.

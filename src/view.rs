@@ -1,6 +1,10 @@
 //! The window: a search line, the library, and what's playing. Keyboard first; every
 //! control can be clicked too.
 
+// The entries of the macOS menu bar's Odeion menu, built in `main.rs`. They aren't bound
+// to keys: Odeion's own key handling does ⌘, ⌘? ⌘H and ⌘Q, as before.
+gpui::actions!(odeion, [Version, CheckForUpdates, OpenSettings, ShowKeys, HideOdeion, QuitOdeion]);
+
 use crate::audio::Audio;
 use crate::beats::{self, Beats};
 use crate::empty;
@@ -23,7 +27,7 @@ use crate::wave::{self, Wave};
 use gpui::{
     Bounds, Context, Div, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     ExternalPaths, ObjectFit,
-    PathPromptOptions, Pixels, ScrollStrategy, Stateful, UniformListScrollHandle, Window, canvas,
+    PathPromptOptions, Pixels, PromptLevel, ScrollStrategy, Stateful, UniformListScrollHandle, Window, canvas,
     anchored, deferred, div, fill, img, point, prelude::*, px, relative, rgb, size, uniform_list,
 };
 use std::cell::Cell;
@@ -46,6 +50,8 @@ const SESSION_EVERY: Duration = Duration::from_secs(1);
 const SCROLLBAR_LINGERS: Duration = Duration::from_secs(1);
 /// How long a quit held back by a failed save waits for the second quit that goes ahead.
 const QUIT_AGAIN: Duration = Duration::from_secs(10);
+/// The note on the card while Check for Updates waits for GitHub.
+const CHECKING: &str = "checking for updates…";
 const ROW: f32 = 44.;
 /// The transparent title bar's height, where the traffic lights sit.
 const TITLEBAR: f32 = 40.;
@@ -428,6 +434,8 @@ pub struct Odeion {
     /// When a quit was held back because saving failed: another within `QUIT_AGAIN`
     /// quits anyway, a later one is held again.
     quit_held: Option<std::time::Instant>,
+    /// Check for Updates is waiting for GitHub.
+    checking: bool,
 }
 
 fn cache_file() -> PathBuf {
@@ -618,6 +626,7 @@ impl Odeion {
             saved_at: std::time::Instant::now(),
             kept_at: Duration::ZERO,
             quit_held: None,
+            checking: false,
         };
         odeion.apply_theme(cx);
         odeion.message = odeion.audio.error.clone().map(|e| (e, true));
@@ -674,6 +683,59 @@ impl Odeion {
             }
         })
         .detach();
+    }
+
+    /// Asks GitHub for the latest release in the background, then says what it found in
+    /// a dialog: up to date, a newer version with a Download button, or why it couldn't.
+    fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // One check at a time: another click while it runs waits for the same answer.
+        if self.checking {
+            return;
+        }
+        self.checking = true;
+        self.message = Some((CHECKING.into(), false));
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx.background_executor().spawn(async { crate::update::check() }).await;
+            let _ = this.update_in(cx, |odeion, window, cx| odeion.show_update(found, window, cx));
+        })
+        .detach();
+    }
+
+    fn show_update(&mut self, found: Result<crate::update::Found, String>, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::update::Found;
+        self.checking = false;
+        // Clears only its own note, never a message that came after it.
+        if self.message.as_ref().is_some_and(|(m, _)| m == CHECKING) {
+            self.message = None;
+        }
+        cx.notify();
+        match found {
+            Ok(Found::Latest(latest)) => {
+                let current = env!("CARGO_PKG_VERSION");
+                let detail = if !crate::update::newer(&latest, current) {
+                    format!("Odeion {current} is the newest release.")
+                } else {
+                    format!("You have Odeion {current}; the newest release is {latest}.")
+                };
+                let _ = window.prompt(PromptLevel::Info, "You're on the latest version", Some(&detail), &["OK"], cx);
+            }
+            Ok(Found::Newer(release)) => {
+                let title = format!("Odeion {} is out", release.version);
+                let detail = format!("You have {}.", env!("CARGO_PKG_VERSION"));
+                let answer =
+                    window.prompt(PromptLevel::Info, &title, Some(&detail), &["Download", "Later"], cx);
+                cx.spawn(async move |_, cx| {
+                    if answer.await == Ok(0) {
+                        cx.update(|cx| cx.open_url(&release.download));
+                    }
+                })
+                .detach();
+            }
+            Err(why) => {
+                let _ = window.prompt(PromptLevel::Warning, "Couldn't check for updates", Some(&why), &["OK"], cx);
+            }
+        }
     }
 
     /// Asks macOS for a folder to keep odeion's data in, then reopens odeion from it.
@@ -2402,8 +2464,8 @@ impl Odeion {
         let global = keys::anywhere(press);
         // The sheets swallow every key but their own toggles and ⌘Q.
         match global {
-            // GPUI apps get no menu bar, so ⌘Q has to be handled here.
-            // Without a menu bar macOS doesn't do these for odeion.
+            // The menu bar's entries aren't bound to keys, so ⌘Q and the rest are
+            // handled here; macOS doesn't do these for Odeion.
             Some(Action::Minimize) => return window.minimize_window(),
             Some(Action::FullScreen) => return window.toggle_fullscreen(),
             Some(Action::Hide) => return cx.hide(),
@@ -7459,6 +7521,27 @@ impl Render for Odeion {
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
+            // The menu bar's entries that need the window; the rest are in `main.rs`.
+            .on_action(cx.listener(|odeion, _: &OpenSettings, _, cx| {
+                odeion.help = false;
+                if odeion.prefs.is_none() {
+                    odeion.prefs = Some(Prefs::new(odeion.settings.output.as_deref()));
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|odeion, _: &CheckForUpdates, window, cx| {
+                odeion.check_for_updates(window, cx);
+            }))
+            .on_action(cx.listener(|odeion, _: &ShowKeys, _, cx| {
+                odeion.help = true;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|odeion, _: &QuitOdeion, _, cx| {
+                if odeion.save_for_quit() {
+                    cx.quit();
+                }
+                cx.notify();
+            }))
             .on_mouse_move(cx.listener(Self::drag))
             .on_mouse_up(MouseButton::Left, cx.listener(|odeion, _, _, cx| {
                 // `|`, not `||`: both drags end, whichever was on.
