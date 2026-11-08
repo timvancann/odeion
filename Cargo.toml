@@ -18,3 +18,6 @@ signalsmith-stretch = "0.1"
 souvlaki = "0.8"
 symphonia = { version = "=0.5.5", features = ["mp3", "flac", "pcm", "vorbis", "ogg", "wav", "aiff", "isomp4", "aac", "alac"] }
 ureq = "3.5.1"
+
+[build-dependencies]
+embed-resource = "3"

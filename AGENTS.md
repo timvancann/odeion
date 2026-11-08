@@ -442,7 +442,11 @@ add a key to both or they fail.
 `bundle/icon.svg` with resvg) into `~/Applications`. A pushed `v*` tag matching
 `Cargo.toml`'s version publishes a universal `Odeion-<version>.zip` as a GitHub release
 (`.github/workflows/release.yml`), signed and notarized once the Apple secrets are set;
-`docs/releasing.md` has the steps.
+`docs/releasing.md` has the steps. A panic writes `crash.log` (with a backtrace) to
+the data folder, since a Windows release build and an app opened from the Dock have no
+console. The Windows build embeds `bundle/icon.ico` through `build.rs`; regenerate it
+from `bundle/icon.svg` (resvg at 16 to 256 px, joined with `magick`) when the icon
+changes. Windows has no media keys yet (souvlaki needs the window's HWND there).
 
 Tim uses Odeion while you work on it. **Leave his running instance alone**: restarting it
 cuts off whatever he is practising. Build, then tell him to restart. Playing audio

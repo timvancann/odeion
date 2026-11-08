@@ -1,3 +1,6 @@
+// A release build on Windows opens no console window beside Odeion's.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod audio;
 mod beats;
 mod empty;
@@ -45,6 +48,15 @@ fn menu_bar(cx: &mut App) {
 }
 
 fn main() {
+    // A crash leaves `crash.log` in the data folder: without a console (a Windows release
+    // build, or Odeion opened from the Dock) there is nowhere else it would show.
+    std::panic::set_hook(Box::new(|info| {
+        let report = format!("Odeion {}: {info}\n\n{}\n", env!("CARGO_PKG_VERSION"), std::backtrace::Backtrace::force_capture());
+        eprintln!("{report}");
+        let dir = state::data_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("crash.log"), report);
+    }));
     gpui_platform::application()
         .with_assets(ui::Assets)
         // On macOS GPUI keeps running without a window; odeion has no menu bar or other

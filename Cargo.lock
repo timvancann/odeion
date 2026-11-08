@@ -3830,6 +3830,7 @@ dependencies = [
 name = "odeion"
 version = "0.2.0"
 dependencies = [
+ "embed-resource",
  "gpui-pre",
  "gpui-pre-platform",
  "image",

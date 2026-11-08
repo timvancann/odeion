@@ -21,6 +21,11 @@ pub struct Media {
 
 impl Media {
     pub fn new() -> Option<Media> {
+        // On Windows souvlaki needs the window's handle and panics without one; until
+        // Odeion passes it, Windows goes without media keys.
+        if cfg!(windows) {
+            return None;
+        }
         let mut controls = MediaControls::new(PlatformConfig {
             display_name: "Odeion",
             dbus_name: "odeion",

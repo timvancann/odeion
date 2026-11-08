@@ -1,0 +1,3 @@
+// Odeion's icon in the Windows build (Explorer, the taskbar, the title bar).
+// bundle/icon.ico is rendered from bundle/icon.svg; see build.rs.
+1 ICON "icon.ico"
