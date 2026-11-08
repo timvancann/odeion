@@ -580,13 +580,37 @@ pub fn resolve(cap: &str, mode: Mode, keyboard: Keyboard) -> Option<Action> {
 }
 
 /// The keys for an action in `mode` with `keyboard`, as the sheet writes them: for
-/// tooltips and menus.
+/// tooltips and menus, in this system's words (`shown`).
 pub fn keys_for(action: Action, mode: Mode, keyboard: Keyboard) -> Vec<&'static str> {
     sheet(mode)
         .flat_map(|g| g.lines.iter())
         .flat_map(|&line| caps(line, keyboard))
         .filter(|cap| resolve(cap, mode, keyboard) == Some(action))
+        .map(shown)
         .collect()
+}
+
+/// Key text in the words of a system without the Mac's symbols: ⌘ (Ctrl stands in for it,
+/// see `command_keys`) and ⌃ become Ctrl+, ⌥ Alt+, ⇧ Shift+, ⌫ Backspace.
+pub fn spelled(text: &str) -> String {
+    text.replace(['⌘', '⌃'], "Ctrl+").replace('⌥', "Alt+").replace('⇧', "Shift+").replace('⌫', "Backspace")
+}
+
+/// Key text as this system writes it: the Mac's symbols on a Mac, `spelled` elsewhere.
+pub fn on_this_system(text: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(target_os = "macos") { text.into() } else { spelled(text).into() }
+}
+
+/// A keycap as this system writes it, kept for the life of the app: the sheet's keycaps are
+/// a fixed set, so each is spelled once.
+pub fn shown(cap: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") {
+        return cap;
+    }
+    static SPELLED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<&'static str, &'static str>>> =
+        std::sync::OnceLock::new();
+    let mut map = SPELLED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(cap).or_insert_with(|| Box::leak(spelled(cap).into_boxed_str()))
 }
 
 /// One line of the ⌘? sheet: the keys both keyboards share, Vim's own, the Mac's own,
@@ -614,7 +638,7 @@ pub struct Group {
 /// somewhere in what the line does, its group's title or the keys it shows with
 /// `keyboard`, case aside.
 pub fn found(title: &str, line: Line, keyboard: Keyboard, query: &str) -> bool {
-    let keys: Vec<&str> = caps(line, keyboard).collect();
+    let keys: Vec<&str> = caps(line, keyboard).map(shown).collect();
     let hay = format!("{title} {} {}", keys.join(" "), line.3).to_lowercase();
     query.to_lowercase().split_whitespace().all(|word| hay.contains(word))
 }
@@ -791,6 +815,18 @@ pub const SHEET: &[Group] = &[
 mod tests {
     use super::*;
     use Keyboard::{Mac, Vim};
+
+    #[test]
+    fn keys_are_spelled_out_off_the_mac() {
+        assert_eq!(spelled("⌘F"), "Ctrl+F");
+        assert_eq!(spelled("⇧⌥Enter"), "Shift+Alt+Enter");
+        assert_eq!(spelled("⌫ remove   ⌘S save"), "Backspace remove   Ctrl+S save");
+        assert_eq!(spelled("Space"), "Space");
+        // Tooltips get them in this system's words.
+        let search = keys_for(Action::Search, Mode::Library, Mac);
+        let expected = if cfg!(target_os = "macos") { "⌘P" } else { "Ctrl+P" };
+        assert!(search.contains(&expected), "{search:?}");
+    }
 
     const MODES: [Mode; 4] = [Library, Search, Practice, Queue];
     const BOTH: [Keyboard; 2] = [Mac, Vim];

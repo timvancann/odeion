@@ -20,16 +20,20 @@ pub struct Media {
 }
 
 impl Media {
-    pub fn new() -> Option<Media> {
-        // On Windows souvlaki needs the window's handle and panics without one; until
-        // Odeion passes it, Windows goes without media keys.
-        if cfg!(windows) {
+    /// Media keys for `window`. Windows ties them to a window and souvlaki panics without
+    /// its handle, so there it goes without them when the handle can't be had.
+    pub fn new(window: &impl raw_window_handle::HasWindowHandle) -> Option<Media> {
+        let hwnd = window.window_handle().ok().and_then(|h| match h.as_raw() {
+            raw_window_handle::RawWindowHandle::Win32(h) => Some(h.hwnd.get() as *mut std::ffi::c_void),
+            _ => None,
+        });
+        if cfg!(windows) && hwnd.is_none() {
             return None;
         }
         let mut controls = MediaControls::new(PlatformConfig {
             display_name: "Odeion",
             dbus_name: "odeion",
-            hwnd: None,
+            hwnd,
         })
         .ok()?;
         let (tx, events) = channel();

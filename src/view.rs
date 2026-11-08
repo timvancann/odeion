@@ -610,7 +610,7 @@ impl Odeion {
             clearing_queue: false,
             removing_variation: None,
             shuffle: false,
-            media: Media::new(),
+            media: Media::new(window),
             message: None,
             message_since: None,
             bar: Strip::default(),
@@ -4562,7 +4562,7 @@ impl Odeion {
                 // Lines with no keys on this keyboard go; so do lines the typed words
                 // don't find.
                 .children(lines.iter().filter(|&&l| keys::found(title, l, keyboard, query)).filter_map(|&line| {
-                    let caps: Vec<&str> = keys::caps(line, keyboard).collect();
+                    let caps: Vec<&str> = keys::caps(line, keyboard).map(keys::shown).collect();
                     (!caps.is_empty()).then_some((caps, line.3))
                 }).map(|(caps, what)| {
                     div()
@@ -6230,10 +6230,10 @@ impl Odeion {
                             .text_xs()
                             .text_color(rgb(t.text_dim))
                             .child("drag or scroll a band, double-click it for 0, click outside to close")
-                            .child(match self.vim() {
+                            .child(keys::on_this_system(match self.vim() {
                                 true => "h l band   k j ±1 dB   0 reset   n N preset   e on/off   w save   x remove   Esc close",
                                 false => "← → band   ↑ ↓ ±1 dB   0 reset   n N preset   e on/off   ⌘S save   x remove   Esc close",
-                            }),
+                            }).into_owned()),
                     ),
             )
     }
@@ -7103,6 +7103,7 @@ impl Odeion {
             (false, true) => "j k move   Enter or a click chooses   dd remove folder   Esc close",
             (false, false) => "↑↓ move   Enter or a click chooses   ⌫ remove folder   Esc close",
         };
+        let hint = keys::on_this_system(hint).into_owned();
 
         overlay("prefs")
             .on_click(cx.listener(|odeion, _, _, cx| {

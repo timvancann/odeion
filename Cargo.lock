@@ -3835,6 +3835,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "lofty",
+ "raw-window-handle",
  "rodio",
  "rustfft",
  "serde",
