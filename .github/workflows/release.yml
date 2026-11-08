@@ -19,8 +19,10 @@ jobs:
       RUSTFLAGS: -D warnings
       # The oldest macOS riff runs on, as Info.plist's LSMinimumSystemVersion says.
       MACOSX_DEPLOYMENT_TARGET: "13.0"
+    # Actions pinned to commits and no build cache: this job holds the signing secrets,
+    # so nothing in it may change under it.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: The tag matches Cargo.toml
         run: |
@@ -32,10 +34,10 @@ jobs:
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
       - run: brew install resvg
 
       - run: cargo test
