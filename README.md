@@ -1,52 +1,34 @@
 # riff
 
-A keyboard-first practice player for musicians on macOS. Find a song in your own music
-library in a keystroke, loop the bar you're working on, slow it down, mute the guitar
-and play along.
+A music player and a practice tool in one, for macOS. Listen to your own library, or
+loop the solo, slow it down, mute the guitar and play along.
 
 ![The library](docs/screenshots/library.png)
 
 ## What it does
 
-**A player for the music you own.** Riff scans the folders you point it at (mp3, flac,
-wav, aiff, m4a, ogg) and opens instantly, even on a library of thousands of songs,
-because tags, covers and lengths are cached. Search as you type, browse by album or
-artist, mark favourites, queue songs up and build playlists. The list shows songs in
-columns or grouped under each artist, and a sidebar holds the queue and your playlists.
+**Listen**
 
-**Loops to the sample.** Set a loop while the song plays and it repeats exactly, with
-no gap. Nudge its edges, slide it phrase by phrase, or drag them on the waveform.
-Name the parts of a song as sections (verse, solo, outro) and jump between them, or drop
-a marker to play from.
+- Your own music folder, opened instantly, even with thousands of songs.
+- Search as you type, albums, artists, favourites, a queue and playlists.
 
-**A waveform you can work in.** The practice view shows the whole song's shape over a
-large waveform that frames your loop or follows the playhead. Every beat is marked,
-found from the recording itself, so the grid follows old records that drift in tempo.
-Turn the grid on and loops, the marker and seeking all snap to beats.
+**Practise**
 
-**Slower, or in another key.** Change the speed from 25 to 110% without changing the
-pitch, or the pitch by semitones and cents without changing the speed, using Signalsmith
-Stretch at full quality. A speed trainer starts a loop slow and speeds it up a step
-every few repeats, up to the speed you set.
-
-**Your other recordings, lined up.** Drop a backing track or a folder of stems (from
-Moises or any other stem splitter) onto a song. Riff lines them up with the original
-on its own, and they're a key away while it plays. Stems get a lane each, with their
-own level, and mute or solo with a single key. Each recording keeps its own loops, sections and
-marker.
+- Drag across the waveform to loop a part, gapless.
+- Slow down or change key without the other changing, plus a speed trainer.
+- Drop in stems ([Moises](https://moises.ai) or any splitter) or a backing track; riff
+  lines them up. Mute or solo with one key.
+- Beats found from the recording, so loops snap to them even on records that drift.
+- Name sections and drop a marker. Every song comes back as you left it.
 
 ![A song with its stems](docs/screenshots/stems.png)
 
-**Remembers everything.** Each song comes back with the recording, speed, pitch, loops
-and stem levels you left it with, and riff reopens on the song you were playing.
+**Everywhere**
 
-**Keyboard first, mouse welcome.** Every action has a key, with vim keys if you want
-them, and every action is also a button whose tooltip tells you its keys. `⌘?` lists
-them all and finds them as you type.
-
-**And the rest.** A 10-band EQ with presets you can save, media keys and Now Playing,
-any output device (riff follows the system when you switch), and every colour theme
-installed in [Zed](https://zed.dev).
+- Keyboard first (Mac or Vim keys), every key also a button. `⌘?` lists them all.
+- Right-click menus, a 10-band EQ, media keys, light and dark.
+- Two colour schemes: T3 (cool greys, clear blue) and Riff (warm paper, gold).
+- Plays mp3, flac, wav, aiff, m4a (AAC and ALAC) and ogg.
 
 ## Getting started
 
@@ -94,10 +76,24 @@ Riff stands on these projects:
 - Beat finding follows Böck and Widmer's SuperFlux onset detector and Dan Ellis's
   dynamic-programming beat tracker.
 - The EQ's filters use Robert Bristow-Johnson's Audio EQ Cookbook.
+- The default T3 colour scheme takes its greys and blue from
+  [T3 Code](https://github.com/pingdotgg/t3code), whose clean look it follows.
 - Icons from [Lucide](https://lucide.dev), fonts
   [JetBrains Mono](https://www.jetbrains.com/lp/mono/) and
   [Space Grotesk](https://fonts.google.com/specimen/Space+Grotesk).
 
+## Roadmap
+
+- **Tags and covers from MusicBrainz.** Look up a song or album with missing tags or no
+  cover on [MusicBrainz](https://musicbrainz.org) and the Cover Art Archive, check the
+  match, and fill them in. Only when you ask, since it writes into your files.
+- **Stems from Moises, in riff.** Split a song into stems through the
+  [Moises API](https://music.ai) with
+  your own key, and get them back lined up on the song, ready to mute and solo.
+
 ## Licence
 
-GPL-3.0. See [LICENSE](LICENSE).
+[PolyForm Noncommercial 1.0.0](LICENSE): free to use, change and share for any
+noncommercial purpose (personal use, study, teaching, hobby projects, charities). Selling
+riff or using it in a commercial product needs the author's permission. The bundled
+fonts and icons keep their own licences, beside them in `assets/`.

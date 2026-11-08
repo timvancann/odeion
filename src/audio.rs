@@ -106,7 +106,30 @@ impl Loop {
         self.start = Some(new_start);
         self.end = Some(new_start + length);
     }
+
+    /// The loop a drag across the waveform draws: pressed at `from`, the pointer now at
+    /// `to` and `moved` pixels away. Either way round, each end through `snap` (onto a
+    /// beat on the grid), within the song, looping. None when it is a click: it moved
+    /// less than `SWEEP`, or is shorter than `MIN_LOOP` once snapped.
+    pub fn swept(
+        from: Duration,
+        to: Duration,
+        moved: f32,
+        song: Option<Duration>,
+        snap: impl Fn(Duration) -> Duration,
+    ) -> Option<Loop> {
+        if moved < SWEEP {
+            return None;
+        }
+        let within = |d: Duration| song.map_or(d, |s| d.min(s));
+        let (start, end) = (within(snap(from.min(to))), within(snap(from.max(to))));
+        (end >= start + MIN_LOOP).then_some(Loop { start: Some(start), end: Some(end), off: false })
+    }
 }
+
+/// How far a press on the waveform moves, in pixels, before it draws a loop rather
+/// than being a click.
+pub const SWEEP: f32 = 4.0;
 
 /// A playhead that moves smoothly between the player's position updates, for drawing
 /// at the screen's frame rate. It runs on its own clock and takes the player's word
@@ -686,6 +709,8 @@ pub struct Audio {
     pub duration: Option<Duration>,
     pub looping: Loop,
     pub error: Option<String>,
+    /// Why the last song didn't open, until the window takes it to say so.
+    pub failed: Option<String>,
     /// Where to start once the song has opened.
     start_at: Option<Duration>,
     /// The loop and position, shared with the audio thread.
@@ -700,6 +725,7 @@ impl Audio {
         let (sink, output) = open(want.as_deref()).map_or((None, None), |(s, id)| (Some(s), id));
         Audio {
             error: sink.is_none().then(|| "no audio output".to_string()),
+            failed: None,
             sink,
             output,
             chosen,
@@ -865,7 +891,7 @@ impl Audio {
                     self.player = Some(player);
                 }
                 (Ok(_), None) => {}
-                (Err(e), _) => self.error = Some(e),
+                (Err(e), _) => self.failed = Some(e),
             }
         }
         self.keep_loop();
@@ -1054,6 +1080,26 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_across_the_waveform_draws_a_loop_and_a_short_one_is_a_click() {
+        let free = |d: Duration| d;
+        // Either way round, looping.
+        assert_eq!(Loop::swept(s(12), s(8), 40.0, None, free), Some(looped(8, 12)));
+        assert_eq!(Loop::swept(s(8), s(12), 40.0, None, free), Some(looped(8, 12)));
+        // A press that hardly moved is a click, however far apart the moments.
+        assert_eq!(Loop::swept(s(8), s(12), SWEEP - 0.5, None, free), None);
+        // Shorter than the shortest loop is a click too.
+        assert_eq!(Loop::swept(ms(8000), ms(8050), 40.0, None, free), None);
+        assert!(Loop::swept(ms(8000), ms(8100), 40.0, None, free).is_some());
+        // Each end snaps (to the nearest whole second here, like beats).
+        let beat = |d: Duration| s(d.as_secs_f64().round() as u64);
+        assert_eq!(Loop::swept(ms(7800), ms(12300), 40.0, None, beat), Some(looped(8, 12)));
+        // Both ends on the same beat: a click.
+        assert_eq!(Loop::swept(ms(7800), ms(8300), 40.0, None, beat), None);
+        // Never past the song's end.
+        assert_eq!(Loop::swept(s(8), s(40), 40.0, Some(s(30)), free), Some(looped(8, 30)));
+    }
+
+    #[test]
     fn nudged_edges_keep_their_order_and_stay_in_the_song() {
         let mut l = looped(10, 20);
         l.nudge_start(-0.05);
@@ -1234,6 +1280,7 @@ mod tests {
             duration: None,
             looping: looped(0, 16),
             error: None,
+            failed: None,
             start_at: None,
             shared: Arc::default(),
             rate: 1000,

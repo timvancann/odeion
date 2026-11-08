@@ -1,7 +1,7 @@
 //! The global EQ: ten bands in octaves from 31 Hz to 16 kHz, like Winamp's, plus a
 //! preamp, each in whole dB from -12 to +12. It's there to make the speakers and
 //! headphones sound right, so it comes last in the sound, after the stretcher. Built-in
-//! presets and Tim's own saved ones; kept in `settings.json`.
+//! presets and the user's own saved ones; kept in `settings.json`.
 
 use serde::{Deserialize, Serialize};
 

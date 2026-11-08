@@ -21,6 +21,11 @@ const THREADS: usize = 8;
 /// Each thread starts this much early and throws it away: an mp3 decoder needs a little
 /// history after a seek before its output is right.
 const WARM_UP: f64 = 1.0;
+/// The most points read, 64 MB of them: over 6 hours at 44.1 kHz, 1.5 at 192. A damaged
+/// or crafted file can claim any length, sample rate or timestamp; trusting it would size
+/// the waveform to match and abort riff. A file claiming more is read from its packets,
+/// and stops here.
+const MOST: usize = 1 << 23;
 
 /// One point or column: the loudest sample and the mean square (for RMS), mono.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -92,18 +97,37 @@ impl Wave {
     }
 }
 
-/// The stretch the detail view shows. With a loop that loops, `span` centred on it;
-/// otherwise (no loop, or one switched off) `span` with the playhead a quarter in. Kept
-/// inside the song where it fits.
+/// The stretch the detail view shows. With a loop that loops and the playhead in it,
+/// `span` centred on the loop; otherwise (no loop, one switched off, or the playhead
+/// outside it) `span` with the playhead a quarter in, so the playhead is always in
+/// sight. Kept inside the song where it fits.
 pub fn window(at: Duration, looping: Loop, span: Duration, song: Duration) -> (Duration, Duration) {
-    let span = span.as_secs_f64();
-    let from = match looping.end.filter(|_| looping.looping()) {
-        Some(end) => {
-            let start = looping.start.unwrap_or_default().as_secs_f64();
-            (start + end.as_secs_f64()) / 2.0 - span / 2.0
-        }
-        None => at.as_secs_f64() - span / 4.0,
+    // A little slack: the drawn playhead is smoothed and may run a hair past the end.
+    const SLACK: f64 = 0.1;
+    let (span, at) = (span.as_secs_f64(), at.as_secs_f64());
+    let start = looping.start.unwrap_or_default().as_secs_f64();
+    let from = match looping.end.filter(|_| looping.looping()).map(|e| e.as_secs_f64()) {
+        Some(end) if start - SLACK <= at && at <= end + SLACK => (start + end) / 2.0 - span / 2.0,
+        _ => at - span / 4.0,
     };
+    inside(from, span, song)
+}
+
+/// The stretch the detail view shows once it is dragged away from the playhead: `span`
+/// from `from`, kept inside the song. It stays there until it follows again.
+pub fn moved(from: Duration, span: Duration, song: Duration) -> (Duration, Duration) {
+    inside(from.as_secs_f64(), span.as_secs_f64(), song)
+}
+
+/// Where a view dragged on the overview starts: as far from `from` as the pointer has
+/// moved (`grabbed` to `now`), kept inside the song.
+pub fn pan(from: Duration, grabbed: Duration, now: Duration, span: Duration, song: Duration) -> Duration {
+    let from = from.as_secs_f64() + now.as_secs_f64() - grabbed.as_secs_f64();
+    inside(from, span.as_secs_f64(), song).0
+}
+
+/// `span` seconds from `from`, moved inside the song where it fits.
+fn inside(from: f64, span: f64, song: Duration) -> (Duration, Duration) {
     let from = from.min(song.as_secs_f64() - span).max(0.0);
     (Duration::from_secs_f64(from), Duration::from_secs_f64(from + span))
 }
@@ -111,6 +135,18 @@ pub fn window(at: Duration, looping: Loop, span: Duration, song: Duration) -> (D
 /// The span that frames a loop of `length`: the loop with 30% room.
 pub fn frame(length: Duration) -> Duration {
     Duration::from_secs_f64((length.as_secs_f64() * 1.3).max(0.5))
+}
+
+/// What ⌘0 shows: the loop framed with room, or without a loop the whole song. Gives
+/// the span and, when following the playhead wouldn't show the loop (looping off, or
+/// the playhead outside it), where the view has to move to.
+pub fn zoom_fit(at: Duration, looping: Loop, song: Duration) -> (Duration, Option<Duration>) {
+    let Some(end) = looping.end else { return (song, None) };
+    let start = looping.start.unwrap_or_default();
+    let span = frame(end - start);
+    let framed = inside((start + end).as_secs_f64() / 2.0 - span.as_secs_f64() / 2.0, span.as_secs_f64(), song);
+    let followed = window(at, looping, span, song);
+    (span, (followed != framed).then_some(framed.0))
 }
 
 /// How much the detail view shows while there is a loop. The zoom stays as set, however
@@ -137,10 +173,11 @@ pub(crate) fn open(path: &Path) -> Result<Box<dyn FormatReader>, String> {
 pub fn read(path: &Path) -> Result<Wave, String> {
     let format = open(path)?;
     let params = &format.default_track().ok_or("no audio track")?.codec_params;
-    let rate = params.sample_rate.ok_or("unknown sample rate")?;
-    let points = match params.n_frames.filter(|_| params.time_base.is_some()) {
-        Some(frames) => {
-            let total = (frames as usize).div_ceil(STEP);
+    let rate = params.sample_rate.filter(|&r| r > 0).ok_or("unknown sample rate")?;
+    let claimed = params.n_frames.map(|n| n.div_ceil(STEP as u64));
+    let points = match claimed.filter(|&n| params.time_base.is_some() && n <= MOST as u64) {
+        Some(total) => {
+            let total = total as usize;
             // Stretch boundaries fall on whole points, so no point is split between threads.
             let bounds: Vec<usize> = (0..=THREADS).map(|i| total * i / THREADS).collect();
             let parts = std::thread::scope(|s| {
@@ -184,7 +221,7 @@ fn stretch(path: &Path, rate: u32, first: usize, last: Option<usize>) -> Result<
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| e.to_string())?;
-    let (lo, hi) = (first * STEP, last.map_or(usize::MAX, |l| l * STEP));
+    let (lo, hi) = (first * STEP, last.unwrap_or(MOST).min(MOST) * STEP);
     if lo > 0 {
         let from = (lo as f64 / rate as f64 - WARM_UP).max(0.0);
         let to = SeekTo::Time { time: Time::from(from), track_id: Some(track.id) };
@@ -244,6 +281,25 @@ mod tests {
         Duration::from_secs_f64(secs)
     }
 
+    #[test]
+    fn zoom_to_fit_frames_the_loop_or_shows_the_whole_song() {
+        let song = s(200.);
+        // No loop: the whole song, following as ever.
+        assert_eq!(zoom_fit(s(50.), Loop::default(), song), (song, None));
+        // A loop from 40 to 50 s with the playhead in it: framed, and following shows it.
+        let looping = Loop { start: Some(s(40.)), end: Some(s(50.)), off: false };
+        let (span, moved) = zoom_fit(s(45.), looping, song);
+        assert!((span.as_secs_f64() - 13.).abs() < 1e-9);
+        assert_eq!(moved, None);
+        // The playhead elsewhere: the view moves onto the loop, centred.
+        let (span, moved) = zoom_fit(s(120.), looping, song);
+        assert!((span.as_secs_f64() - 13.).abs() < 1e-9);
+        assert!((moved.unwrap().as_secs_f64() - 38.5).abs() < 1e-9);
+        // Looping switched off: following wouldn't show it either.
+        let off = Loop { off: true, ..looping };
+        assert!(zoom_fit(s(45.), off, song).1.is_some());
+    }
+
     /// A mono 16-bit WAV of `seconds` silence with one full-scale click at `click`.
     fn wav_with_click(seconds: f64, click: f64) -> std::path::PathBuf {
         let rate = 44_100u32;
@@ -271,6 +327,19 @@ mod tests {
         let path = std::env::temp_dir().join(format!("riff-wave-{}-{click}.wav", std::process::id()));
         std::fs::write(&path, out).unwrap();
         path
+    }
+
+    #[test]
+    fn a_file_claiming_to_be_endless_is_read_for_what_it_holds() {
+        // The header says 4 GB of samples (over 13 hours, 2^24 points); the file has 2 s.
+        let path = wav_with_click(2.0, 1.0);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[40..44].copy_from_slice(&(u32::MAX - 36).to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let wave = read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!((wave.length().as_secs_f64() - 2.0).abs() < 0.01, "read {:?}", wave.length());
     }
 
     #[test]
@@ -338,7 +407,9 @@ mod tests {
     #[test]
     fn the_window_frames_the_loop_or_follows_the_playhead() {
         let looped = Loop { start: Some(s(10.0)), end: Some(s(14.0)), off: false };
-        assert_eq!(window(s(50.0), looped, s(8.0), s(100.0)), (s(8.0), s(16.0)));
+        assert_eq!(window(s(12.0), looped, s(8.0), s(100.0)), (s(8.0), s(16.0)));
+        // The playhead outside the loop is followed, so it is never out of sight.
+        assert_eq!(window(s(50.0), looped, s(8.0), s(100.0)), (s(48.0), s(56.0)));
         assert_eq!(window(s(50.0), Loop::default(), s(8.0), s(100.0)), (s(48.0), s(56.0)));
         // A loop switched off is left behind: the view follows the playhead.
         let off = Loop { off: true, ..looped };
@@ -346,5 +417,16 @@ mod tests {
         // Near the start or end it stays inside the song.
         assert_eq!(window(s(1.0), Loop::default(), s(8.0), s(100.0)), (s(0.0), s(8.0)));
         assert_eq!(window(s(99.0), Loop::default(), s(8.0), s(100.0)), (s(92.0), s(100.0)));
+    }
+
+    #[test]
+    fn a_dragged_view_moves_with_the_pointer_and_stays_inside_the_song() {
+        // Grabbed at 22 s with the view at 20 s, the pointer now at 52 s.
+        assert_eq!(pan(s(20.0), s(22.0), s(52.0), s(8.0), s(100.0)), s(50.0));
+        assert_eq!(pan(s(20.0), s(22.0), s(2.0), s(8.0), s(100.0)), s(0.0));
+        assert_eq!(pan(s(20.0), s(22.0), s(99.0), s(8.0), s(100.0)), s(92.0));
+        // Zoomed out after the drag, it widens from where it was left.
+        assert_eq!(moved(s(50.0), s(16.0), s(100.0)), (s(50.0), s(66.0)));
+        assert_eq!(moved(s(90.0), s(16.0), s(100.0)), (s(84.0), s(100.0)));
     }
 }

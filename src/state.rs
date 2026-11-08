@@ -1,7 +1,45 @@
 //! Where things live, the settings, and which songs are favourites.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Files of riff's that couldn't be read this run, each moved aside as it was found.
+static SET_ASIDE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Reads one of riff's JSON files; none there gives the default. One that can't be read
+/// or understood (a sync conflict, a hand edit gone wrong) is renamed to
+/// `<name>.broken` first, so the next save can't overwrite what it held.
+pub fn load_json<T: DeserializeOwned + Default>(file: &Path) -> T {
+    let read = std::fs::read(file);
+    if let Err(e) = &read
+        && e.kind() == std::io::ErrorKind::NotFound
+    {
+        return T::default();
+    }
+    if let Some(value) = read.ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        return value;
+    }
+    let aside = broken(file);
+    if std::fs::rename(file, &aside).is_ok()
+        && let Ok(mut list) = SET_ASIDE.lock()
+    {
+        list.push(aside);
+    }
+    T::default()
+}
+
+/// Where `load_json` moves a file it couldn't read.
+pub fn broken(file: &Path) -> PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(".broken");
+    PathBuf::from(name)
+}
+
+/// The files moved aside so far, once: riff says so when it opens.
+pub fn take_set_aside() -> Vec<PathBuf> {
+    SET_ASIDE.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default()
+}
 
 
 fn home() -> PathBuf {
@@ -51,16 +89,25 @@ pub fn choose_data_dir(default: &Path, dir: Option<&Path>) -> std::io::Result<()
     }
 }
 
-/// What ⌘, changes: the folders to scan, the colour theme by name, vim keys and the
-/// output device. Also where the window was left, and the volume.
+/// What ⌘, changes: the folders to scan, the appearance and an editor theme by name, the
+/// keyboard and the output device. Also where the window was left, and the volume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub folders: Vec<PathBuf>,
+    /// Riff's own Light or Dark, or Auto. Files from before it get Dark, what they showed.
+    #[serde(default = "crate::theme::Appearance::before")]
+    pub appearance: crate::theme::Appearance,
+    /// The scheme: "T3" (a new install's), empty for Riff, or an editor theme's name.
+    /// Files from before T3 keep Riff, what they showed; old files' "Gold" was Riff.
+    #[serde(default)]
     pub theme: String,
     pub window: Option<Placement>,
-    /// Bare letters as vim commands outside search (`keys.rs`).
-    pub vim: bool,
+    /// Mac keys or Vim keys (`keys.rs`).
+    pub keyboard: crate::keys::Keyboard,
+    /// Read only: files from before the keyboard choice said `vim` instead.
+    #[serde(skip_serializing)]
+    pub vim: Option<bool>,
     /// The master volume, from 0 to 1.
     pub volume: f32,
     /// The output device chosen, by id; none plays through the system's.
@@ -69,7 +116,7 @@ pub struct Settings {
     pub trainer: crate::trainer::Trainer,
     /// How the list shows songs.
     pub list: ListView,
-    /// The global EQ, and the presets Tim saved.
+    /// The global EQ, and the presets the user saved.
     pub eq: crate::eq::Eq,
     pub eq_presets: Vec<crate::eq::Preset>,
 }
@@ -99,9 +146,11 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             folders: Vec::new(),
-            theme: crate::theme::DEFAULT_NAME.to_string(),
+            appearance: crate::theme::Appearance::Auto,
+            theme: crate::theme::T3.to_string(),
             window: None,
-            vim: true,
+            keyboard: crate::keys::Keyboard::Mac,
+            vim: None,
             volume: 1.0,
             output: None,
             trainer: Default::default(),
@@ -124,12 +173,18 @@ impl Settings {
         self.folders.len() != before
     }
 
-    /// The settings file, or the defaults when there is none or it can't be read.
+    /// The settings file, or the defaults when there is none or it can't be read (then
+    /// kept as `settings.json.broken`, see `load_json`). An old file's `vim` picks the
+    /// keyboard: on is Vim, off is Mac.
     pub fn load(file: &Path) -> Settings {
-        std::fs::read(file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        let mut settings: Settings = load_json(file);
+        if let Some(vim) = settings.vim.take() {
+            settings.keyboard = if vim { crate::keys::Keyboard::Vim } else { crate::keys::Keyboard::Mac };
+        }
+        if settings.theme == "Gold" {
+            settings.theme.clear();
+        }
+        settings
     }
 
     /// Saves through a temp file and a rename, so a crash can't leave half a file.
@@ -165,12 +220,7 @@ impl Favorites {
     }
 
     pub fn load(file: &Path) -> Favorites {
-        Favorites(
-            std::fs::read(file)
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or_default(),
-        )
+        Favorites(load_json(file))
     }
 
     pub fn save(&self, file: &Path) {
@@ -223,9 +273,11 @@ mod tests {
         let file = std::env::temp_dir().join(format!("riff-settings-{}.json", std::process::id()));
         let s = Settings {
             folders: vec!["/music".into(), "/more".into()],
+            appearance: crate::theme::Appearance::Light,
             theme: "Tokyo Night".into(),
             window: Some(Placement { display: "abc".into(), x: 10., y: 20., width: 900., height: 800. }),
-            vim: false,
+            keyboard: crate::keys::Keyboard::Vim,
+            vim: None,
             volume: 0.6,
             output: Some("coreaudio:headphones".into()),
             trainer: crate::trainer::Trainer { from: 60, to: 95, step: 5, every: 4 },
@@ -243,6 +295,70 @@ mod tests {
         assert_eq!(Settings::load(&file).output, None);
         assert_eq!(Settings::load(&file).list, ListView::Columns);
         assert!(Settings::load(&file).eq.flat());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_file_that_cant_be_read_is_kept_aside_not_overwritten() {
+        let file = std::env::temp_dir().join(format!("riff-broken-{}.json", std::process::id()));
+        let aside = broken(&file);
+        let _ = std::fs::remove_file(&aside);
+        std::fs::write(&file, br#"{"folders": ["/m"], "#).unwrap();
+        let s = Settings::load(&file);
+        assert!(s.folders.is_empty());
+        assert!(!file.exists());
+        assert_eq!(std::fs::read(&aside).unwrap(), br#"{"folders": ["/m"], "#);
+        assert!(take_set_aside().contains(&aside));
+        // Saving now writes a new file and leaves the old one alone.
+        s.save(&file).unwrap();
+        assert_eq!(std::fs::read(&aside).unwrap(), br#"{"folders": ["/m"], "#);
+        // No file at all is a first start, with nothing to keep.
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(Settings::load(&file), Settings::default());
+        assert!(!file.exists());
+        let _ = std::fs::remove_file(&aside);
+    }
+
+    #[test]
+    fn old_files_pick_the_keyboard_from_vim_and_new_ones_get_mac() {
+        use crate::keys::Keyboard;
+        let file = std::env::temp_dir().join(format!("riff-keyboard-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(Settings::load(&file).keyboard, Keyboard::Mac);
+        std::fs::write(&file, br#"{"vim": true}"#).unwrap();
+        let old = Settings::load(&file);
+        assert_eq!(old.keyboard, Keyboard::Vim);
+        // Saved again, it says `keyboard` and no longer `vim`.
+        old.save(&file).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(r#""keyboard": "vim""#) && !text.contains(r#""vim":"#));
+        assert_eq!(Settings::load(&file).keyboard, Keyboard::Vim);
+        std::fs::write(&file, br#"{"vim": false}"#).unwrap();
+        assert_eq!(Settings::load(&file).keyboard, Keyboard::Mac);
+        std::fs::write(&file, br#"{"theme": "Gold"}"#).unwrap();
+        assert_eq!(Settings::load(&file).keyboard, Keyboard::Mac);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn old_files_keep_looking_as_they_did_and_new_installs_follow_macos() {
+        use crate::theme::Appearance;
+        let file = std::env::temp_dir().join(format!("riff-appearance-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let new = Settings::load(&file);
+        assert_eq!((new.appearance, new.theme.as_str()), (Appearance::Auto, crate::theme::T3));
+        // Gold, the old built-in, is riff's own Dark.
+        std::fs::write(&file, br#"{"theme": "Gold"}"#).unwrap();
+        let gold = Settings::load(&file);
+        assert_eq!((gold.appearance, gold.theme.as_str()), (Appearance::Dark, ""));
+        std::fs::write(&file, br#"{"folders": []}"#).unwrap();
+        let old = Settings::load(&file);
+        assert_eq!((old.appearance, old.theme.as_str()), (Appearance::Dark, ""));
+        // A Zed theme stays chosen, as an editor theme.
+        std::fs::write(&file, br#"{"theme": "Tokyo Night"}"#).unwrap();
+        assert_eq!(Settings::load(&file).theme, "Tokyo Night");
+        std::fs::write(&file, br#"{"appearance": "auto", "theme": ""}"#).unwrap();
+        assert_eq!(Settings::load(&file).appearance, Appearance::Auto);
         let _ = std::fs::remove_file(&file);
     }
 }

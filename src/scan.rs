@@ -10,6 +10,7 @@ use lofty::probe::Probe;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
@@ -24,17 +25,37 @@ const COVER_SIZE: u32 = 256;
 /// An audio file on disk: path, size and modification time in seconds.
 pub type Found = (PathBuf, u64, u64);
 
-/// Every audio file under `root`. Hidden folders and Music.app's import inbox are skipped.
-pub fn walk(root: &Path) -> Vec<Found> {
-    let mut found = Vec::new();
+/// A listed folder that couldn't be opened, and why, in plain words.
+pub type Unreadable = (PathBuf, String);
+
+/// Every audio file under `root`, each counted in `counted` as it is found, so the
+/// first scan can say how far it got, and the paths it couldn't look into this time.
+/// Hidden folders and Music.app's import inbox are skipped. A `root` that can't be
+/// opened is an error; a folder or file below it that can't is passed over, and listed
+/// so the songs known there aren't taken for deleted.
+pub fn walk(root: &Path, counted: &AtomicUsize) -> std::io::Result<(Vec<Found>, Vec<PathBuf>)> {
+    std::fs::read_dir(root)?;
+    let (mut found, mut missed) = (Vec::new(), Vec::new());
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            missed.push(dir);
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                missed.push(dir.clone());
+                continue;
+            };
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(meta) = entry.metadata() else {
+                missed.push(path);
+                continue;
+            };
             if meta.is_dir() {
-                if !name.starts_with('.') && !name.ends_with(".localized") {
+                // Only Music.app's inbox: its library itself sits in `Media.localized`.
+                if !name.starts_with('.') && name != "Automatically Add to Music.localized" {
                     dirs.push(path);
                 }
             } else if is_audio(&path) {
@@ -44,20 +65,78 @@ pub fn walk(root: &Path) -> Vec<Found> {
                     .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                     .map_or(0, |d| d.as_secs());
                 found.push((path, meta.len(), modified));
+                counted.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
-    found
+    Ok((found, missed))
 }
 
-/// Every audio file under any of `roots`, once, even where one folder sits inside another.
-pub fn walk_all(roots: &[PathBuf]) -> Vec<Found> {
+/// What a walk over the listed folders found.
+#[derive(Debug, Default)]
+pub struct Walked {
+    /// Every audio file, once, even where one listed folder sits inside another.
+    pub found: Vec<Found>,
+    /// The listed folders that couldn't be opened, and why.
+    pub unreadable: Vec<Unreadable>,
+    /// Every path that couldn't be looked into, those folders included: the songs known
+    /// under them are kept as they were (an unplugged drive, a cloud folder that didn't
+    /// answer), not dropped as deleted.
+    pub missed: Vec<PathBuf>,
+}
+
+/// Walks each of `roots`.
+pub fn walk_all(roots: &[PathBuf], counted: &AtomicUsize) -> Walked {
     let mut seen = std::collections::HashSet::new();
-    roots
-        .iter()
-        .flat_map(|root| walk(root))
-        .filter(|f| seen.insert(f.0.clone()))
-        .collect()
+    let mut walked = Walked::default();
+    for root in roots {
+        match walk(root, counted) {
+            Ok((files, missed)) => {
+                walked.found.extend(files.into_iter().filter(|f| seen.insert(f.0.clone())));
+                walked.missed.extend(missed);
+            }
+            Err(e) => {
+                walked.unreadable.push((root.clone(), why(&e)));
+                walked.missed.push(root.clone());
+            }
+        }
+    }
+    walked
+}
+
+/// Why a folder can't be opened, in words a reader without a terminal follows.
+pub fn why(e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotFound => "it isn't there (moved, renamed, or on a drive that isn't connected)".into(),
+        // macOS's privacy settings refuse with "operation not permitted".
+        ErrorKind::PermissionDenied => {
+            "macOS doesn't let riff in (System Settings, Privacy & Security, Files and Folders)".into()
+        }
+        ErrorKind::NotADirectory => "it's a file, not a folder".into(),
+        _ => plain(&e.to_string()),
+    }
+}
+
+/// A system error without its code: "Input/output error (os error 5)" reads
+/// "input/output error".
+pub fn plain(error: &str) -> String {
+    let text = match error.rfind(" (os error ") {
+        Some(at) if error.ends_with(')') => &error[..at],
+        _ => error,
+    };
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if !chars.as_str().starts_with(|c: char| c.is_uppercase()) => {
+            first.to_lowercase().chain(chars).collect()
+        }
+        _ => text.to_string(),
+    }
+}
+
+/// The kinds of file riff plays, as their names are usually written: "MP3", "FLAC".
+pub fn formats() -> Vec<String> {
+    AUDIO.iter().map(|e| e.to_uppercase()).collect()
 }
 
 /// The folder a file's Artist/Album path is read from: the deepest of `roots` holding it.
@@ -96,12 +175,18 @@ pub fn is_audio(path: &Path) -> bool {
 
 /// The library for the files found: a cached track where the file is unchanged, otherwise
 /// one read from the path. An unchanged track an older reader read keeps showing what the
-/// cache knows while it is read again. Returns the library and the tracks that still need their tags.
-pub fn merge(roots: &[PathBuf], found: Vec<Found>, cached: Vec<Track>) -> (Vec<Track>, Vec<Track>) {
+/// cache knows while it is read again. A cached track under a `missed` path stays as it
+/// was. Returns the library and the tracks that still need their tags.
+pub fn merge(
+    roots: &[PathBuf],
+    found: Vec<Found>,
+    cached: Vec<Track>,
+    missed: &[PathBuf],
+) -> (Vec<Track>, Vec<Track>) {
     let mut cached: HashMap<PathBuf, Track> =
         cached.into_iter().map(|t| (t.path.clone(), t)).collect();
     let mut todo = Vec::new();
-    let tracks = found
+    let mut tracks: Vec<Track> = found
         .into_iter()
         .map(|(path, size, modified)| match cached.remove(&path) {
             Some(t) if t.tagged && t.size == size && t.modified == modified => {
@@ -117,6 +202,11 @@ pub fn merge(roots: &[PathBuf], found: Vec<Found>, cached: Vec<Track>) -> (Vec<T
             }
         })
         .collect();
+    tracks.extend(
+        cached
+            .into_values()
+            .filter(|t| missed.iter().any(|m| t.path.starts_with(m))),
+    );
     (tracks, todo)
 }
 
@@ -236,6 +326,7 @@ mod tests {
             &["/m".into()],
             vec![found("/m/A/B/01 X.mp3", 10, 5)],
             vec![cached("/m/A/B/01 X.mp3", 10, 5)],
+            &[],
         );
         assert_eq!(tracks[0].title, "From tags");
         assert!(todo.is_empty());
@@ -247,6 +338,7 @@ mod tests {
             &["/m".into()],
             vec![found("/m/A/B/01 X.mp3", 11, 5), found("/m/A/B/02 Y.mp3", 1, 1)],
             vec![cached("/m/A/B/01 X.mp3", 10, 5)],
+            &[],
         );
         let titles: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["X", "Y"]);
@@ -257,7 +349,7 @@ mod tests {
     fn tracks_read_by_an_older_reader_are_read_again() {
         let mut old = cached("/m/A/B/01 X.mp3", 10, 5);
         old.reader = READER - 1;
-        let (tracks, todo) = merge(&["/m".into()], vec![found("/m/A/B/01 X.mp3", 10, 5)], vec![old]);
+        let (tracks, todo) = merge(&["/m".into()], vec![found("/m/A/B/01 X.mp3", 10, 5)], vec![old], &[]);
         assert_eq!(todo.len(), 1);
         // Meanwhile it shows what was known, not what the path says.
         assert_eq!(tracks[0].title, "From tags");
@@ -279,8 +371,28 @@ mod tests {
 
     #[test]
     fn deleted_files_drop_out() {
-        let (tracks, _) = merge(&["/m".into()], vec![], vec![cached("/m/A/B/01 X.mp3", 1, 1)]);
+        let (tracks, _) = merge(&["/m".into()], vec![], vec![cached("/m/A/B/01 X.mp3", 1, 1)], &[]);
         assert!(tracks.is_empty());
+    }
+
+    #[test]
+    fn songs_where_the_walk_couldnt_look_stay_as_they_were() {
+        let (tracks, todo) = merge(
+            &["/m".into(), "/drive".into()],
+            vec![found("/m/A/B/01 X.mp3", 1, 1)],
+            vec![
+                cached("/m/A/B/01 X.mp3", 1, 1),
+                cached("/m/A/B/02 Gone.mp3", 1, 1),
+                cached("/m/C/D/03 Cloud.mp3", 1, 1),
+                cached("/drive/E/F/04 Unplugged.mp3", 1, 1),
+            ],
+            &["/m/C".into(), "/drive".into()],
+        );
+        let mut paths: Vec<&str> = tracks.iter().map(|t| t.path.to_str().unwrap()).collect();
+        paths.sort();
+        assert_eq!(paths, ["/drive/E/F/04 Unplugged.mp3", "/m/A/B/01 X.mp3", "/m/C/D/03 Cloud.mp3"]);
+        assert!(tracks.iter().all(|t| t.title == "From tags"));
+        assert!(todo.is_empty());
     }
 
     #[test]
@@ -293,6 +405,7 @@ mod tests {
                 found("/m/Downloads/C/D/02 Y.mp3", 1, 1),
             ],
             vec![],
+            &[],
         );
         assert_eq!((tracks[0].artist.as_str(), tracks[0].album.as_str()), ("A", "B"));
         assert_eq!((tracks[1].artist.as_str(), tracks[1].album.as_str()), ("C", "D"));
@@ -303,19 +416,79 @@ mod tests {
         let root = std::env::temp_dir().join(format!("riff-walk-{}", std::process::id()));
         let album = root.join("Artist/Album");
         let inbox = root.join("Automatically Add to Music.localized");
+        let media = root.join("Media.localized/Music/Band/Record");
         std::fs::create_dir_all(&album).unwrap();
         std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(&media).unwrap();
         std::fs::write(album.join("01 Song.MP3"), b"x").unwrap();
+        std::fs::write(media.join("02 Tune.m4a"), b"x").unwrap();
         std::fs::write(album.join("01 Song.xsc"), b"x").unwrap();
         std::fs::write(album.join("cover.jpg"), b"x").unwrap();
         std::fs::write(inbox.join("Other.mp3"), b"x").unwrap();
-        let paths: Vec<PathBuf> = walk(&root).into_iter().map(|f| f.0).collect();
-        assert_eq!(paths, [album.join("01 Song.MP3")]);
-        let nested: Vec<PathBuf> = walk_all(&[root.clone(), album.clone()])
-            .into_iter()
-            .map(|f| f.0)
-            .collect();
-        assert_eq!(nested, [album.join("01 Song.MP3")]);
+        let counted = AtomicUsize::new(0);
+        let (found, missed) = walk(&root, &counted).unwrap();
+        let mut paths: Vec<PathBuf> = found.into_iter().map(|f| f.0).collect();
+        paths.sort();
+        assert_eq!(paths, [album.join("01 Song.MP3"), media.join("02 Tune.m4a")]);
+        assert!(missed.is_empty());
+        assert_eq!(counted.load(Ordering::Relaxed), 2);
+        let walked = walk_all(&[root.clone(), album.clone()], &AtomicUsize::new(0));
+        let mut nested: Vec<PathBuf> = walked.found.into_iter().map(|f| f.0).collect();
+        nested.sort();
+        assert_eq!(nested, paths);
+        assert!(walked.unreadable.is_empty() && walked.missed.is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_below_that_cant_be_opened_is_listed_as_missed() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("riff-missed-{}", std::process::id()));
+        let shut = root.join("Shut");
+        std::fs::create_dir_all(&shut).unwrap();
+        std::fs::write(root.join("01 Song.mp3"), b"x").unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let walked = walk_all(std::slice::from_ref(&root), &AtomicUsize::new(0));
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(walked.found.len(), 1);
+        assert!(walked.unreadable.is_empty());
+        assert_eq!(walked.missed, [shut]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_listed_folder_that_cant_be_opened_is_reported() {
+        let root = std::env::temp_dir().join(format!("riff-unreadable-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("01 Song.mp3"), b"x").unwrap();
+        let gone = root.join("Not here");
+        let file = root.join("01 Song.mp3");
+        let walked = walk_all(&[gone.clone(), root.clone(), file.clone()], &AtomicUsize::new(0));
+        assert_eq!(walked.found.len(), 1);
+        assert_eq!(walked.missed, [gone.clone(), file.clone()]);
+        assert_eq!(
+            walked.unreadable,
+            [
+                (gone, "it isn't there (moved, renamed, or on a drive that isn't connected)".to_string()),
+                (file, "it's a file, not a folder".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn errors_lose_their_codes() {
+        assert_eq!(plain("Input/output error (os error 5)"), "input/output error");
+        assert_eq!(plain("Unrecognized format"), "unrecognized format");
+        assert_eq!(plain("MP3 frame broken"), "MP3 frame broken");
+        let denied = std::io::Error::from_raw_os_error(1);
+        assert!(why(&denied).starts_with("macOS doesn't let riff in"));
+    }
+
+    #[test]
+    fn formats_come_from_the_extensions_riff_reads() {
+        let formats = formats();
+        assert!(formats.contains(&"MP3".to_string()) && formats.contains(&"FLAC".to_string()));
+        assert!(formats.iter().all(|f| is_audio(Path::new(&format!("x.{f}")))));
     }
 }

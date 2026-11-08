@@ -1,5 +1,6 @@
 mod audio;
 mod beats;
+mod empty;
 mod eq;
 mod keys;
 mod library;
@@ -29,6 +30,9 @@ use gpui::{
 fn main() {
     gpui_platform::application()
         .with_assets(ui::Assets)
+        // On macOS GPUI keeps running without a window; riff has no menu bar or other
+        // way back, so closing the window quits (the window saves first, see `view`).
+        .with_quit_mode(gpui::QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             ui::load_fonts(cx);
             // Where the window was left, if that display is still connected.
@@ -53,7 +57,8 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("riff".into()),
                         appears_transparent: true,
-                        traffic_light_position: None,
+                        // Centred in riff's 40 px title bar (the lights are 12 px).
+                        traffic_light_position: Some(point(px(14.), px(14.))),
                     }),
                     ..Default::default()
                 },

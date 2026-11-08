@@ -3,10 +3,11 @@
 
 use crate::audio::Audio;
 use crate::beats::{self, Beats};
-use crate::keys::{self, Action};
+use crate::empty;
+use crate::keys::{self, Action, Keyboard};
 use crate::library::{self, Grouped, Kind, Track};
 use crate::media::Media;
-use crate::menu::{Menu, Outcome, Target};
+use crate::menu::{Menu, Outcome, Shown, Target};
 use crate::playlist::Playlist;
 use crate::playlists::Playlists;
 use crate::queue::Queue;
@@ -29,24 +30,34 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
+
+/// A finished scan: the library, the tracks still to read tags from, and the listed
+/// folders that couldn't be opened.
+type Scanned = (Vec<Track>, Vec<Track>, Vec<scan::Unreadable>);
 
 const POLL: Duration = Duration::from_millis(40);
 /// How often the session is checked and, when it changed, saved.
 const SESSION_EVERY: Duration = Duration::from_secs(1);
 /// The scrollbar stays this long after the list stops moving, as in Zed.
 const SCROLLBAR_LINGERS: Duration = Duration::from_secs(1);
+/// How long a quit held back by a failed save waits for the second quit that goes ahead.
+const QUIT_AGAIN: Duration = Duration::from_secs(10);
 const ROW: f32 = 44.;
 /// The transparent title bar's height, where the traffic lights sit.
-const TITLEBAR: f32 = 32.;
+const TITLEBAR: f32 = 40.;
 const SEEK: f64 = 5.0;
 /// How much the practice view shows around the playhead before any zooming.
 const SPAN: Duration = Duration::from_secs(10);
 /// A press this close to a strip's top grabs the marker by its flag.
-const FLAG: f32 = 10.;
-/// A click this close to a loop edge grabs it.
-const GRAB: f32 = 8.;
+const FLAG: f32 = 24.;
+/// A click this close to a loop edge grabs it: 24 px across, an easy target.
+const GRAB: f32 = 12.;
+/// The least a press area is across, though what is drawn there may be thinner.
+const HIT: f32 = 24.;
 /// How long a scan's result stays in the search bar.
 const RESULT_FOR: Duration = Duration::from_secs(8);
 /// Theme names the picker shows at once.
@@ -55,8 +66,8 @@ const PICKER_ROWS: usize = 8;
 const SAVE_EVERY: usize = 250;
 
 
-/// The ⌘, sheet: the highlighted row (each folder, then "add folder", the theme, vim
-/// keys, the output), and the theme picker when it is open.
+/// The ⌘, sheet: the highlighted row (each folder, then "add folder", the theme, the
+/// keyboard, the output), and the theme picker when it is open.
 #[derive(Default)]
 struct Prefs {
     row: usize,
@@ -91,6 +102,8 @@ struct Picker {
     themes: Vec<Theme>,
     query: String,
     selected: usize,
+    /// The wheel's movement not yet a whole row, see `ui::wheel_rows`.
+    wheel: f32,
 }
 
 impl Picker {
@@ -144,21 +157,21 @@ impl Render for Tip {
             .px_2()
             .py_1()
             .rounded_md()
-            .bg(rgb(t.raised))
+            .bg(rgb(t.tooltip_bg))
             .border_1()
-            .border_color(rgb(t.faint))
+            .border_color(rgb(t.border))
             .font_family(UI)
             .text_xs()
-            .text_color(rgb(t.text))
+            .text_color(rgb(t.tooltip_text))
             .child(self.what.clone())
             .children(self.keys.iter().map(|k| {
                 div()
                     .px_1()
                     .rounded_sm()
                     .border_1()
-                    .border_color(rgb(t.faint))
+                    .border_color(tint(t.tooltip_text, 0x40))
                     .font_family(MONO)
-                    .text_color(rgb(t.accent))
+                    .text_color(rgb(t.tooltip_key))
                     .child(k.to_string())
             }))
     }
@@ -182,10 +195,44 @@ enum Edge {
     Marker,
 }
 
-/// Adding a song to a playlist: which song, the highlighted row, and the name typed
-/// for a new playlist.
+/// A press in the overview's box: where the detail view started, the moment and
+/// x pressed, whether ⌥ was held, and whether it has moved far enough to be a drag.
+#[derive(Clone, Copy)]
+struct Pan {
+    from: Duration,
+    at: Duration,
+    x: Pixels,
+    alt: bool,
+    moved: bool,
+}
+
+/// A press on the detail waveform away from the loop's edges and the marker: the moment
+/// and x pressed, the moment under the pointer now and how far it has moved, and whether
+/// ⌥ is held. Let go, it seeks, or sets the loop if it was dragged (`Loop::swept`).
+#[derive(Clone, Copy)]
+struct Sweep {
+    at: Duration,
+    x: Pixels,
+    to: Duration,
+    moved: f32,
+    alt: bool,
+}
+
+/// A press on a section's edge in the section lane: which section, its start (or end),
+/// the x pressed, and whether it has moved far enough to be a drag. One that never
+/// moves is a click, and plays the section, so a narrow one under its grips still can be.
+#[derive(Clone, Copy)]
+struct Shaping {
+    i: usize,
+    start: bool,
+    x: Pixels,
+    moved: bool,
+}
+
+/// Adding songs to a playlist: which songs (one, or a list's from a menu), the
+/// highlighted row, and the name typed for a new playlist.
 struct AddTo {
-    song: PathBuf,
+    songs: Vec<PathBuf>,
     at: usize,
     naming: Option<String>,
 }
@@ -212,7 +259,13 @@ pub struct Riff {
     focus: FocusHandle,
     tracks: Vec<Track>,
     by_path: HashMap<PathBuf, usize>,
-    scanning: Option<Receiver<(Vec<Track>, Vec<Track>)>>,
+    scanning: Option<Receiver<Scanned>>,
+    /// Songs the scan under way has found so far, counted on its thread.
+    scan_found: Arc<AtomicUsize>,
+    /// The count last drawn, so the list redraws only when it moves.
+    scan_shown: usize,
+    /// Listed folders the last scan couldn't open, and why.
+    unreadable: Vec<scan::Unreadable>,
     tagging: Option<Receiver<Track>>,
     tags_left: usize,
     tags_total: usize,
@@ -248,8 +301,9 @@ pub struct Riff {
     muted: Vec<bool>,
     /// Each stem set's levels, by its first file, like `loops`.
     levels: HashMap<PathBuf, Vec<f32>>,
-    /// A level being dragged, and where its slider was drawn.
-    sliding: Option<(Slider, Rc<Cell<Bounds<Pixels>>>)>,
+    /// A level being dragged, where its slider was drawn, and for a stem the x pressed
+    /// and its level then: a stem's level moves with the drag, so a click leaves it.
+    sliding: Option<(Slider, Rc<Cell<Bounds<Pixels>>>, Option<(Pixels, f32)>)>,
     solo: Option<usize>,
     /// The playing song's beats, found in the background like the waveform.
     beats: Option<(PathBuf, Rc<Beats>)>,
@@ -285,9 +339,10 @@ pub struct Riff {
     loops: HashMap<PathBuf, crate::audio::Loop>,
     /// Each recording's marker, where `o` plays from (`m` drops it).
     marks: HashMap<PathBuf, Duration>,
-    /// A section edge being dragged in the section lane: which section, and its start
-    /// (or end).
-    shaping: Option<(usize, bool)>,
+    /// A section edge pressed in the section lane, maybe being dragged.
+    shaping: Option<Shaping>,
+    /// The section whose delete button or menu entry asked "for good?".
+    deleting_section: Option<Region>,
     /// The section lane, where it was last drawn, spanning the whole song.
     lane: Strip,
     /// Files being made a variation of a song, in the background.
@@ -295,6 +350,13 @@ pub struct Riff {
     wave_error: Option<String>,
     /// How much of the song the detail view shows.
     span: Duration,
+    /// Where the detail view starts once dragged away on the overview; it stays there
+    /// until Follow (or a jump: a section, `o`, another song). None follows the playhead.
+    panned: Option<Duration>,
+    /// A press in the overview's box: a drag moves the view, a click seeks on release.
+    panning: Option<Pan>,
+    /// A press on the detail waveform: a drag draws a loop, a click seeks on release.
+    sweeping: Option<Sweep>,
     /// The playhead as the practice view draws it, and the clock that moves it.
     smooth: crate::audio::Smooth,
     started: std::time::Instant,
@@ -330,6 +392,8 @@ pub struct Riff {
     renaming_playlist: Option<String>,
     /// The open playlist's delete button has asked "for good?".
     deleting_playlist: bool,
+    /// The queue's clear has asked "all of it?".
+    clearing_queue: bool,
     /// The variation `X` asked about, and when: a second `X` within a few seconds
     /// removes it, anything else in between keeps it.
     removing_variation: Option<(usize, std::time::Instant)>,
@@ -361,6 +425,9 @@ pub struct Riff {
     saved_at: std::time::Instant,
     /// The playhead as last kept in `resume.json`.
     kept_at: Duration,
+    /// When a quit was held back because saving failed: another within `QUIT_AGAIN`
+    /// quits anyway, a later one is held again.
+    quit_held: Option<std::time::Instant>,
 }
 
 fn cache_file() -> PathBuf {
@@ -425,24 +492,41 @@ impl Riff {
         })
         .detach();
 
+        // Closing the window quits riff (`main` sets that), saving first as ⌘Q does.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            this.update(cx, |riff, cx| {
+                let quit = riff.save_for_quit();
+                cx.notify();
+                quit
+            })
+            .unwrap_or(true)
+        });
+
         let mut tracks = scan::load_cache(&cache_file());
         library::sort(&mut tracks);
         let settings = Settings::load(&settings_file());
         let mut audio = Audio::new(settings.volume, settings.output.clone());
         audio.set_eq(settings.eq);
-        if settings.theme != theme::DEFAULT_NAME
-            && let Some(t) = theme::available(&theme::zed_dirs())
-                .into_iter()
-                .find(|t| t.name == settings.theme)
-        {
-            theme::set_active(t);
-        }
+
+        // On Auto with riff's own theme, macOS turning light or dark turns riff too.
+        cx.observe_window_appearance(window, |riff, window, cx| {
+            if theme::is_own(&riff.settings.theme) && riff.settings.appearance == theme::Appearance::Auto {
+                let dark = system_dark(window.appearance());
+                theme::set_active(theme::own(&riff.settings.theme, theme::Appearance::Auto, dark));
+                cx.notify();
+            }
+        })
+        .detach();
 
         let mut riff = Riff {
             focus,
             tracks,
             by_path: HashMap::new(),
             scanning: None,
+            scan_found: Arc::default(),
+            scan_shown: 0,
+            unreadable: Vec::new(),
             tagging: None,
             tags_left: 0,
             tags_total: 0,
@@ -484,12 +568,16 @@ impl Riff {
             loops: HashMap::new(),
             marks: HashMap::new(),
             shaping: None,
+            deleting_section: None,
             lane: Strip::default(),
             resume: Resume::load(&resume_file()),
             kept: std::time::Instant::now(),
             adding: None,
             wave_error: None,
             span: SPAN,
+            panned: None,
+            panning: None,
+            sweeping: None,
             smooth: Default::default(),
             started: std::time::Instant::now(),
             overview: Strip::default(),
@@ -511,6 +599,7 @@ impl Riff {
             add_to: None,
             renaming_playlist: None,
             deleting_playlist: false,
+            clearing_queue: false,
             removing_variation: None,
             shuffle: false,
             media: Media::new(),
@@ -528,10 +617,16 @@ impl Riff {
             saved: Session::default(),
             saved_at: std::time::Instant::now(),
             kept_at: Duration::ZERO,
+            quit_held: None,
         };
+        riff.apply_theme(cx);
         riff.message = riff.audio.error.clone().map(|e| (e, true));
         riff.reindex(None);
         riff.restore(Session::load(&session_file()));
+        let aside: Vec<String> = state::take_set_aside().iter().map(|p| tilde(p)).collect();
+        if let Some(note) = empty::set_aside(&aside) {
+            riff.message = Some((note, true));
+        }
         riff.rescan();
         riff
     }
@@ -541,9 +636,12 @@ impl Riff {
         let roots = self.settings.folders.clone();
         let cached = self.tracks.clone();
         let (tx, rx) = std::sync::mpsc::channel();
+        let counted = Arc::new(AtomicUsize::new(0));
+        (self.scan_found, self.scan_shown) = (counted.clone(), 0);
         std::thread::spawn(move || {
-            let found = scan::walk_all(&roots);
-            let _ = tx.send(scan::merge(&roots, found, cached));
+            let walked = scan::walk_all(&roots, &counted);
+            let (tracks, todo) = scan::merge(&roots, walked.found, cached, &walked.missed);
+            let _ = tx.send((tracks, todo, walked.unreadable));
         });
         self.scanning = Some(rx);
         // Tags still being read belong to the old list; the new merge queues them again.
@@ -635,21 +733,59 @@ impl Riff {
         }
     }
 
-    fn open_picker(&mut self) {
-        let themes = theme::available(&theme::zed_dirs());
+    /// Draws with the theme the settings choose: the editor theme when one is chosen and
+    /// still installed, otherwise riff's own for the Appearance (on Auto, as macOS is now).
+    fn apply_theme(&self, cx: &gpui::App) {
+        let editor = Some(self.settings.theme.as_str())
+            .filter(|name| !theme::is_own(name))
+            .and_then(|name| theme::editor(&theme::zed_dirs(), name));
+        let t = editor.unwrap_or_else(|| {
+            // Unforced first, so on Auto macOS's own appearance is what's read.
+            if self.settings.appearance == theme::Appearance::Auto {
+                cx.set_window_appearance(None);
+            }
+            theme::own(&self.settings.theme, self.settings.appearance, system_dark(cx.window_appearance()))
+        });
+        self.draw_with(t, cx);
+    }
+
+    /// Draws with `t`, the window's own chrome (its edge, the traffic lights) matching it.
+    /// Riff's own theme on Auto leaves the chrome to macOS, which is how it follows.
+    fn draw_with(&self, t: Theme, cx: &gpui::App) {
+        let follows = !t.editor && self.settings.appearance == theme::Appearance::Auto;
+        let forced = if t.dark { gpui::WindowAppearance::Dark } else { gpui::WindowAppearance::Light };
+        cx.set_window_appearance((!follows).then_some(forced));
+        theme::set_active(t);
+    }
+
+    /// The settings row's next Appearance: Auto, Light, Dark. It means riff's own schemes,
+    /// so from an editor theme the first press goes back to Riff as it was.
+    fn next_appearance(&mut self, cx: &gpui::App) {
+        if theme::is_own(&self.settings.theme) {
+            self.settings.appearance = self.settings.appearance.next();
+        } else {
+            self.settings.theme.clear();
+        }
+        self.apply_theme(cx);
+        self.save_settings();
+    }
+
+    fn open_picker(&mut self, cx: &gpui::App) {
+        let owns = theme::owns(self.settings.appearance, system_dark(cx.window_appearance()));
+        let themes = theme::available(&theme::zed_dirs(), owns);
         let selected = themes
             .iter()
-            .position(|t| t.name == self.settings.theme)
+            .position(|t| t.saved() == self.settings.theme)
             .unwrap_or(0);
         if let Some(prefs) = &mut self.prefs {
-            prefs.picker = Some(Picker { themes, query: String::new(), selected });
+            prefs.picker = Some(Picker { themes, query: String::new(), selected, wheel: 0. });
         }
     }
 
     /// Keeps a theme: draws with it and saves it.
-    fn keep_theme(&mut self, t: Theme) {
-        self.settings.theme = t.name.clone();
-        theme::set_active(t);
+    fn keep_theme(&mut self, t: Theme, cx: &gpui::App) {
+        self.settings.theme = t.saved();
+        self.draw_with(t, cx);
         self.save_settings();
         if let Some(prefs) = &mut self.prefs {
             prefs.picker = None;
@@ -659,7 +795,7 @@ impl Riff {
     /// Closes the ⌘, sheet, dropping a theme that was only being previewed.
     fn close_prefs(&mut self) {
         if let Some(Prefs { picker: Some(picker), .. }) = self.prefs.take()
-            && let Some(t) = picker.themes.into_iter().find(|t| t.name == self.settings.theme)
+            && let Some(t) = picker.themes.into_iter().find(|t| t.saved() == self.settings.theme)
         {
             theme::set_active(t);
         }
@@ -694,17 +830,25 @@ impl Riff {
         }
     }
 
-    fn toggle_vim(&mut self) {
-        self.settings.vim = !self.settings.vim;
+    fn toggle_keyboard(&mut self) {
+        self.settings.keyboard = match self.settings.keyboard {
+            Keyboard::Mac => Keyboard::Vim,
+            Keyboard::Vim => Keyboard::Mac,
+        };
         self.pending = None;
         self.save_settings();
     }
 
-    /// Keys while the ⌘, sheet is open.
-    fn prefs_key(&mut self, k: &gpui::Keystroke) {
+    fn vim(&self) -> bool {
+        self.settings.keyboard == Keyboard::Vim
+    }
+
+    /// Keys while the ⌘, sheet is open. `typed` is what the key types in the theme filter.
+    fn prefs_key(&mut self, k: &gpui::Keystroke, typed: Option<String>, cx: &gpui::App) {
         let (cmd, ctrl) = (k.modifiers.platform, k.modifiers.control);
+        let vim = self.vim();
         let Some(prefs) = &mut self.prefs else { return };
-        let vim = self.settings.vim && prefs.picker.is_none() && !cmd && !ctrl;
+        let vim = vim && prefs.picker.is_none() && !cmd && !ctrl;
         let up = k.key == "up" || (ctrl && k.key == "k") || (vim && k.key == "k");
         let down = k.key == "down" || (ctrl && k.key == "j") || (vim && k.key == "j");
         let dd = vim && k.key == "d" && std::mem::take(&mut prefs.delete);
@@ -714,7 +858,7 @@ impl Riff {
             match k.key.as_str() {
                 "escape" => {
                     // Back to the saved theme, from before browsing.
-                    if let Some(t) = picker.themes.iter().find(|t| t.name == self.settings.theme) {
+                    if let Some(t) = picker.themes.iter().find(|t| t.saved() == self.settings.theme) {
                         theme::set_active(t.clone());
                     }
                     prefs.picker = None;
@@ -722,7 +866,7 @@ impl Riff {
                 }
                 "enter" => {
                     if let Some(t) = picker.highlighted().cloned() {
-                        self.keep_theme(t);
+                        self.keep_theme(t, cx);
                     }
                     return;
                 }
@@ -733,10 +877,10 @@ impl Riff {
                     picker.selected = 0;
                 }
                 _ => {
-                    let Some(text) = k.key_char.as_ref().filter(|_| !cmd && !ctrl) else {
+                    let Some(text) = typed else {
                         return;
                     };
-                    picker.query.push_str(text);
+                    picker.query.push_str(&text);
                     picker.selected = 0;
                 }
             }
@@ -762,7 +906,7 @@ impl Riff {
         match k.key.as_str() {
             "escape" => self.close_prefs(),
             _ if up => prefs.row = row.saturating_sub(1),
-            _ if down => prefs.row = (row + 1).min(folders + 4 + custom_data_dir() as usize),
+            _ if down => prefs.row = (row + 1).min(folders + 5 + custom_data_dir() as usize),
             _ if dd && row < folders => {
                 self.remove_folder(row);
                 if let Some(prefs) = &mut self.prefs {
@@ -775,15 +919,20 @@ impl Riff {
                     prefs.row = row.min(self.settings.folders.len());
                 }
             }
-            "enter" | "space" if row == folders + 1 => self.open_picker(),
-            "enter" | "space" if row == folders + 2 => self.toggle_vim(),
-            "enter" | "space" if row == folders + 3 => self.open_outputs(),
+            "enter" | "space" if row == folders + 1 => self.next_appearance(cx),
+            "enter" | "space" if row == folders + 2 => self.open_picker(cx),
+            "enter" | "space" if row == folders + 3 => self.toggle_keyboard(),
+            "enter" | "space" if row == folders + 4 => self.open_outputs(),
             _ => {}
         }
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = self.audio.tick();
+        if let Some(e) = self.audio.failed.take() {
+            let title = self.now.as_ref().map_or("the song", |n| n.title.as_str());
+            self.message = Some((empty::cant_play(title, &scan::plain(&e)), true));
+        }
         // A message stays a few seconds, an error longer.
         match &self.message {
             Some((text, error)) => match &self.message_since {
@@ -917,8 +1066,22 @@ impl Riff {
             media.show(now, self.audio.duration);
             media.status(self.audio.playing(), self.audio.position());
         }
-        if let Some((tracks, todo)) = self.scanning.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        // The first scan's count, while the empty list shows it.
+        if self.scanning.is_some() && self.tracks.is_empty() {
+            let found = self.scan_found.load(Ordering::Relaxed);
+            if found != self.scan_shown {
+                self.scan_shown = found;
+                changed = true;
+            }
+        }
+        if let Some((tracks, todo, unreadable)) = self.scanning.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.scanning = None;
+            let named: Vec<(String, String)> =
+                unreadable.iter().map(|(path, why)| (tilde(path), why.clone())).collect();
+            if let Some(note) = empty::cant_read(&named) {
+                self.message = Some((note, true));
+            }
+            self.unreadable = unreadable;
             let keep = self.selected_path();
             let (new, gone) = scan::changes(&self.tracks, &tracks);
             self.scan_note = ui::scan_result(new, gone).map(|n| (n, std::time::Instant::now()));
@@ -1130,7 +1293,8 @@ impl Riff {
     /// from the top.
     fn play(&mut self, track: Track, pick: bool) {
         self.keep_spot();
-        (self.shaping, self.dragging) = (None, None);
+        (self.shaping, self.dragging, self.panning, self.panned) = (None, None, None, None);
+        (self.sweeping, self.deleting_section) = (None, None);
         self.store_resume();
         self.variation = 0;
         self.muted.clear();
@@ -1191,14 +1355,20 @@ impl Riff {
 
     /// Saves the session when it changed, and the paused playhead when it moved (while
     /// playing, `poll` keeps it every few seconds), so closing the window loses nothing.
-    fn save_session(&mut self) {
+    /// Saves what riff shows, when it changed. Returns whether that worked.
+    fn save_session(&mut self) -> bool {
         self.saved_at = std::time::Instant::now();
         let session = self.session();
+        let mut saved = true;
         if session != self.saved {
-            if let Err(e) = session.store(&session_file()) {
-                self.message = Some((format!("couldn't save the session: {e}"), true));
+            match session.store(&session_file()) {
+                // Kept as saved only once written, so a failed save is tried again.
+                Ok(()) => self.saved = session,
+                Err(e) => {
+                    self.message = Some((format!("couldn't save the session: {e}"), true));
+                    saved = false;
+                }
             }
-            self.saved = session;
         }
         if self.now.is_some()
             && !self.audio.playing()
@@ -1206,8 +1376,9 @@ impl Riff {
             && self.audio.position() != self.kept_at
         {
             self.keep_spot();
-            self.store_resume();
+            saved &= self.store_resume();
         }
+        saved
     }
 
     /// Opens as riff was left: the song that was playing, paused where it was (in its
@@ -1274,10 +1445,30 @@ impl Riff {
         self.kept = std::time::Instant::now();
     }
 
-    fn store_resume(&mut self) {
-        if let Err(e) = self.resume.store(&resume_file()) {
+    /// Everything kept before riff goes: where the song is, and the session.
+    /// Saves before quitting, and says whether to quit: when a save fails the first quit
+    /// is held back with the error showing, so it isn't lost as the window goes; quitting
+    /// again quits.
+    fn save_for_quit(&mut self) -> bool {
+        self.keep_spot();
+        let saved = self.store_resume() & self.save_session();
+        if saved || self.quit_held.is_some_and(|at| at.elapsed() < QUIT_AGAIN) {
+            return true;
+        }
+        self.quit_held = Some(std::time::Instant::now());
+        if let Some((note, _)) = &self.message {
+            self.message = Some((format!("{note}; quit again to quit anyway"), true));
+        }
+        false
+    }
+
+    /// Saves where songs were left. Returns whether that worked.
+    fn store_resume(&mut self) -> bool {
+        let result = self.resume.store(&resume_file());
+        if let Err(e) = &result {
             self.message = Some((format!("couldn't save where songs were: {e}"), true));
         }
+        result.is_ok()
     }
 
     /// Reads the waveform of what plays (stems summed), keyed by its first file.
@@ -1294,7 +1485,8 @@ impl Riff {
     }
 
     /// The speed: slower and faster by 5%, and what plays now, lit when it isn't full
-    /// speed (a click there is `s`). Right-click for presets and the trainer.
+    /// speed (a click there is `s`). Right-click or the chevron for presets and the
+    /// trainer.
     fn speed_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
         let on = self.speed.on;
@@ -1311,11 +1503,13 @@ impl Riff {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|riff, e: &MouseDownEvent, _, cx| {
+                    // Not also the now-playing card's menu around it.
+                    cx.stop_propagation();
                     riff.menu = Some((Menu::speed(), e.position));
                     cx.notify();
                 }),
             )
-            .child(div().px_1().child(ui::icon("gauge", 16., if on { t.accent } else { t.dim })))
+            .child(div().px_1().child(ui::icon("gauge", 16., if on { t.accent } else { t.text_dim })))
             .child(self.tool("slower", "minus", "5% slower, pitch kept", Action::Speed(false), false, cx))
             .child(
                 div()
@@ -1330,17 +1524,25 @@ impl Riff {
                     .font_family(MONO)
                     .text_xs()
                     .cursor_pointer()
-                    .when(on, |d| d.bg(rgb(t.accent_soft)))
-                    .hover(|d| d.bg(rgb(t.faint)))
-                    .text_color(rgb(if on { t.accent } else { t.dim }))
+                    .map(|d| lit_cues(d, on))
+                    .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                    .hover(|d| d.bg(rgb(t.hover)))
+                    .text_color(rgb(if on { t.accent_text } else { t.text_dim }))
                     .tooltip(self.tip(
-                        format!("Full speed, again back to {}%; right-click for presets and the trainer", self.speed.percent),
+                        format!("Full speed, again back to {}%; the chevron or a right-click for presets and the trainer", self.speed.percent),
                         &[Action::Slow],
                     ))
                     .child(label)
                     .on_click(cx.listener(|riff, _, _, cx| riff.act(Action::Slow, cx))),
             )
             .child(self.tool("faster", "plus", "5% faster, pitch kept", Action::Speed(true), false, cx))
+            // The right-click menu by a plain click too.
+            .child(
+                self.button("speed-menu", "chevron-down", "Speed presets and the trainer's settings", &[], false, cx, |riff, e, _| {
+                    riff.menu = Some((Menu::speed(), e.position()));
+                })
+                .w(px(24.)),
+            )
     }
 
     /// The pitch: down and up a semitone, and what plays now, lit when shifted. The
@@ -1378,10 +1580,11 @@ impl Riff {
                     .rounded_md()
                     .font_family(MONO)
                     .text_xs()
-                    .when(on, |d| d.bg(rgb(t.accent_soft)))
-                    .text_color(rgb(if on { t.accent } else { t.dim }))
+                    .map(|d| lit_cues(d, on))
+                    .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                    .text_color(rgb(if on { t.accent_text } else { t.text_dim }))
                     .tooltip(self.tip("Pitch: scroll for 5 cents; right-click for more", &[Action::Pitch(5), Action::Pitch(-5)]))
-                    .child(ui::icon("music", 12., if on { t.accent } else { t.dim }))
+                    .child(ui::icon("music", 12., if on { t.accent } else { t.text_dim }))
                     .child(crate::speed::pitch_label(cents)),
             )
             .child(self.tool("pitch-up", "plus", "Up a semitone, speed kept", Action::Pitch(100), false, cx))
@@ -1399,34 +1602,34 @@ impl Riff {
             .px_2()
             .rounded_md()
             .bg(rgb(t.raised))
-            .child(ui::icon(if volume == 0.0 { "volume-x" } else { "volume-2" }, 16., t.dim))
+            .child(ui::icon(if volume == 0.0 { "volume-x" } else { "volume-2" }, 16., t.text_dim))
             .child(
-                self.level_area("volume", Slider::Volume, gpui::rgb(t.accent), cx)
+                self.level_area("volume", Slider::Volume, gpui::rgb(t.accent), true, cx)
                     .tooltip(self.tip(format!("Volume {:.0}%: drag or scroll", volume * 100.), &[Action::Volume(true), Action::Volume(false)]))
                     .w(px(72.))
-                    .h(px(10.))
-                    .rounded_full()
-                    .bg(rgb(t.faint)),
+                    .h(px(HIT)),
             )
     }
 
-    /// The title bar's switch between library and practice mode, the current one lit.
+    /// The title bar's switch between library and practice mode, centred and large,
+    /// the current mode filled with the accent: they are two different places.
     fn mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
         let segment = |id: &'static str, icon: &'static str, label: &'static str, on: bool| {
             div()
                 .id(id)
-                .h(px(22.))
-                .px_2()
+                .h(px(28.))
+                .px_4()
                 .flex()
                 .items_center()
-                .gap_1p5()
+                .gap_2()
                 .rounded_md()
-                .text_xs()
-                .when(on, |d| d.bg(rgb(t.accent_soft)))
-                .when(!on, |d| d.cursor_pointer().hover(|d| d.bg(rgb(t.faint))))
-                .text_color(rgb(if on { t.accent } else { t.dim }))
-                .child(ui::icon(icon, 14., if on { t.accent } else { t.dim }))
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .when(on, |d| d.bg(rgb(t.accent_fill)))
+                .when(!on, |d| d.cursor_pointer().hover(|d| d.bg(rgb(t.hover))))
+                .text_color(rgb(if on { t.on_accent } else { t.text_dim }))
+                .child(ui::icon(icon, 16., if on { t.on_accent } else { t.text_dim }))
                 .child(label)
                 .when(!on, |d| {
                     d.tooltip(self.tip(format!("{label} mode"), &[Action::Practice])).on_click(cx.listener(
@@ -1440,7 +1643,6 @@ impl Riff {
         };
         pill()
             .p(px(2.))
-            .mr_2()
             .child(segment("mode-library", "music", "Library", !self.practice))
             .child(segment("mode-practice", "audio-waveform", "Practice", self.practice))
     }
@@ -1451,15 +1653,15 @@ impl Riff {
         let segment = |id: &'static str, icon: &'static str, what: &'static str, on: bool| {
             div()
                 .id(id)
-                .h(px(22.))
+                .h(px(HIT))
                 .w(px(28.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_md()
-                .when(on, |d| d.bg(rgb(t.accent_soft)))
-                .when(!on, |d| d.cursor_pointer().hover(|d| d.bg(rgb(t.faint))))
-                .child(ui::icon(icon, 14., if on { t.accent } else { t.dim }))
+                .map(|d| lit_cues(d, on))
+                .when(!on, |d| d.cursor_pointer().hover(|d| d.bg(rgb(t.hover))))
+                .child(ui::icon(icon, 14., if on { t.accent } else { t.text_dim }))
                 .tooltip(self.tip(what, &[Action::ListView]))
                 .when(!on, |d| {
                     d.on_click(cx.listener(|riff, _, _, cx| {
@@ -1493,6 +1695,7 @@ impl Riff {
                     self.pick_variation(song, cx);
                 }
             }
+            Action::Hide => cx.hide(),
             _ => {
                 self.perform(action);
             }
@@ -1511,6 +1714,23 @@ impl Riff {
         lit: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        self.button(id, icon, what, &[action], lit, cx, move |riff, _, cx| riff.act(action, cx))
+    }
+
+    /// An icon button like `tool` that does `click` rather than an action: a sheet's ×,
+    /// a menu opened from it, a delete that asks first. Its tooltip has the keys for
+    /// `keys`, the keyboard's way to the same.
+    #[allow(clippy::too_many_arguments)]
+    fn button(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        icon: &'static str,
+        what: &str,
+        keys: &[Action],
+        lit: bool,
+        cx: &mut Context<Self>,
+        click: impl Fn(&mut Riff, &gpui::ClickEvent, &mut Context<Riff>) + 'static,
+    ) -> Stateful<Div> {
         let t = t();
         div()
             .id(id)
@@ -1522,12 +1742,101 @@ impl Riff {
             .justify_center()
             .rounded_md()
             .cursor_pointer()
-            .when(lit, |d| d.bg(rgb(t.accent_soft)))
-            .hover(|d| d.bg(rgb(t.faint)))
+            .map(|d| lit_cues(d, lit))
+            .hover(|d| d.bg(rgb(t.hover)))
             .child(ui::icon(icon, 16., if lit { t.accent } else { t.text }))
+            .tooltip(self.tip(what.to_string(), keys))
+            .on_click(cx.listener(move |riff, e, _, cx| {
+                // Not also a click on what it sits on (a row, the title bar).
+                cx.stop_propagation();
+                click(riff, e, cx);
+                cx.notify();
+            }))
+    }
+
+    /// A sheet's header: its icon and name, and its × on the right.
+    fn sheet_header(&self, icon: &'static str, title: &str, close: Stateful<Div>) -> Div {
+        let t = t();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(ui::icon(icon, 16., t.accent))
+            .child(div().flex_1().text_color(rgb(t.text)).child(title.to_string()))
+            .child(close)
+    }
+
+    /// A small button with its name written out, for a dialog's or a field's choices
+    /// (Save, Cancel, Delete for good); the key that does the same beside the name.
+    fn choice(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        label: &str,
+        key: &'static str,
+        colour: u32,
+        cx: &mut Context<Self>,
+        click: impl Fn(&mut Riff) + 'static,
+    ) -> Stateful<Div> {
+        let t = t();
+        div()
+            .id(id)
+            .flex_none()
+            .h(px(28.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .bg(rgb(t.raised))
+            .border_1()
+            .border_color(rgb(t.border))
+            .hover(|d| d.bg(rgb(t.hover)))
+            .text_sm()
+            .text_color(rgb(colour))
+            .child(label.to_string())
+            .when(!key.is_empty(), |d| d.child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(key)))
+            .on_click(cx.listener(move |riff, _, _, cx| {
+                cx.stop_propagation();
+                click(riff);
+                cx.notify();
+            }))
+    }
+
+    /// A large button with its name written out, for what is reached for with a guitar
+    /// on the lap; otherwise like `tool`.
+    fn big(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        icon: &'static str,
+        label: &str,
+        what: &str,
+        action: Action,
+        lit: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = t();
+        div()
+            .id(id)
+            .h(px(44.))
+            .px_3()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .rounded_lg()
+            .cursor_pointer()
+            .bg(rgb(t.raised))
+            .map(|d| lit_cues(d, lit))
+            .hover(|d| d.bg(rgb(t.hover)))
+            .text_sm()
+            .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+            .text_color(rgb(if lit { t.accent_text } else { t.text }))
+            .child(ui::icon(icon, 20., if lit { t.accent } else { t.text }))
+            .child(label.to_string())
             .tooltip(self.tip(what.to_string(), &[action]))
             .on_click(cx.listener(move |riff, _, _, cx| {
-                // Not also a click on what it sits on (a row, the title bar).
                 cx.stop_propagation();
                 riff.act(action, cx);
             }))
@@ -1541,7 +1850,7 @@ impl Riff {
     ) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
         let what = what.into();
         let keys: Vec<&'static str> =
-            actions.iter().flat_map(|a| keys::keys_for(*a, self.mode(), self.settings.vim)).collect();
+            actions.iter().flat_map(|a| keys::keys_for(*a, self.mode(), self.settings.keyboard)).collect();
         move |_, cx| cx.new(|_| Tip { what: what.clone(), keys: keys.clone() }).into()
     }
 
@@ -1629,24 +1938,54 @@ impl Riff {
         }
     }
 
+    /// A slider's level moved by how far the pointer went since `from` (x and level).
+    fn slide_by(&mut self, slider: Slider, bounds: Bounds<Pixels>, x: Pixels, from: (Pixels, f32)) {
+        let width = f32::from(bounds.size.width);
+        if width > 0. {
+            self.set_level(slider, crate::audio::level_at(from.1 + f32::from(x - from.0) / width));
+        }
+    }
+
     /// An area that sets `slider`'s level: a drag across it, or the wheel over it. Its
     /// level shows as a fill from the left; the caller sizes it and adds what it shows.
-    fn level_area(&self, id: impl Into<gpui::ElementId>, slider: Slider, fill: gpui::Rgba, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// A `thin` one draws a narrow bar across its middle, so the area to press stays
+    /// larger than what is drawn. A press on the volume or speed jumps there; a stem's
+    /// level only moves with a drag, since its name is pressed for other reasons too.
+    fn level_area(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        slider: Slider,
+        fill: gpui::Rgba,
+        thin: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::default();
         let (drawn, pressed) = (bounds.clone(), bounds);
-        div()
+        let level = div().absolute().top_0().left_0().h_full().w(relative(self.level(slider))).bg(fill);
+        let area = div()
             .id(id)
             .relative()
-            .overflow_hidden()
             .cursor(gpui::CursorStyle::ResizeLeftRight)
-            .child(canvas(move |b, _, _| drawn.set(b), |_, _, _, _| {}).absolute().size_full())
-            .child(div().absolute().top_0().left_0().h_full().w(relative(self.level(slider))).bg(fill))
+            .child(canvas(move |b, _, _| drawn.set(b), |_, _, _, _| {}).absolute().size_full());
+        let area = match thin {
+            true => area.flex().items_center().child(
+                div().relative().w_full().h(px(10.)).rounded_full().overflow_hidden().bg(rgb(t().track)).child(level),
+            ),
+            false => area.overflow_hidden().child(level),
+        };
+        area
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
-                    riff.slide(slider, pressed.get(), e.position.x);
-                    riff.sliding = Some((slider, pressed.clone()));
+                    let from = match slider {
+                        Slider::Stem(_) => Some((e.position.x, riff.level(slider))),
+                        Slider::Volume | Slider::Speed => {
+                            riff.slide(slider, pressed.get(), e.position.x);
+                            None
+                        }
+                    };
+                    riff.sliding = Some((slider, pressed.clone(), from));
                     cx.notify();
                 }),
             )
@@ -1664,7 +2003,7 @@ impl Riff {
 
     /// Lets go of a level being dragged, keeping it.
     fn drop_slider(&mut self) -> bool {
-        let Some((slider, _)) = self.sliding.take() else { return false };
+        let Some((slider, ..)) = self.sliding.take() else { return false };
         self.keep_levels(slider);
         true
     }
@@ -1739,8 +2078,8 @@ impl Riff {
             }
         };
         self.variation = target;
-        // A drag belongs to the recording it started on.
-        (self.shaping, self.dragging) = (None, None);
+        // A drag belongs to the recording it started on, as does a delete asked about.
+        (self.shaping, self.dragging, self.deleting_section) = (None, None, None);
         let looping = self.recording().and_then(|r| self.loops.get(&r).copied()).unwrap_or_default();
         // A stem muted from the start (the metronome) shows as muted; one recording has
         // no stems to mute.
@@ -1911,6 +2250,9 @@ impl Riff {
                 if let Some(row) = self.rows.iter().position(|r| matches!(r, Row::Header(h) if h == "Favourites")) {
                     self.selected = self.first_track_row(row, 1).unwrap_or(row);
                     self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+                } else {
+                    let key = self.first_key(Action::Favorite, keys::Mode::Library);
+                    self.message = Some((empty::no_favourites(key), false));
                 }
             }
             Place::Playing => self.to_playing(),
@@ -2041,6 +2383,12 @@ impl Riff {
             shift: k.modifiers.shift,
             alt: k.modifiers.alt,
         };
+        let typed = typed(k, press, cx);
+        // Esc lets go of a loop being drawn on the waveform, leaving the loop as it was.
+        if self.sweeping.is_some() && k.key == "escape" {
+            self.sweeping = None;
+            return cx.notify();
+        }
         // An open menu takes every key until it closes.
         if let Some((menu, _)) = &mut self.menu {
             match menu.key(&k.key) {
@@ -2057,11 +2405,13 @@ impl Riff {
             // Without a menu bar macOS doesn't do these for riff.
             Some(Action::Minimize) => return window.minimize_window(),
             Some(Action::FullScreen) => return window.toggle_fullscreen(),
+            Some(Action::Hide) => return cx.hide(),
             Some(Action::Quit) => {
-                self.keep_spot();
-                self.store_resume();
-                self.save_session();
-                return cx.quit();
+                if self.save_for_quit() {
+                    return cx.quit();
+                }
+                cx.notify();
+                return;
             }
             Some(Action::Help) => {
                 self.help = !self.help;
@@ -2091,26 +2441,26 @@ impl Riff {
             let row = self.prefs.as_ref().filter(|p| p.picker.is_none() && p.choosing.is_none()).map(|p| p.row);
             if enter && row == Some(add) {
                 self.pick_folders(cx);
-            } else if enter && row == Some(add + 4) {
-                self.pick_data_dir(cx);
             } else if enter && row == Some(add + 5) {
+                self.pick_data_dir(cx);
+            } else if enter && row == Some(add + 6) {
                 self.switch_data_dir(None, cx);
             } else {
-                self.prefs_key(k);
+                self.prefs_key(k, typed, cx);
             }
             cx.notify();
             return;
         }
         if self.add_to.is_some() {
-            self.picker_key(k, press);
+            self.picker_key(k, typed);
             return cx.notify();
         }
         if self.renaming_playlist.is_some() {
-            self.rename_key(k, press);
+            self.rename_key(k, typed);
             return cx.notify();
         }
         if let Some(at) = self.eq_sheet {
-            self.eq_key(at, k, press);
+            self.eq_key(at, k, press, typed);
             return cx.notify();
         }
         if let Some(at) = self.trainer_sheet {
@@ -2134,8 +2484,8 @@ impl Riff {
                     name.pop();
                 }
                 _ => {
-                    if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
-                        name.push_str(text);
+                    if let Some(text) = typed {
+                        name.push_str(&text);
                     }
                 }
             }
@@ -2145,7 +2495,7 @@ impl Riff {
         if self.help {
             // Typing finds keys; Esc clears what's typed, then closes, as ⌘? and ? do.
             let mut pending = None;
-            let closes = keys::press(self.mode(), press, self.settings.vim, &mut pending) == Some(Action::Help);
+            let closes = keys::press(self.mode(), press, self.settings.keyboard, &mut pending) == Some(Action::Help);
             match k.key.as_str() {
                 "escape" if !self.help_query.is_empty() => self.help_query.clear(),
                 "escape" => self.help = false,
@@ -2154,8 +2504,8 @@ impl Riff {
                     self.help_query.pop();
                 }
                 _ => {
-                    if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
-                        self.help_query.push_str(text);
+                    if let Some(text) = typed {
+                        self.help_query.push_str(&text);
                     }
                 }
             }
@@ -2164,7 +2514,16 @@ impl Riff {
             }
             return cx.notify();
         }
-        let action = keys::press(self.mode(), press, self.settings.vim, &mut self.pending);
+        let mode = self.mode();
+        let action = keys::press(mode, press, self.settings.keyboard, &mut self.pending);
+        // With the Mac keys a letter starts a search with it; ⌘V pastes into a new one.
+        if action.is_none() && keys::starts_search(press, mode, self.settings.keyboard) {
+            if let Some(text) = typed {
+                self.searching = true;
+                self.type_query(text);
+            }
+            return cx.notify();
+        }
         // While searching, what isn't a key types into the query.
         if self.searching && !self.practice && action.is_none() {
             if k.key == "backspace" && self.query.is_empty() {
@@ -2174,7 +2533,7 @@ impl Riff {
                 let mut q = self.query.clone();
                 q.pop();
                 self.type_query(q);
-            } else if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
+            } else if let Some(text) = typed {
                 let q = format!("{}{text}", self.query);
                 self.type_query(q);
             }
@@ -2188,6 +2547,8 @@ impl Riff {
     fn perform(&mut self, action: Action) {
         let song = self.audio.duration;
         let removing = self.removing_variation.take();
+        // A delete that asked "for good?" is let go by anything else done meanwhile.
+        (self.deleting_section, self.clearing_queue) = (None, false);
         match action {
             Action::Move(by) if self.queue_at.is_some() => {
                 let last = self.queue.len().saturating_sub(1);
@@ -2208,7 +2569,8 @@ impl Riff {
             }
             Action::QueueFocus if self.queue_at.is_some() => self.queue_at = None,
             Action::QueueFocus if self.queue.is_empty() => {
-                self.message = Some(("the queue is empty, q queues the highlighted song".into(), false));
+                let key = self.first_key(Action::Queue(false), keys::Mode::Library);
+                self.message = Some((empty::no_queue(key), false));
             }
             Action::QueueFocus => (self.sidebar, self.queue_at) = (true, Some(0)),
             Action::EqSheet => self.toggle_eq_sheet(),
@@ -2218,7 +2580,7 @@ impl Riff {
                     false => self.selected_path(),
                 };
                 if let Some(song) = song {
-                    self.add_to = Some(AddTo { song, at: 0, naming: None });
+                    self.add_to = Some(AddTo { songs: vec![song], at: 0, naming: None });
                 }
             }
             Action::PlaylistRemove => {
@@ -2237,6 +2599,20 @@ impl Riff {
                     self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
                 }
             }
+            // The songs listed: the open album, artist or playlist's, from its header.
+            Action::PlayAll | Action::ShuffleAll | Action::QueueAll | Action::AddAllToPlaylist => {
+                let songs = self.songs_for(Target::Shown);
+                self.songs_action(songs, action);
+            }
+            Action::OpenPlaylist => {
+                if let Some(&Row::Playlist(i)) = self.rows.get(self.selected) {
+                    self.open_playlist(i);
+                }
+            }
+            Action::RenamePlaylist => {
+                self.renaming_playlist = self.playlist_view.and_then(|i| self.playlists.get(i)).map(|p| p.name.clone());
+            }
+            Action::DeletePlaylist => self.deleting_playlist = self.playlist_view.is_some(),
             Action::ListView => {
                 self.settings.list = match self.settings.list {
                     ListView::Columns => ListView::Grouped,
@@ -2277,6 +2653,8 @@ impl Riff {
             // From practice, search goes back to the library to type.
             Action::Search if self.practice => (self.practice, self.searching) = (false, true),
             Action::Search => self.searching = !self.searching,
+            // Into the search to type, from practice too; already typing, it stays.
+            Action::Find => (self.practice, self.searching) = (false, true),
             // Esc in an album, artist or playlist clears its search first, then leaves it.
             Action::Clear if self.scope().is_some() && !self.query.is_empty() => self.type_query(String::new()),
             Action::Clear | Action::ClearSearch => self.set_query(String::new()),
@@ -2301,6 +2679,7 @@ impl Riff {
             },
             Action::ToStart => self.audio.seek(Duration::ZERO),
             Action::FromLoopStart => {
+                self.panned = None;
                 self.audio.play_from(crate::audio::replay_from(self.marker(), self.audio.looping));
             }
             Action::Marker => {
@@ -2317,10 +2696,12 @@ impl Riff {
             Action::Artist => self.toggle_artist(),
             // Bare `?` arrives here; ⌘? is handled first in `key`, as are ⌘, and ⌘Q.
             Action::Help => self.help = !self.help,
-            Action::Settings | Action::Quit | Action::Minimize | Action::FullScreen => {}
+            Action::Settings | Action::Quit | Action::Minimize | Action::FullScreen | Action::Hide => {}
             Action::LoopStart => self.audio.looping.set_start(self.snap(self.audio.position())),
             Action::LoopEnd => self.loop_end(self.snap(self.audio.position())),
             Action::LoopClear => self.audio.looping = Default::default(),
+            // Without a loop there is nothing to switch: say how to make one.
+            Action::LoopSwitch if !self.audio.looping.active() => self.message = Some((self.no_loop(), false)),
             Action::LoopSwitch => self.audio.looping.switch(),
             // On the grid, an edge moves a whole beat and the loop slides in
             // beats, so it stays on the music as the band drifts.
@@ -2372,12 +2753,22 @@ impl Riff {
             }
             Action::Region(forward) => {
                 let Some(recording) = self.recording() else { return };
-                let looping = self.audio.looping;
-                let from = looping.start.filter(|_| looping.active()).unwrap_or(self.audio.position());
+                let from = crate::regions::Regions::step_from(self.audio.looping, self.audio.position());
                 if let Some(region) = self.regions.step(&recording, from, forward).cloned() {
                     self.play_region(&region);
                 }
             }
+            Action::SectionStart => {
+                let Some(recording) = self.recording() else { return };
+                match self.regions.restart(&recording, self.audio.looping, self.audio.position()) {
+                    Some(start) => {
+                        self.panned = None;
+                        self.audio.play_from(start);
+                    }
+                    None => self.message = Some(("no section or loop here".into(), false)),
+                }
+            }
+            Action::Follow => self.panned = None,
             // A hand on the speed stops the trainer.
             Action::Slow | Action::Speed(_) | Action::SetSpeed(_) | Action::Pitch(_) | Action::SetPitch(_) => {
                 match action {
@@ -2435,39 +2826,7 @@ impl Riff {
             }
             // Needs the context for the file dialog, so it is handled in `act`.
             Action::AddVariation => {}
-            Action::RemoveVariation => {
-                let Some(now) = self.now.clone() else { return };
-                let Some(i) = self.variation.checked_sub(1) else {
-                    self.message = Some(("the song itself can't be removed; v to a variation".into(), false));
-                    return;
-                };
-                let asked = removing
-                    .is_some_and(|(at, since)| at == self.variation && since.elapsed() < Duration::from_secs(4));
-                if !asked {
-                    let Some(label) = self.variations.of(&now.path).get(i).map(|v| v.label.clone()) else { return };
-                    let keys = keys::keys_for(Action::RemoveVariation, self.mode(), self.settings.vim);
-                    let again = keys.first().map_or("again".to_string(), |k| format!("{k} again"));
-                    self.removing_variation = Some((self.variation, std::time::Instant::now()));
-                    self.message = Some((format!("remove {label}? {again}"), false));
-                    return;
-                }
-                if let Some(gone) = self.variations.remove(&now.path, i) {
-                    // Back to the song itself, from the variation that's gone, with its loop
-                    // and beats.
-                    self.variation = 0;
-                    self.muted.clear();
-                    self.solo = None;
-                    let looping = self.loops.get(&now.path).copied().unwrap_or_default();
-                    self.audio.switch(std::slice::from_ref(&now.path), &[1.0], Duration::ZERO, looping);
-                    self.read_wave(vec![now.path.clone()]);
-                    self.song_beats();
-                    self.message = Some((format!("removed {}", gone.label), false));
-                    self.store_variations();
-                    let keep = self.selected_path();
-                    self.rebuild_rows();
-                    self.reindex(keep);
-                }
-            }
+            Action::RemoveVariation => self.remove_variation(removing, false),
             Action::RemoveRegion => {
                 if let Some(i) = self.region_in_play() {
                     self.remove_region(i);
@@ -2482,10 +2841,59 @@ impl Riff {
                 self.practice = !self.practice;
                 self.searching &= !self.practice;
             }
+            Action::SetPractice(on) => {
+                self.practice = on;
+                self.searching &= !on;
+            }
             Action::Zoom(factor) => {
                 let most = song.unwrap_or(SPAN).max(Duration::from_secs(1));
                 self.span = self.span.mul_f64(factor).clamp(Duration::from_millis(500), most);
             }
+            Action::ZoomFit => {
+                let Some(song) = song else { return };
+                (self.span, self.panned) = wave::zoom_fit(self.audio.position(), self.audio.looping, song);
+            }
+        }
+    }
+
+    /// Removes the playing variation, asking first: the same key or button again within
+    /// a few seconds (`removing`, what was asked and when) removes it. `clicked` says
+    /// which, so the question names the right one.
+    fn remove_variation(&mut self, removing: Option<(usize, std::time::Instant)>, clicked: bool) {
+        let Some(now) = self.now.clone() else { return };
+        let Some(i) = self.variation.checked_sub(1) else {
+            self.message = Some(("the song itself can't be removed; v to a variation".into(), false));
+            return;
+        };
+        let asked =
+            removing.is_some_and(|(at, since)| at == self.variation && since.elapsed() < Duration::from_secs(4));
+        if !asked {
+            let Some(label) = self.variations.of(&now.path).get(i).map(|v| v.label.clone()) else { return };
+            let keys = keys::keys_for(Action::RemoveVariation, self.mode(), self.settings.keyboard);
+            let again = match keys.first() {
+                _ if clicked => "click again".to_string(),
+                Some(k) => format!("{k} again"),
+                None => "again".to_string(),
+            };
+            self.removing_variation = Some((self.variation, std::time::Instant::now()));
+            self.message = Some((format!("remove {label}? {again}; its files stay on disk"), false));
+            return;
+        }
+        if let Some(gone) = self.variations.remove(&now.path, i) {
+            // Back to the song itself, from the variation that's gone, with its loop
+            // and beats.
+            self.variation = 0;
+            self.muted.clear();
+            self.solo = None;
+            let looping = self.loops.get(&now.path).copied().unwrap_or_default();
+            self.audio.switch(std::slice::from_ref(&now.path), &[1.0], Duration::ZERO, looping);
+            self.read_wave(vec![now.path.clone()]);
+            self.song_beats();
+            self.message = Some((format!("removed {}", gone.label), false));
+            self.store_variations();
+            let keep = self.selected_path();
+            self.rebuild_rows();
+            self.reindex(keep);
         }
     }
 
@@ -2532,12 +2940,20 @@ impl Riff {
         }
     }
 
-    /// Right-click on a waveform strip: its menu, for the moment under the pointer.
+    /// Right-click on a waveform strip: on the marker, its menu; elsewhere the menu for
+    /// the moment under the pointer, with the loop's entries inside the loop.
     fn strip_menu(&mut self, strip: &Strip, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        if let Some((at, _)) = strip.time_at(event.position.x) {
-            self.menu = Some((Menu::waveform(at), event.position));
-            cx.notify();
-        }
+        let Some((at, _)) = strip.time_at(event.position.x) else { return };
+        let menu = match self.grabbed(strip, event) {
+            Some(Edge::Marker) => Menu::marker(),
+            _ => {
+                let looping = self.audio.looping;
+                let inside = looping.end.is_some_and(|end| looping.start.unwrap_or_default() <= at && at <= end);
+                Menu::waveform(at, inside)
+            }
+        };
+        self.menu = Some((menu, event.position));
+        cx.notify();
     }
 
     /// A menu entry chosen: its action, done on what the menu was opened on.
@@ -2549,7 +2965,8 @@ impl Riff {
             // Moves the marker there; it never clears from a menu.
             (Target::Moment(at), Action::Marker) => self.set_marker(Some(self.snap(at))),
             (Target::Section(i), Action::LoopRegion) => self.loop_region(i),
-            (Target::Section(i), Action::RemoveRegion) => self.remove_region(i),
+            // Asks first, beside the section lane.
+            (Target::Section(i), Action::RemoveRegion) => self.ask_delete_section(Some(i)),
             (Target::Section(i), Action::SaveRegion) => {
                 let name = self.recording().and_then(|r| self.regions.of(&r).get(i).map(|s| s.name.clone()));
                 if let Some(name) = name {
@@ -2560,6 +2977,38 @@ impl Riff {
             (Target::Queued(i), Action::QueueTop) => self.queue.to_top(i),
             (Target::Queued(i), Action::QueueRemove) => {
                 self.queue.remove(i);
+            }
+            // The marker's own menu and the card's clear it, wherever the playhead is.
+            (Target::Marker | Target::Playing, Action::Marker) => self.set_marker(None),
+            // A queued or the playing song, not the highlighted one.
+            (
+                Target::Queued(_) | Target::Playing,
+                Action::Album | Action::Artist | Action::AddToPlaylist | Action::Favorite | Action::AddVariation,
+            ) => {
+                let song = match menu.target {
+                    Target::Queued(i) => self.queue.songs().get(i).cloned(),
+                    _ => self.now.as_ref().map(|n| n.path.clone()),
+                };
+                if let Some(song) = song {
+                    self.song_action(song, action, cx);
+                }
+            }
+            (Target::Playlist(i), Action::OpenPlaylist) => self.open_playlist(i),
+            // Renaming and deleting happen in its header, which asks for the name or "for good".
+            (Target::Playlist(i), Action::RenamePlaylist | Action::DeletePlaylist) => {
+                self.open_playlist(i);
+                self.act(action, cx);
+            }
+            (Target::Artist(row), Action::Artist) => {
+                self.selected = row + 1;
+                self.act(action, cx);
+            }
+            (
+                target @ (Target::Playlist(_) | Target::Favourites | Target::Artist(_)),
+                Action::PlayAll | Action::ShuffleAll | Action::QueueAll | Action::AddAllToPlaylist,
+            ) => {
+                let songs = self.songs_for(target);
+                self.songs_action(songs, action);
             }
             (Target::Song(row), Action::AddVariation) => {
                 self.selected = row;
@@ -2574,6 +3023,87 @@ impl Riff {
             (_, action) => self.act(action, cx),
         }
         cx.notify();
+    }
+
+    /// A song's menu entry done on `song` (a queued or the playing song) rather than the
+    /// highlighted one.
+    fn song_action(&mut self, song: PathBuf, action: Action, cx: &mut Context<Self>) {
+        match action {
+            Action::Album | Action::Artist => {
+                if let Some(track) = self.track_at(&song) {
+                    self.show(track, action == Action::Artist);
+                }
+            }
+            Action::AddToPlaylist => self.add_to = Some(AddTo { songs: vec![song], at: 0, naming: None }),
+            Action::AddVariation => self.pick_variation(song, cx),
+            Action::Favorite => {
+                self.favorites.toggle(&song);
+                self.favorites.save(&favorites_file());
+                let keep = self.selected_path();
+                self.reindex(keep);
+            }
+            _ => {}
+        }
+    }
+
+    /// Plays, shuffles, queues or adds to a playlist a list of songs.
+    fn songs_action(&mut self, songs: Vec<PathBuf>, action: Action) {
+        match action {
+            Action::PlayAll => self.play_songs(songs, false),
+            Action::ShuffleAll => self.play_songs(songs, true),
+            Action::QueueAll => {
+                let added = songs.iter().filter(|s| self.queue.add(s).is_some()).count();
+                let said = match added {
+                    0 => "already queued".to_string(),
+                    1 => "queued 1 song".to_string(),
+                    n => format!("queued {n} songs"),
+                };
+                self.message = Some((said, false));
+            }
+            Action::AddAllToPlaylist if !songs.is_empty() => self.add_to = Some(AddTo { songs, at: 0, naming: None }),
+            _ => {}
+        }
+    }
+
+    /// The songs a list's menu acts on: a playlist's, the favourites, an artist's (from
+    /// their row in the grouped list), or else those listed.
+    fn songs_for(&self, target: Target) -> Vec<PathBuf> {
+        let path = |i: usize| self.tracks[i].path.clone();
+        match target {
+            Target::Playlist(i) => self
+                .playlists
+                .get(i)
+                .map(|p| p.songs.iter().filter(|s| self.by_path.contains_key(*s)).cloned().collect())
+                .unwrap_or_default(),
+            Target::Favourites => {
+                // In library order, as listed.
+                let mut favorites: Vec<usize> =
+                    self.favorites.0.iter().filter_map(|p| self.by_path.get(p).copied()).collect();
+                favorites.sort();
+                favorites.into_iter().map(path).collect()
+            }
+            Target::Artist(row) => match self.rows.get(row + 1) {
+                Some(&Row::Track(i)) => library::artist(&self.tracks, &self.tracks[i]).into_iter().map(path).collect(),
+                _ => Vec::new(),
+            },
+            _ => self.rows.iter().filter_map(|r| if let Row::Track(i) = r { Some(path(*i)) } else { None }).collect(),
+        }
+    }
+
+    /// `songs` as the list playing, from the first or, with `shuffle`, from a random one
+    /// with shuffle switched on for what follows. Each starts from the top.
+    fn play_songs(&mut self, songs: Vec<PathBuf>, shuffle: bool) {
+        self.shuffle |= shuffle;
+        let first = match self.seed() {
+            Some(seed) if shuffle => songs.get(seed as usize % songs.len().max(1)),
+            _ => songs.first(),
+        };
+        let Some(track) = first.and_then(|p| self.track_at(p)) else {
+            self.message = Some(("no songs to play here".into(), false));
+            return;
+        };
+        self.playlist = Playlist::new(songs, &track.path, self.seed());
+        self.play(track, false);
     }
 
     /// The loop becomes a region, under the typed name or, without one, a name saying
@@ -2609,6 +3139,7 @@ impl Riff {
     /// A section as the loop, framed and playing from its start. From then on the loop
     /// is its own: changing it leaves the section as it is.
     fn play_region(&mut self, region: &Region) {
+        self.panned = None;
         self.audio.looping =
             crate::audio::Loop { start: Some(region.start), end: Some(region.end), off: false };
         self.frame_loop();
@@ -2811,7 +3342,7 @@ impl Riff {
                     .right(px(3.))
                     .w(px(if strong { 8. } else { 6. }))
                     .rounded_full()
-                    .bg(rgb(if strong { t.dim } else { t.faint }))
+                    .bg(rgb(if strong { t.text_dim } else { t.track }))
             }))
             .into_any_element()
     }
@@ -2835,13 +3366,13 @@ impl Riff {
             .id("rail")
             .relative()
             .flex_none()
-            .w(px(22.))
+            .w(px(HIT))
             .py_1()
             .flex()
             .flex_col()
             .rounded_md()
             .cursor_pointer()
-            .hover(|d| d.bg(rgb(t.surface)))
+            .hover(|d| d.bg(rgb(t.hover)))
             .font_family(MONO)
             .text_size(px(10.))
             .on_mouse_down(
@@ -2860,12 +3391,13 @@ impl Riff {
                     .flex()
                     .items_center()
                     .justify_center()
+                    .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                     .text_color(rgb(if lit {
-                        t.accent
+                        t.accent_text
                     } else if has {
-                        t.dim
+                        t.text_dim
                     } else {
-                        t.faint
+                        t.text_disabled
                     }))
                     .child(letter.to_string())
             }))
@@ -2931,21 +3463,9 @@ impl Riff {
     /// A click on a strip: grabs a loop edge near it (the loop's only, never a
     /// section's), sets the loop's end with shift, and otherwise seeks.
     fn strip_down(&mut self, strip: &Strip, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        let Some((at, per_px)) = strip.time_at(event.position.x) else { return };
-        let looping = self.audio.looping;
-        let near = |edge: Option<Duration>| {
-            edge.is_some_and(|e| (e.as_secs_f64() - at.as_secs_f64()).abs() <= GRAB as f64 * per_px)
-        };
-        // The marker by its flag (the strip's top), so it can be grabbed even on a loop
-        // edge; anywhere else along it only where no loop edge is.
-        let by_flag = f32::from(event.position.y - strip.0.get().0.origin.y) <= FLAG;
-        let marker = self.marker();
-        if near(marker) && (by_flag || !(near(looping.start) || near(looping.end))) {
-            self.dragging = Some((Edge::Marker, strip.clone()));
-        } else if near(looping.end) {
-            self.dragging = Some((Edge::End, strip.clone()));
-        } else if near(looping.start) {
-            self.dragging = Some((Edge::Start, strip.clone()));
+        let Some((at, _)) = strip.time_at(event.position.x) else { return };
+        if let Some(edge) = self.grabbed(strip, event) {
+            self.dragging = Some((edge, strip.clone()));
         } else if event.modifiers.shift {
             self.audio.looping.set_end(self.snap(at));
             self.frame_loop();
@@ -2954,6 +3474,91 @@ impl Riff {
             self.audio.seek(if event.modifiers.alt { at } else { self.snap(at) });
         }
         cx.notify();
+    }
+
+    /// The loop edge or marker a press on a strip grabs, if it is near one.
+    fn grabbed(&self, strip: &Strip, event: &MouseDownEvent) -> Option<Edge> {
+        let (at, per_px) = strip.time_at(event.position.x)?;
+        let looping = self.audio.looping;
+        let near = |edge: Option<Duration>| {
+            edge.is_some_and(|e| (e.as_secs_f64() - at.as_secs_f64()).abs() <= GRAB as f64 * per_px)
+        };
+        // The marker by its flag (the strip's top), so it can be grabbed even on a loop
+        // edge; anywhere else along it only where no loop edge is.
+        let by_flag = f32::from(event.position.y - strip.0.get().0.origin.y) <= FLAG;
+        if near(self.marker()) && (by_flag || !(near(looping.start) || near(looping.end))) {
+            Some(Edge::Marker)
+        } else if near(looping.end) {
+            Some(Edge::End)
+        } else if near(looping.start) {
+            Some(Edge::Start)
+        } else {
+            None
+        }
+    }
+
+    /// A press on the overview: inside the box showing the detail's stretch it may
+    /// become a drag of that view; anywhere else it is like any strip.
+    fn overview_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let overview = self.overview.clone();
+        let (_, from, to) = self.detail.0.get();
+        let inside = overview.time_at(event.position.x).is_some_and(|(at, _)| from <= at && at <= to);
+        if !inside || event.modifiers.shift || self.grabbed(&overview, event).is_some() {
+            return self.strip_down(&overview, event, cx);
+        }
+        let Some((at, _)) = overview.time_at(event.position.x) else { return };
+        self.panning = Some(Pan { from, at, x: event.position.x, alt: event.modifiers.alt, moved: false });
+    }
+
+    /// A press on the detail waveform: on a loop edge or the marker it grabs it and
+    /// shift sets the loop's end, as on any strip; elsewhere it may become a drag that
+    /// draws a loop, and is a click (a seek) if it doesn't.
+    fn detail_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let detail = self.detail.clone();
+        if event.modifiers.shift || self.grabbed(&detail, event).is_some() {
+            return self.strip_down(&detail, event, cx);
+        }
+        let Some((at, _)) = detail.time_at(event.position.x) else { return };
+        self.sweeping = Some(Sweep { at, x: event.position.x, to: at, moved: 0., alt: event.modifiers.alt });
+        cx.notify();
+    }
+
+    /// The loop a drag on the detail waveform draws so far, on the grid unless ⌥ is held.
+    fn swept(&self, sweep: Sweep) -> Option<crate::audio::Loop> {
+        let snap = |at| if sweep.alt { at } else { self.snap(at) };
+        crate::audio::Loop::swept(sweep.at, sweep.to, sweep.moved, self.audio.duration, snap)
+    }
+
+    /// Lets go of the detail waveform: a drag sets the loop (the playhead carries on, as
+    /// with any loop change), anything shorter seeks to where it was pressed.
+    fn drop_sweep(&mut self) -> bool {
+        let Some(sweep) = self.sweeping.take() else { return false };
+        match self.swept(sweep) {
+            Some(drawn) => self.audio.looping = drawn,
+            None => self.audio.seek(if sweep.alt { sweep.at } else { self.snap(sweep.at) }),
+        }
+        true
+    }
+
+    /// The overview's box dragged: the detail view moves with it, the playhead stays.
+    fn pan_to(&mut self, x: Pixels) {
+        let (Some(mut pan), Some(song)) = (self.panning, self.audio.duration) else { return };
+        pan.moved |= f32::from(x - pan.x).abs() > 3.;
+        if pan.moved
+            && let Some((now, _)) = self.overview.time_at(x)
+        {
+            self.panned = Some(wave::pan(pan.from, pan.at, now, self.span, song));
+        }
+        self.panning = Some(pan);
+    }
+
+    /// Lets go of the overview's box: a press that never moved was a click, and seeks.
+    fn drop_pan(&mut self) -> bool {
+        let Some(pan) = self.panning.take() else { return false };
+        if !pan.moved {
+            self.audio.seek(if pan.alt { pan.at } else { self.snap(pan.at) });
+        }
+        true
     }
 
     fn drag(&mut self, event: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -2966,9 +3571,12 @@ impl Riff {
             }
             return cx.notify();
         }
-        if let Some((slider, bounds)) = self.sliding.clone() {
+        if let Some((slider, bounds, from)) = self.sliding.clone() {
             if event.pressed_button == Some(MouseButton::Left) {
-                self.slide(slider, bounds.get(), event.position.x);
+                match from {
+                    Some(from) => self.slide_by(slider, bounds.get(), event.position.x, from),
+                    None => self.slide(slider, bounds.get(), event.position.x),
+                }
             } else {
                 self.drop_slider();
             }
@@ -2990,15 +3598,41 @@ impl Riff {
             }
             return cx.notify();
         }
-        if let Some((i, start)) = self.shaping {
+        if self.panning.is_some() {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.pan_to(event.position.x);
+            } else {
+                self.drop_pan();
+            }
+            return cx.notify();
+        }
+        if let Some(sweep) = &mut self.sweeping {
+            if event.pressed_button != Some(MouseButton::Left) {
+                self.drop_sweep();
+                return cx.notify();
+            }
+            // The farthest it got: back over the press is still a drag, not a click.
+            sweep.moved = sweep.moved.max(f32::from(event.position.x - sweep.x).abs());
+            sweep.alt = event.modifiers.alt;
+            if let Some((at, _)) = self.detail.time_at(event.position.x) {
+                sweep.to = at;
+            }
+            return cx.notify();
+        }
+        if let Some(mut shape) = self.shaping {
             if event.pressed_button != Some(MouseButton::Left) {
                 return self.drop_edge(cx);
             }
-            let (Some(recording), Some((at, _))) = (self.recording(), self.lane.time_at(event.position.x)) else {
+            shape.moved |= f32::from(event.position.x - shape.x).abs() > 3.;
+            self.shaping = Some(shape);
+            let (true, Some(recording), Some((at, _))) =
+                (shape.moved, self.recording(), self.lane.time_at(event.position.x))
+            else {
                 return;
             };
             let at = if event.modifiers.alt { at } else { self.snap(at) };
-            self.shaping = self.regions.move_edge(&recording, i, start, at).map(|i| (i, start));
+            self.deleting_section = None;
+            self.shaping = self.regions.move_edge(&recording, shape.i, shape.start, at).map(|i| Shaping { i, ..shape });
             return cx.notify();
         }
         let Some((edge, strip)) = &self.dragging else { return };
@@ -3022,10 +3656,14 @@ impl Riff {
     }
 
     /// Lets go of a dragged edge: a section's is saved; the loop's and the marker just
-    /// stay where they landed, the playhead carrying on (o plays from them).
+    /// stay where they landed, the playhead carrying on (o plays from them). A section's
+    /// edge pressed without moving was a click on the section, and plays it.
     fn drop_edge(&mut self, cx: &mut Context<Self>) {
-        if self.shaping.take().is_some() {
-            self.store_regions();
+        if let Some(shape) = self.shaping.take() {
+            match shape.moved {
+                true => self.store_regions(),
+                false => self.loop_region(shape.i),
+            }
             cx.notify();
         }
         if self.dragging.take().is_some() {
@@ -3061,14 +3699,15 @@ impl Riff {
                     .pb(px(3.))
                     .font_family(MONO)
                     .text_xs()
-                    .text_color(rgb(t().dim))
+                    .text_color(rgb(t().text_dim))
                     .child(if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") }),
             )
-            .tooltip(self.tip("Only this artist", &[Action::Artist]))
+            .tooltip(self.tip("Only this artist; right-click to play or queue them all", &[Action::Artist]))
             .on_click(cx.listener(move |riff, _, _, cx| {
                 riff.selected = ix + 1;
                 riff.act(Action::Artist, cx);
             }))
+            .on_mouse_down(MouseButton::Right, opens_menu(move || Menu::artist(ix), cx))
             .into_any_element()
     }
 
@@ -3112,7 +3751,7 @@ impl Riff {
                 .gap_2()
                 .font_family(MONO)
                 .text_xs()
-                .text_color(rgb(t().dim))
+                .text_color(rgb(t().text_dim))
                 .child(label.clone())
                 .into_any_element(),
             Row::Artist(name, songs) => self.render_artist_row(ix, name, *songs, cx),
@@ -3130,25 +3769,32 @@ impl Riff {
                     .items_center()
                     .gap_3()
                     .rounded_md()
-                    .border_l_2()
-                    .border_color(rgb(if selected { t().accent } else { t().bg }))
-                    .when(selected, |d| d.bg(rgb(t().raised)))
-                    .hover(|d| d.bg(rgb(t().surface)))
+                    .map(|d| selected_cues(d, selected))
+                    .when(!selected, |d| d.hover(|d| d.bg(rgb(t().hover))))
                     .cursor_pointer()
-                    .child(div().w(px(30.)).flex().justify_center().child(ui::icon("list-music", 16., t().dim)))
-                    .child(div().flex_1().min_w_0().truncate().text_color(rgb(t().text)).child(named.name.clone()))
+                    .child(div().w(px(30.)).flex().justify_center().child(ui::icon("list-music", 16., t().text_dim)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .when(selected, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                            .text_color(rgb(t().text))
+                            .child(named.name.clone()),
+                    )
                     .child(
                         div()
                             .flex_none()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(t().dim))
+                            .text_color(rgb(t().text_dim))
                             .child(if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") }),
                     )
                     .on_click(cx.listener(move |riff, _, _, cx| {
                         riff.open_playlist(i);
                         cx.notify();
                     }))
+                    .on_mouse_down(MouseButton::Right, opens_menu(move || Menu::playlist(i), cx))
                     .into_any_element()
             }
             Row::Track(i) => {
@@ -3162,6 +3808,29 @@ impl Riff {
                 let queued = self.queue.songs().contains(&track.path);
                 let in_group = self.grouped();
                 let show_artist = !in_group && self.album.is_none() && self.artist.is_none();
+                let in_playlist = self.playlist_view.is_some() && self.album.is_none() && self.artist.is_none();
+                // In a playlist's view: moving and removing the song, shown like the
+                // queue buttons on the highlighted row or under the pointer.
+                let listed = |id: &'static str, icon: &'static str, what: &'static str, action: Action| {
+                    div()
+                        .id((id, ix))
+                        .size(px(24.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(t().hover)))
+                        .when(!selected, |d| d.opacity(0.).group_hover("song-row", |s| s.opacity(1.)))
+                        .child(ui::icon(icon, 14., t().text_dim))
+                        .tooltip(self.tip(what, &[action]))
+                        .on_click(cx.listener(move |riff, _, _, cx| {
+                            cx.stop_propagation();
+                            riff.selected = ix;
+                            riff.act(action, cx);
+                        }))
+                };
                 div()
                     .id(("row", ix))
                     .group("song-row")
@@ -3172,10 +3841,8 @@ impl Riff {
                     .items_center()
                     .gap_3()
                     .rounded_md()
-                    .border_l_2()
-                    .border_color(rgb(if selected { t().accent } else { t().bg }))
-                    .when(selected, |d| d.bg(rgb(t().raised)))
-                    .hover(|d| d.bg(rgb(t().surface)))
+                    .map(|d| selected_cues(d, selected))
+                    .when(!selected, |d| d.hover(|d| d.bg(rgb(t().hover))))
                     .on_click(cx.listener(move |riff, _, _, cx| {
                         riff.selected = ix;
                         riff.play_selected();
@@ -3192,7 +3859,7 @@ impl Riff {
                         })
                     })
                     // Files dropped on a song become a variation of it.
-                    .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(tint(t().loops, 0x30)))
+                    .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(t().accent_soft)).border_color(rgb(t().focus)))
                     .on_drop({
                         let song = track.path.clone();
                         cx.listener(move |riff, dropped: &ExternalPaths, _, cx| {
@@ -3202,16 +3869,19 @@ impl Riff {
                     })
                     // In the album view the header shows the cover; rows show the number.
                     // Grouped rows sit indented under their artist.
+                    // The playing song shows a play glyph in place of its number.
                     .child(match (self.album.is_some(), in_group) {
                         (true, _) => div()
                             .w(px(28.))
                             .flex_none()
                             .flex()
+                            .items_center()
                             .justify_end()
                             .font_family(MONO)
                             .text_sm()
-                            .text_color(rgb(if playing { t().accent } else { t().dim }))
-                            .children(track.number.map(|n| n.to_string()))
+                            .text_color(rgb(t().text_dim))
+                            .when(playing, |d| d.child(ui::icon("play", 14., t().accent)))
+                            .when(!playing, |d| d.children(track.number.map(|n| n.to_string())))
                             .into_any_element(),
                         (false, true) => div().pl_4().child(cover(track.cover.clone(), 30.)).into_any_element(),
                         (false, false) => cover(track.cover.clone(), 30.),
@@ -3226,7 +3896,8 @@ impl Riff {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_color(rgb(if selected || playing { t().accent } else { t().text }))
+                                    .when(selected, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                                    .text_color(rgb(if playing { t().accent_text } else { t().text }))
                                     .child(track.title.clone()),
                             )
                             // How many other recordings the song has.
@@ -3235,7 +3906,7 @@ impl Riff {
                                     .flex_none()
                                     .font_family(MONO)
                                     .text_xs()
-                                    .text_color(rgb(t().dim))
+                                    .text_color(rgb(t().text_dim))
                                     .child(format!("+{variations}"))
                             })),
                     )
@@ -3248,9 +3919,9 @@ impl Riff {
                                     .id(("artist", ix))
                                     .truncate()
                                     .text_sm()
-                                    .text_color(rgb(t().dim))
+                                    .text_color(rgb(t().text_dim))
                                     .cursor_pointer()
-                                    .hover(|d| d.text_color(rgb(t().accent)).underline())
+                                    .hover(|d| d.text_color(rgb(t().accent_text)).underline())
                                     .tooltip(self.tip("Only this artist", &[Action::Artist]))
                                     .on_click(cx.listener(move |riff, _, _, cx| {
                                         cx.stop_propagation();
@@ -3273,9 +3944,9 @@ impl Riff {
                                     .id(("album", ix))
                                     .truncate()
                                     .text_sm()
-                                    .text_color(rgb(t().dim))
+                                    .text_color(rgb(t().text_dim))
                                     .cursor_pointer()
-                                    .hover(|d| d.text_color(rgb(t().accent)).underline())
+                                    .hover(|d| d.text_color(rgb(t().accent_text)).underline())
                                     .tooltip(self.tip("Only this album", &[Action::Album]))
                                     .on_click(cx.listener(move |riff, _, _, cx| {
                                         cx.stop_propagation();
@@ -3293,19 +3964,24 @@ impl Riff {
                             .justify_end()
                             .font_family(MONO)
                             .text_sm()
-                            .text_color(rgb(t().dim))
+                            .text_color(rgb(t().text_dim))
                             .children(track.seconds.map(|s| ui::clock(Duration::from_secs(s)))),
                     )
                     // A fixed width, so the columns line up with or without icons.
                     .child(
                         div()
-                            .w(px(76.))
+                            .w(px(if in_playlist { 188. } else { 104. }))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_end()
                             .gap_1()
                             .when(playing, |d| d.child(ui::icon("music", 14., t().accent)))
+                            .when(in_playlist, |d| {
+                                d.child(listed("playlist-up", "chevron-up", "Move up", Action::PlaylistMove(true)))
+                                    .child(listed("playlist-down", "chevron-down", "Move down", Action::PlaylistMove(false)))
+                                    .child(listed("playlist-remove", "x", "Remove from the playlist", Action::PlaylistRemove))
+                            })
                             // Queued songs show it; others when highlighted or under the
                             // pointer, to click.
                             .child(
@@ -3318,16 +3994,38 @@ impl Riff {
                                     .justify_center()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .hover(|d| d.bg(rgb(t().faint)))
+                                    .hover(|d| d.bg(rgb(t().hover)))
                                     .when(!queued && !selected, |d| {
                                         d.opacity(0.).group_hover("song-row", |s| s.opacity(1.))
                                     })
-                                    .child(ui::icon("list-plus", 14., if queued { t().accent } else { t().dim }))
+                                    .child(ui::icon("list-plus", 14., if queued { t().accent } else { t().text_dim }))
                                     .tooltip(self.tip(if queued { "Queued" } else { "Queue it" }, &[Action::Queue(false)]))
                                     .on_click(cx.listener(move |riff, _, _, cx| {
                                         cx.stop_propagation();
                                         riff.selected = ix;
                                         riff.act(Action::Queue(false), cx);
+                                    })),
+                            )
+                            // Queue next, at the top of the queue: as the queue button,
+                            // shown on the highlighted row or under the pointer.
+                            .child(
+                                div()
+                                    .id(("queue-next", ix))
+                                    .size(px(24.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(rgb(t().hover)))
+                                    .when(!selected, |d| d.opacity(0.).group_hover("song-row", |s| s.opacity(1.)))
+                                    .child(ui::icon("arrow-up-to-line", 14., t().text_dim))
+                                    .tooltip(self.tip("Queue it next", &[Action::Queue(true)]))
+                                    .on_click(cx.listener(move |riff, _, _, cx| {
+                                        cx.stop_propagation();
+                                        riff.selected = ix;
+                                        riff.act(Action::Queue(true), cx);
                                     })),
                             )
                             // A favourite's star always shows; others' when the row is
@@ -3342,14 +4040,14 @@ impl Riff {
                                     .justify_center()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .hover(|d| d.bg(rgb(t().faint)))
+                                    .hover(|d| d.bg(rgb(t().hover)))
                                     .when(!favorite && !selected, |d| {
                                         d.opacity(0.).group_hover("song-row", |s| s.opacity(1.))
                                     })
                                     .child(ui::icon(
                                         "star",
                                         14.,
-                                        if favorite { t().accent } else { t().dim },
+                                        if favorite { t().accent } else { t().text_dim },
                                     ))
                                     .tooltip(self.tip(
                                         if favorite { "Not a favourite" } else { "Favourite" },
@@ -3393,14 +4091,14 @@ impl Riff {
             .rounded_lg()
             .bg(rgb(t().surface))
             .cursor_text()
-            .when(self.searching, |d| d.border_1().border_color(rgb(t().accent_soft)))
-            .when(!self.searching, |d| d.tooltip(self.tip("Search", &[Action::Search])))
+            .when(self.searching, |d| d.border_1().border_color(rgb(t().focus)))
+            .when(!self.searching, |d| d.tooltip(self.tip("Search", &[Action::Find, Action::Search])))
             // Typing goes to the search in the library, so a click there leaves practice.
             .on_click(cx.listener(|riff, _, _, cx| {
                 (riff.practice, riff.searching) = (false, true);
                 cx.notify();
             }))
-            .child(ui::icon("search", 16., if self.searching { t().accent } else { t().dim }))
+            .child(ui::icon("search", 16., if self.searching { t().accent } else { t().text_dim }))
             // Inside an album, artist or playlist the search finds only there; × or ⌫ on
             // an empty search widens it to everything.
             .children(scope.clone().map(|name| {
@@ -3412,20 +4110,23 @@ impl Riff {
                     .items_center()
                     .gap_1()
                     .pl_2()
-                    .pr_1()
-                    .py_0p5()
                     .rounded_md()
                     .bg(rgb(t().raised))
                     .text_sm()
-                    .text_color(rgb(t().dim))
+                    .text_color(rgb(t().text_dim))
                     .child(div().truncate().child(format!("in {name}")))
                     .child(
                         div()
                             .id("search-everything")
+                            .size(px(HIT))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .rounded_sm()
                             .cursor_pointer()
-                            .hover(|d| d.bg(rgb(t().faint)))
-                            .child(ui::icon("x", 12., t().dim))
+                            .hover(|d| d.bg(rgb(t().hover)))
+                            .child(ui::icon("x", 12., t().text_dim))
                             .tooltip(self.tip("Search everything", &[]))
                             .on_click(cx.listener(|riff, _, _, cx| {
                                 cx.stop_propagation();
@@ -3450,23 +4151,29 @@ impl Riff {
                             div()
                                 .when(self.searching, |d| d.ml_2())
                                 .font_family(UI)
-                                .text_color(rgb(t().faint))
+                                .text_color(rgb(t().text_dim))
                                 .child(match (self.searching, scope.is_some()) {
                                     (true, true) => "type to find a song here".to_string(),
                                     (true, false) => "type to find a song or playlist".to_string(),
-                                    (false, _) => {
-                                        let keys = keys::keys_for(Action::Search, keys::Mode::Library, self.settings.vim);
+                                    (false, _) if self.vim() => {
+                                        let keys = keys::keys_for(Action::Search, keys::Mode::Library, Keyboard::Vim);
                                         format!("{} to search", keys.join(" "))
                                     }
+                                    (false, _) => match self.first_key(Action::Find, keys::Mode::Library) {
+                                        Some(key) => format!("type or {key} to search"),
+                                        None => "type to search".to_string(),
+                                    },
                                 }),
                         )
                     }),
             )
+            // Clears what's typed; in an album, artist or playlist it stays there, as Esc does.
+            .when(!self.query.is_empty(), |d| d.child(self.tool("search-clear", "x", "Clear the search", Action::Clear, false, cx)))
             .child(
                 div()
                     .font_family(MONO)
                     .text_xs()
-                    .text_color(rgb(t().dim))
+                    .text_color(rgb(t().text_dim))
                     .child(status),
             )
             // How far the tags are read: a thin line along the bottom, inside the corners.
@@ -3491,7 +4198,15 @@ impl Riff {
         let looping = self.audio.looping;
         let (title, artist) = match &self.now {
             Some(t) => (t.title.clone(), format!("{}, {}", t.artist, t.album)),
-            None => ("Nothing playing".to_string(), "Enter plays the selected song".to_string()),
+            None => {
+                let library = keys::Mode::Library;
+                let steps = empty::first_steps(
+                    self.first_key(Action::Play, library),
+                    self.first_key(Action::Practice, library),
+                    self.first_key(Action::Help, library),
+                );
+                ("Nothing playing".to_string(), steps)
+            }
         };
         let bar = self.bar.clone();
         let time = if self.audio.loading() {
@@ -3521,7 +4236,7 @@ impl Riff {
 
         let progress = div()
             .id("progress")
-            .tooltip(self.tip("Click to jump; drag a loop edge or the marker; shift-click ends the loop", &[]))
+            .tooltip(self.tip("Click to jump; drag a loop edge or the marker; shift-click ends the loop; right-click for more", &[]))
             .children(duration.map(|d| edge_grips(looping, self.marker(), Duration::ZERO, d)).into_iter().flatten())
             .relative()
             .h(px(16.))
@@ -3531,6 +4246,14 @@ impl Riff {
             .on_mouse_down(MouseButton::Left, {
                 let bar = self.bar.clone();
                 cx.listener(move |riff, e, _, cx| riff.strip_down(&bar, e, cx))
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let bar = self.bar.clone();
+                cx.listener(move |riff, e, _, cx| {
+                    // Not also the card's menu around it.
+                    cx.stop_propagation();
+                    riff.strip_menu(&bar, e, cx)
+                })
             })
             .child(
                 canvas(
@@ -3546,7 +4269,7 @@ impl Riff {
                     .w_full()
                     .h(px(4.))
                     .rounded_full()
-                    .bg(rgb(t().faint))
+                    .bg(rgb(t().track))
                     // Played first, the loop over it: drawn the other way round, the
                     // played gold hid the loop region and only its start showed.
                     .child(
@@ -3569,15 +4292,10 @@ impl Riff {
                             .bg(rgb(t().loops))
                             .opacity(if looping.off { 0.15 } else { 0.45 })
                     }))
-                    // The marker, where o plays from.
-                    .children(self.marker().map(|m| {
-                        div()
-                            .absolute()
-                            .top(px(-5.))
-                            .left(relative(fraction(m)))
-                            .w(px(2.))
-                            .h(px(14.))
-                            .bg(rgb(t().accent))
+                    // The marker, where o plays from: a line with a small flag.
+                    .children(self.marker().into_iter().flat_map(|m| {
+                        let at = || div().absolute().top(px(-5.)).left(relative(fraction(m))).bg(rgb(t().marker));
+                        [at().w(px(2.)).h(px(14.)), at().ml(px(2.)).w(px(5.)).h(px(4.))]
                     }))
                     .children([looping.start, looping.end].into_iter().flatten().map(|edge| {
                         div()
@@ -3591,6 +4309,7 @@ impl Riff {
                     })),
             );
 
+        let (favorite, marker) = (self.now.as_ref().is_some_and(|n| self.favorites.contains(&n.path)), self.marker().is_some());
         div()
             .flex()
             .flex_col()
@@ -3598,6 +4317,17 @@ impl Riff {
             .p_4()
             .rounded_lg()
             .bg(rgb(t().surface))
+            // Right-click: the playing song's menu, with its loop and marker.
+            .when(self.now.is_some(), |d| {
+                d.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                        let menu = Menu::playing(favorite, looping.active(), looping.looping(), marker);
+                        riff.menu = Some((menu, e.position));
+                        cx.notify();
+                    }),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -3620,6 +4350,16 @@ impl Riff {
                             )
                             .child(self.now_subtitle(artist, cx)),
                     )
+                    // As + does: the song highlighted in the library, the playing one in
+                    // practice. The picker names the song before anything is added.
+                    .child(pill().child(self.tool(
+                        "add-to-playlist",
+                        "list-music",
+                        if self.practice { "Add the playing song to a playlist" } else { "Add the highlighted song to a playlist" },
+                        Action::AddToPlaylist,
+                        false,
+                        cx,
+                    )))
                     .child(
                         pill()
                             .child(self.tool("previous", "skip-back", "Previous song", Action::Previous, false, cx))
@@ -3663,20 +4403,48 @@ impl Riff {
                     .justify_between()
                     .font_family(MONO)
                     .text_xs()
-                    .text_color(rgb(t().dim))
+                    .text_color(rgb(t().text_dim))
                     .child(time)
                     // What riff just did ("queued, 3rd") shows here for a few seconds,
                     // in place of the loop.
                     .child(match &self.message {
-                        Some((text, error)) => {
-                            div().text_color(rgb(if *error { t().error } else { t().accent })).child(text.clone())
-                        }
+                        // Errors with an alert in front, so they don't rest on red alone.
+                        Some((text, error)) => div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_color(rgb(if *error { t().danger } else { t().accent_text }))
+                            .when(*error, |d| d.child(ui::icon("circle-alert", 12., t().danger)))
+                            .child(text.clone()),
                         None => div()
-                            .text_color(rgb(if looping.looping() { t().loops } else { t().dim }))
+                            .text_color(rgb(if looping.looping() { t().loop_text } else { t().text_dim }))
                             .child(loop_label),
                     }),
             )
     }
+}
+
+/// What a key types into a search or a name: its character, or for ⌘V the clipboard's
+/// text as one line.
+fn typed(k: &gpui::Keystroke, press: keys::Press, cx: &gpui::App) -> Option<String> {
+    if keys::pastes(press) {
+        let text = cx.read_from_clipboard().and_then(|c| c.text()).map(|t| keys::one_line(&t));
+        return text.filter(|t| !t.is_empty());
+    }
+    k.key_char.clone().filter(|_| !press.cmd && !press.ctrl)
+}
+
+/// A right-click listener opening the menu `make` builds at the pointer, and not also
+/// a menu of what it sits on.
+fn opens_menu(
+    make: impl Fn() -> Menu + 'static,
+    cx: &mut Context<Riff>,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
+    cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+        cx.stop_propagation();
+        riff.menu = Some((make(), e.position));
+        cx.notify();
+    })
 }
 
 /// A rounded group of tools that belong together.
@@ -3695,7 +4463,7 @@ fn cover(path: Option<PathBuf>, size: f32) -> gpui::AnyElement {
             .flex()
             .items_center()
             .justify_center()
-            .child(ui::icon("music", size * 0.4, t().faint))
+            .child(ui::icon("music", size * 0.4, t().text_disabled))
             .into_any_element()
     };
     match path {
@@ -3713,7 +4481,7 @@ fn cover(path: Option<PathBuf>, size: f32) -> gpui::AnyElement {
 impl Riff {
     /// The ⌘? sheet: every key, over a dimmed window. Esc, ⌘? or a click closes it.
     fn render_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let vim = self.settings.vim;
+        let keyboard = self.settings.keyboard;
         let query = self.help_query.as_str();
         let group = |keys::Group { title, lines, .. }: &keys::Group| {
             div()
@@ -3725,17 +4493,14 @@ impl Riff {
                         .pb_1()
                         .font_family(MONO)
                         .text_xs()
-                        .text_color(rgb(t().dim))
+                        .text_color(rgb(t().text_dim))
                         .child(title.to_string()),
                 )
-                // Without vim keys, lines that only have vim keys go; so do lines the
-                // typed words don't find.
-                .children(lines.iter().filter(|l| keys::found(title, l, query)).filter_map(|(keys, vim_keys, what)| {
-                    let caps: Vec<&str> = keys
-                        .split_whitespace()
-                        .chain(vim_keys.split_whitespace().filter(|_| vim))
-                        .collect();
-                    (!caps.is_empty()).then_some((caps, what))
+                // Lines with no keys on this keyboard go; so do lines the typed words
+                // don't find.
+                .children(lines.iter().filter(|&&l| keys::found(title, l, keyboard, query)).filter_map(|&line| {
+                    let caps: Vec<&str> = keys::caps(line, keyboard).collect();
+                    (!caps.is_empty()).then_some((caps, line.3))
                 }).map(|(caps, what)| {
                     div()
                         .flex()
@@ -3749,14 +4514,14 @@ impl Riff {
                                 .gap_1()
                                 .font_family(MONO)
                                 .text_sm()
-                                .text_color(rgb(t().accent))
+                                .text_color(rgb(t().accent_text))
                                 .children(caps.into_iter().map(|cap| {
                                     div()
                                         .px_1p5()
                                         .rounded_sm()
                                         .bg(rgb(t().raised))
                                         .border_1()
-                                        .border_color(rgb(t().faint))
+                                        .border_color(rgb(t().border))
                                         .child(cap.to_string())
                                 })),
                         )
@@ -3765,7 +4530,10 @@ impl Riff {
         };
         // Each group goes to the shorter column, so the two stay even as groups grow.
         let (mut left, mut right) = (Vec::new(), Vec::new());
-        let shown = |g: &keys::Group| g.lines.iter().filter(|l| keys::found(g.title, l, query)).count();
+        let shown = |g: &keys::Group| {
+            let has_keys = |&l: &keys::Line| keys::caps(l, keyboard).next().is_some();
+            g.lines.iter().filter(|&&l| has_keys(&l) && keys::found(g.title, l, keyboard, query)).count()
+        };
         let lines = |col: &Vec<&keys::Group>| col.iter().map(|g| shown(g) + 2).sum::<usize>();
         for g in keys::sheet(self.mode()).filter(|g| shown(g) > 0) {
             if lines(&left) <= lines(&right) { left.push(g) } else { right.push(g) }
@@ -3788,14 +4556,14 @@ impl Riff {
                     .rounded_lg()
                     .bg(rgb(t().surface))
                     .border_1()
-                    .border_color(rgb(t().faint))
+                    .border_color(rgb(t().border))
                     // The sheet lists this mode's keys, so it says which mode that is.
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_4()
-                            .child(div().text_color(rgb(t().accent)).child(match self.mode() {
+                            .child(div().text_color(rgb(t().accent_text)).child(match self.mode() {
                                 keys::Mode::Library => "Library keys",
                                 keys::Mode::Search => "Search keys",
                                 keys::Mode::Practice => "Practice keys",
@@ -3812,16 +4580,20 @@ impl Riff {
                                     .rounded_md()
                                     .bg(rgb(t().raised))
                                     .text_sm()
-                                    .child(ui::icon("search", 13., t().dim))
+                                    .child(ui::icon("search", 13., t().text_dim))
                                     .child(if query.is_empty() {
-                                        div().text_color(rgb(t().dim)).child("type to find a key")
+                                        div().text_color(rgb(t().text_dim)).child("type to find a key")
                                     } else {
                                         div().text_color(rgb(t().text)).child(query.to_string())
                                     }),
-                            ),
+                            )
+                            .child(self.button("help-close", "x", "Close", &[Action::Help], false, cx, |riff, _, _| {
+                                riff.help = false;
+                                riff.help_query.clear();
+                            })),
                     )
                     .when(left.is_empty(), |d| {
-                        d.child(div().text_sm().text_color(rgb(t().dim)).child("no key does that here"))
+                        d.child(div().text_sm().text_color(rgb(t().text_dim)).child("no key does that here"))
                     })
                     .child(
                         div()
@@ -3844,7 +4616,9 @@ impl Riff {
         };
         let entries = menu.entries.iter().enumerate().map(|(i, &(label, action))| {
             let lit = i == menu.row;
-            div()
+            // A thin line above an entry that starts a group.
+            let line = menu.breaks.contains(&i).then(|| div().my_1().mx_2().h(px(1.)).bg(rgb(t.border)));
+            let entry = div()
                 .id(("menu-entry", i))
                 .h(px(28.))
                 .px_2()
@@ -3853,16 +4627,16 @@ impl Riff {
                 .gap_4()
                 .rounded_md()
                 .cursor_pointer()
-                .when(lit, |d| d.bg(rgb(t.raised)))
+                .map(|d| selected_cues(d, lit))
                 .text_sm()
-                .text_color(rgb(if lit { t.accent } else { t.text }))
+                .text_color(rgb(t.text))
                 .child(div().flex_1().child(label))
                 .child(
                     div()
                         .font_family(MONO)
                         .text_xs()
-                        .text_color(rgb(t.dim))
-                        .child(keys::keys_for(action, self.mode(), self.settings.vim).join(" ")),
+                        .text_color(rgb(t.text_dim))
+                        .child(keys::keys_for(action, self.mode(), self.settings.keyboard).join(" ")),
                 )
                 .on_hover(cx.listener(move |riff, hovered: &bool, _, cx| {
                     if let Some((menu, _)) = riff.menu.as_mut().filter(|_| *hovered) {
@@ -3870,7 +4644,8 @@ impl Riff {
                         cx.notify();
                     }
                 }))
-                .on_click(cx.listener(move |riff, _, _, cx| riff.choose(action, cx)))
+                .on_click(cx.listener(move |riff, _, _, cx| riff.choose(action, cx)));
+            div().flex().flex_col().children(line).child(entry)
         });
         Some(deferred(
             div()
@@ -3894,7 +4669,7 @@ impl Riff {
                             .rounded_lg()
                             .bg(rgb(t.surface))
                             .border_1()
-                            .border_color(rgb(t.faint))
+                            .border_color(rgb(t.border))
                             .font_family(UI)
                             // A press inside the menu is not a press outside it.
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -3917,25 +4692,30 @@ impl Riff {
             .filter(|(p, _)| self.audio.files.first() == Some(p))
             .map(|(_, w)| w.clone());
         let song = self.audio.duration.or(wave.as_ref().map(|w| w.length()));
-        let detail_dragged = self
-            .dragging
-            .as_ref()
-            .is_some_and(|(_, strip)| Rc::ptr_eq(&strip.0, &self.detail.0));
-        // While an edge is dragged here, the view holds still so it stays under the pointer.
+        let detail_dragged = self.sweeping.is_some()
+            || self.dragging.as_ref().is_some_and(|(_, strip)| Rc::ptr_eq(&strip.0, &self.detail.0));
+        // A loop being drawn shows as the loop until it's let go.
+        let looping = self.sweeping.and_then(|s| self.swept(s)).unwrap_or(looping);
+        // While an edge is dragged or a loop drawn here, the view holds still so it stays
+        // under the pointer.
         let (from, to) = match song {
             _ if detail_dragged => {
                 let (_, from, to) = self.detail.0.get();
                 (from, to)
             }
-            Some(song) => wave::window(at, looping, self.span, song),
+            Some(song) => match self.panned {
+                Some(from) => wave::moved(from, self.span, song),
+                None => wave::window(at, looping, self.span, song),
+            },
             None => (Duration::ZERO, self.span),
         };
-        let status = match (&wave, &self.wave_error, &self.now) {
-            (Some(_), ..) => None,
-            (None, Some(e), _) => Some(format!("couldn't read the waveform: {e}")),
-            (None, None, Some(_)) => Some("reading the waveform…".to_string()),
-            (None, None, None) => Some("play a song to see its waveform".to_string()),
-        };
+        let status = empty::waveform(
+            wave.is_some(),
+            self.wave_error.as_deref().map(scan::plain).as_deref(),
+            self.now.is_some(),
+            self.first_key(Action::Practice, keys::Mode::Practice),
+            self.first_key(Action::Play, keys::Mode::Library),
+        );
         let beats = self.beats_now();
         let mut about = format!("{:.1} s shown", (to - from).as_secs_f64());
         if self.current_variation().is_some_and(|v| v.offset.is_none()) {
@@ -3957,11 +4737,37 @@ impl Riff {
         let lane = self.region_lane(song.unwrap_or(self.span), cx);
         let loop_bar = self.loop_bar(cx);
         let lanes = self.stem_lanes(song.unwrap_or(self.span), at, cx);
+        // The overview's box, what the detail shows, is grabbed to move that view.
+        let boxed = |view: &Painting| {
+            let (song, (from, to)) = (view.to.as_secs_f64().max(1e-3), view.boxed?);
+            Some(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(relative((from.as_secs_f64() / song) as f32))
+                    .w(relative(((to - from).as_secs_f64() / song) as f32))
+                    .cursor(if self.panning.is_some_and(|p| p.moved) {
+                        gpui::CursorStyle::ClosedHand
+                    } else {
+                        gpui::CursorStyle::OpenHand
+                    }),
+            )
+        };
         let strip = |id: &'static str, strip: &Strip, view: Painting| {
-            let (down, right) = (strip.clone(), strip.clone());
+            let right = strip.clone();
+            let overview = view.boxed.is_some();
             div()
                 .id(id)
-                .tooltip(self.tip("Click to jump; drag a loop edge or the marker; shift-click ends the loop; scroll to zoom; right-click for more", &[]))
+                .tooltip(self.tip(
+                    if overview {
+                        "Drag the box to look elsewhere (Follow comes back); click to jump; scroll to zoom; right-click for more"
+                    } else {
+                        "Click to jump; drag across to loop that stretch; drag a loop edge or the marker; shift-click ends the loop; scroll to zoom; right-click for more"
+                    },
+                    &[],
+                ))
+                .children(boxed(&view))
                 .children(edge_grips(view.looping, view.marker, view.from, view.to))
                 // The wheel zooms, as - and = do: a mouse notch is about one step, and a
                 // trackpad's many small deltas add up to the same.
@@ -3976,10 +4782,14 @@ impl Riff {
                 .rounded_lg()
                 .bg(rgb(t.surface))
                 .overflow_hidden()
-                .cursor_pointer()
+                // The detail is dragged across to draw a loop, like selecting text.
+                .cursor(if overview { gpui::CursorStyle::PointingHand } else { gpui::CursorStyle::IBeam })
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |riff, e, _, cx| riff.strip_down(&down, e, cx)),
+                    cx.listener(move |riff, e, _, cx| match overview {
+                        true => riff.overview_down(e, cx),
+                        false => riff.detail_down(e, cx),
+                    }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
@@ -4004,7 +4814,10 @@ impl Riff {
             .flex_1()
             .min_h_0()
             // Files dropped here become a variation of the playing song.
-            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(tint(t.loops, 0x18)))
+            .rounded_lg()
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(rgb(t.accent_soft)).border_color(rgb(t.focus)))
             .on_drop(cx.listener(|riff, dropped: &ExternalPaths, _, cx| {
                 if let Some(song) = riff.now.as_ref().map(|n| n.path.clone()) {
                     riff.add_variation(song, dropped.paths().to_vec());
@@ -4028,7 +4841,7 @@ impl Riff {
                             .items_center()
                             .justify_center()
                             .text_sm()
-                            .text_color(rgb(t.dim))
+                            .text_color(rgb(t.text_dim))
                             .child(s)
                     })),
             )
@@ -4069,7 +4882,13 @@ impl Riff {
                         .overflow_hidden()
                         .bg(rgb(t.surface))
                         .text_xs()
-                        .text_color(rgb(if heard { t.text } else { t.dim }))
+                        .text_color(rgb(if muted {
+                            t.text_disabled
+                        } else if heard {
+                            t.text
+                        } else {
+                            t.text_dim
+                        }))
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
@@ -4079,9 +4898,9 @@ impl Riff {
                         )
                         // The number and name are the level's slider, filled to it.
                         .child(
-                            self.level_area(("stem-level", i), Slider::Stem(i), tint(t.loops, 0x30), cx)
+                            self.level_area(("stem-level", i), Slider::Stem(i), rgb(t.level), false, cx)
                                 .tooltip(self.tip(
-                                    format!("{name} at {:.0}%: drag or scroll to change; right-click for more", self.level(Slider::Stem(i)) * 100.),
+                                    format!("{name} at {:.0}%: drag across or scroll to change; right-click for more", self.level(Slider::Stem(i)) * 100.),
                                     &[],
                                 ))
                                 .flex_1()
@@ -4091,8 +4910,29 @@ impl Riff {
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .child(div().w(px(14.)).font_family(MONO).text_color(rgb(t.dim)).child((i + 1).to_string()))
-                                .child(div().flex_1().min_w_0().truncate().child(name.clone())),
+                                .child(div().w(px(14.)).font_family(MONO).text_color(rgb(t.text_dim)).child((i + 1).to_string()))
+                                // Soloed: an S badge and a heavier name, not the lit button alone.
+                                .when(soloed, |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .bg(rgb(t.accent_fill))
+                                            .font_family(MONO)
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(rgb(t.on_accent))
+                                            .child("S"),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .when(soloed, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                                        .child(name.clone()),
+                                ),
                         )
                         .child(self.tool(
                             ("mute", i),
@@ -4157,6 +4997,10 @@ impl Riff {
         let t = t();
         let recording = self.recording()?;
         let list = self.regions.of(&recording).to_vec();
+        let asking = self
+            .deleting_section
+            .as_ref()
+            .and_then(|asked| list.iter().position(|r| r == asked).map(|i| (i, asked.name.clone())));
         let current = self.regions.current(&recording, self.audio.looping, self.audio.position());
         let length = song.as_secs_f64().max(1e-3);
         let empty = list.is_empty();
@@ -4167,23 +5011,25 @@ impl Riff {
             .h(px(26.))
             .child(canvas(move |bounds, _, _| strip.set(bounds, Duration::ZERO, song), |_, _, _, _| {}).absolute().size_full())
             .when(empty, |d| {
-                d.flex().items_center().px_2().text_xs().text_color(rgb(t.dim)).child("No sections yet: set a loop, then save it with r")
+                d.flex().items_center().px_2().text_xs().text_color(rgb(t.text_dim)).child("No sections yet: set a loop, then save it with r")
             });
-        // A section's edge, grabbed to drag it (snapping to beats on the grid, ⌥ freely).
+        // A section's edge, grabbed to drag it (snapping to beats on the grid, ⌥ freely):
+        // a grip inside the section, wide enough to hit. A press that doesn't move plays
+        // the section, so one narrower than its grips still plays on a click.
         let handle = |i: usize, start: bool| {
             div()
                 .absolute()
                 .top_0()
                 .h_full()
-                .w(px(6.))
+                .w(px(HIT))
                 .when(start, |d| d.left_0())
                 .when(!start, |d| d.right_0())
                 .cursor(gpui::CursorStyle::ResizeLeftRight)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |riff, _, _, cx| {
+                    cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        riff.shaping = Some((i, start));
+                        riff.shaping = Some(Shaping { i, start, x: e.position.x, moved: false });
                         cx.notify();
                     }),
                 )
@@ -4206,12 +5052,15 @@ impl Riff {
                 .items_center()
                 .overflow_hidden()
                 .rounded_sm()
-                .bg(tint(t.sections, if lit { 0x60 } else { 0x26 }))
-                .border_l_2()
-                .border_color(tint(t.sections, 0xff))
+                .bg(tint(t.section, if lit { t.section_fill_lit } else { t.section_fill }))
+                // Both edges, since both drag.
+                .border_l_1()
+                .border_r_1()
+                .border_color(rgb(t.section))
                 .cursor_pointer()
                 .text_xs()
-                .text_color(rgb(if lit { t.text } else { t.dim }))
+                .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                .text_color(rgb(if lit { t.text } else { t.text_dim }))
                 .child(div().truncate().child(name))
                 .child(handle(i, true))
                 .child(handle(i, false))
@@ -4227,21 +5076,41 @@ impl Riff {
                     }),
                 )
         }));
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(pill().child(self.tool("region-prev", "region-prev", "Loop the previous section", Action::Region(false), false, cx)))
-                .child(lane)
+        // A click on delete (or the menu's Delete) asks once more, as a playlist's does;
+        // dd is two presses already.
+        let tools = match asking {
+            Some((i, name)) => pill()
                 .child(
-                    pill()
-                        .child(self.tool("region-next", "region-next", "Loop the next section", Action::Region(true), false, cx))
-                        .child(self.tool("region-save", "bookmark-plus", "Save the loop as a section, or rename its section", Action::SaveRegion, false, cx))
-                        .child(self.tool("region-delete", "bookmark-minus", "Delete the section playing", Action::RemoveRegion, false, cx)),
+                    self.choice("section-delete-for-good", &format!("Delete {name} for good"), "", t.danger, cx, move |riff| {
+                        riff.deleting_section = None;
+                        riff.remove_region(i);
+                    })
+                    .max_w(px(240.))
+                    .overflow_hidden(),
                 )
-                .into_any_element(),
-        )
+                .child(self.button("section-keep", "x", "Keep it", &[], false, cx, |riff, _, _| riff.deleting_section = None)),
+            None => pill()
+                .child(self.tool("region-save", "bookmark-plus", "Save the loop as a section, or rename its section", Action::SaveRegion, false, cx))
+                .child(self.button(
+                    "region-delete",
+                    "bookmark-minus",
+                    "Delete the section playing (asks first)",
+                    &[Action::RemoveRegion],
+                    false,
+                    cx,
+                    |riff, _, _| riff.ask_delete_section(riff.region_in_play()),
+                )),
+        };
+        Some(div().flex().items_center().gap_2().child(lane).child(tools).into_any_element())
+    }
+
+    /// Asks "for good?" before deleting section `i` of the playing recording.
+    fn ask_delete_section(&mut self, i: Option<usize>) {
+        let section = self.recording().zip(i).and_then(|(r, i)| self.regions.of(&r).get(i).cloned());
+        match section {
+            Some(s) => self.deleting_section = Some(s),
+            None => self.message = Some(("no section here to delete".into(), false)),
+        }
     }
 
     /// Above the waveform: which recording plays (a chip each, plus adding one), what is
@@ -4262,11 +5131,12 @@ impl Riff {
                 .gap_2()
                 .rounded_md()
                 .cursor_pointer()
-                .when(lit, |d| d.bg(rgb(t.accent_soft)))
-                .hover(|d| d.bg(rgb(t.faint)))
+                .map(|d| lit_cues(d, lit))
+                .hover(|d| d.bg(rgb(t.hover)))
                 .text_sm()
-                .text_color(rgb(if lit { t.accent } else { t.dim }))
-                .child(ui::icon(if i == 0 { "music" } else { "layers" }, 14., if lit { t.accent } else { t.dim }))
+                .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                .text_color(rgb(if lit { t.accent_text } else { t.text_dim }))
+                .child(ui::icon(if i == 0 { "music" } else { "layers" }, 14., if lit { t.accent } else { t.text_dim }))
                 .child(div().max_w(px(160.)).truncate().child(name.clone()))
                 .tooltip(self.tip(format!("Play {}", if i == 0 { "the song itself".to_string() } else { name }), &[Action::Variation]))
                 .on_click(cx.listener(move |riff, _, _, cx| {
@@ -4283,10 +5153,21 @@ impl Riff {
                     .children(chips)
                     .child(self.tool("add-variation", "layers-plus", "Add a variation (or drop files here)", Action::AddVariation, false, cx))
                     .when(self.variation > 0, |d| {
-                        d.child(self.tool("remove-variation", "x", "Remove the playing variation (asks first)", Action::RemoveVariation, false, cx))
+                        d.child(self.button(
+                            "remove-variation",
+                            "x",
+                            "Remove the playing variation (asks first)",
+                            &[Action::RemoveVariation],
+                            false,
+                            cx,
+                            |riff, _, _| {
+                                let removing = riff.removing_variation.take();
+                                riff.remove_variation(removing, true);
+                            },
+                        ))
                     }),
             )
-            .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(about))
+            .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(about))
             .child(self.pitch_control(cx))
             // Any speed from 25 to 110%, the trainer beside it. Right-click for presets.
             .child(
@@ -4299,20 +5180,18 @@ impl Riff {
                             cx.notify();
                         }),
                     )
-                    .child(div().pl_1().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("25"))
+                    .child(div().pl_1().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("25"))
                     .child(
-                        self.level_area("speed-level", Slider::Speed, gpui::rgb(if self.speed.on { t.accent } else { t.dim }), cx)
+                        self.level_area("speed-level", Slider::Speed, gpui::rgb(if self.speed.on { t.accent } else { t.text_dim }), true, cx)
                             .tooltip(self.tip(
                                 format!("{}% speed: drag or scroll for any speed; right-click for presets", self.speed.now()),
                                 &[Action::Speed(false), Action::Speed(true)],
                             ))
                             .w(px(110.))
-                            .h(px(10.))
-                            .mx_1()
-                            .rounded_full()
-                            .bg(rgb(t.faint)),
+                            .h(px(HIT))
+                            .mx_1(),
                     )
-                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("110"))
+                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("110"))
                     .child(self.tool(
                         "trainer",
                         "trending-up",
@@ -4324,6 +5203,27 @@ impl Riff {
             )
             .child(
                 pill()
+                    .child(
+                        self.tool(
+                            "follow",
+                            "crosshair",
+                            if self.panned.is_some() {
+                                "Follow the playhead again"
+                            } else {
+                                "The view follows the playhead; drag the box on the overview to look elsewhere"
+                            },
+                            Action::Follow,
+                            self.panned.is_some(),
+                            cx,
+                        )
+                        .w_auto()
+                        .px_2()
+                        .gap_1()
+                        .text_sm()
+                        .when(self.panned.is_some(), |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                        .text_color(rgb(if self.panned.is_some() { t.accent_text } else { t.text_dim }))
+                        .child("Follow"),
+                    )
                     .child(self.tool("grid", "beats", "Beat grid: loops and steps follow the beats", Action::Grid, self.grid, cx))
                     .child(self.tool("zoom-out", "zoom-out", "Zoom out", Action::Zoom(keys::ZOOM), false, cx))
                     .child(self.tool("zoom-in", "zoom-in", "Zoom in", Action::Zoom(1.0 / keys::ZOOM), false, cx)),
@@ -4331,11 +5231,19 @@ impl Riff {
             .into_any_element()
     }
 
-    /// Under the waveform: every loop tool, grouped (its edges, widening and narrowing,
-    /// sliding, playing and switching), and where the loop is.
+    /// Under the waveform: the practice transport in large named buttons (sections,
+    /// play, the loop, replay), then the finer loop tools as icons (its edges, widening
+    /// and narrowing, sliding, the marker), and where the loop is.
     fn loop_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = t();
         let looping = self.audio.looping;
+        let playing = self.audio.playing();
+        // Named for where `o` goes (`audio::replay_from`).
+        let replay = match (self.marker(), looping.start) {
+            (Some(_), _) => "From marker",
+            (None, Some(_)) => "From loop",
+            (None, None) => "From the top",
+        };
         let label = match (looping.start, looping.end) {
             (_, Some(end)) => {
                 let start = looping.start.unwrap_or_default();
@@ -4348,13 +5256,41 @@ impl Riff {
                 format!("{} to {}{beats}{off}", ui::clock(start), ui::clock(end))
             }
             (Some(start), None) => format!("from {}", ui::clock(start)),
-            (None, None) => "no loop".to_string(),
+            (None, None) => self.no_loop(),
         };
         let nudge = keys::NUDGE;
+        let marker = self.marker().is_some();
         div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_2()
+            // Right-click anywhere along it: the loop's menu.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |riff, e: &MouseDownEvent, _, cx| {
+                    let edges = looping.start.is_some() || looping.end.is_some();
+                    riff.menu = Some((Menu::looping(looping.active(), looping.looping(), edges, marker), e.position));
+                    cx.notify();
+                }),
+            )
+            .child(self.big("section-prev", "region-prev", "Previous section", "Loop the previous section", Action::Region(false), false, cx))
+            .child(self.big(
+                "section-start",
+                "rotate-ccw",
+                "Section start",
+                "Play from the start of this section (or the loop)",
+                Action::SectionStart,
+                false,
+                cx,
+            ))
+            .child(
+                self.big("transport", if playing { "pause" } else { "play" }, if playing { "Pause" } else { "Play" }, "Play or pause", Action::Toggle, playing, cx)
+                    .min_w(px(112.)),
+            )
+            .child(self.big("section-next", "region-next", "Next section", "Loop the next section", Action::Region(true), false, cx))
+            .child(self.big("bar-loop", "repeat", "Loop", "Loop on or off, keeping its edges", Action::LoopSwitch, looping.looping(), cx))
+            .child(self.big("loop-play", "loop-play", replay, "Play from the marker, or the loop start", Action::FromLoopStart, false, cx))
             .child(
                 pill()
                     .child(self.tool("bar-loop-start", "loop-start", "Loop starts here", Action::LoopStart, false, cx))
@@ -4375,17 +5311,16 @@ impl Riff {
             .child(
                 pill()
                     .child(self.tool("marker", "flag", "Marker here, again to clear it", Action::Marker, self.marker().is_some(), cx))
-                    .child(self.tool("loop-play", "loop-play", "Play from the marker, or the loop start", Action::FromLoopStart, false, cx))
-                    .child(self.tool("bar-loop", "repeat", "Loop on or off, keeping its edges", Action::LoopSwitch, looping.looping(), cx))
                     .child(self.tool("loop-clear", "loop-clear", "Clear the loop", Action::LoopClear, false, cx)),
             )
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(120.))
                     .text_right()
                     .font_family(MONO)
                     .text_xs()
-                    .text_color(rgb(if looping.looping() { t.loops } else { t.dim }))
+                    .text_color(rgb(if looping.looping() { t.loop_text } else { t.text_dim }))
                     .child(label),
             )
             .into_any_element()
@@ -4393,7 +5328,7 @@ impl Riff {
 
     /// The album view's header: the cover large, the album's name and what's on it, so
     /// it's plain that only this album is listed.
-    fn render_album(&self, of: &Track) -> impl IntoElement {
+    fn render_album(&self, of: &Track, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
         let songs = library::album(&self.tracks, of);
         let seconds = songs
@@ -4415,6 +5350,7 @@ impl Riff {
             .p_4()
             .rounded_lg()
             .bg(rgb(t.surface))
+            .on_mouse_down(MouseButton::Right, opens_menu(|| Menu::shown(Shown::Album), cx))
             .child(cover(of.cover.clone(), 140.))
             .child(
                 div()
@@ -4427,7 +5363,7 @@ impl Riff {
                         div()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(t.dim))
+                            .text_color(rgb(t.text_dim))
                             .child("Album"),
                     )
                     .child(
@@ -4438,15 +5374,15 @@ impl Riff {
                             .text_color(rgb(t.text))
                             .child(if of.album.is_empty() { "Unknown album".into() } else { of.album.clone() }),
                     )
-                    .child(div().truncate().text_sm().text_color(rgb(t.dim)).child(about.join(", "))),
+                    .child(div().truncate().text_sm().text_color(rgb(t.text_dim)).child(about.join(", "))),
             )
             .child(
                 div()
                     .flex_none()
                     .font_family(MONO)
                     .text_xs()
-                    .text_color(rgb(t.dim))
-                    .child(format!("{} back", keys::keys_for(Action::Album, keys::Mode::Library, false).join(" "))),
+                    .text_color(rgb(t.text_dim))
+                    .child(format!("{} back", keys::keys_for(Action::Album, keys::Mode::Library, Keyboard::Mac).join(" "))),
             )
     }
 
@@ -4455,7 +5391,7 @@ impl Riff {
     fn now_subtitle(&self, fallback: String, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = t();
         let Some(now) = self.now.clone() else {
-            return div().truncate().text_sm().text_color(rgb(t.dim)).child(fallback).into_any_element();
+            return div().truncate().text_sm().text_color(rgb(t.text_dim)).child(fallback).into_any_element();
         };
         let link = |id: &'static str, text: String, what: &str, action: Action, artist: bool| {
             let track = now.clone();
@@ -4463,7 +5399,7 @@ impl Riff {
                 .id(id)
                 .flex_none()
                 .cursor_pointer()
-                .hover(|d| d.text_color(rgb(t.accent)).underline())
+                .hover(|d| d.text_color(rgb(t.accent_text)).underline())
                 .tooltip(self.tip(what.to_string(), &[action]))
                 .on_click(cx.listener(move |riff, _, _, cx| {
                     riff.show(track.clone(), artist);
@@ -4476,7 +5412,7 @@ impl Riff {
             .min_w_0()
             .overflow_hidden()
             .text_sm()
-            .text_color(rgb(t.dim))
+            .text_color(rgb(t.text_dim))
             .child(link("now-artist", now.artist.clone(), "Everything by this artist", Action::Artist, true))
             .child(div().flex_none().child(", "))
             .child(link("now-album", now.album.clone(), "This album", Action::Album, false))
@@ -4512,11 +5448,13 @@ impl Riff {
             (picker.at, picker.naming) = (at, Some(String::new()));
             return;
         }
-        let song = picker.song.clone();
+        let songs = std::mem::take(&mut picker.songs);
         self.add_to = None;
         let name = self.playlists.get(at).map(|p| p.name.clone()).unwrap_or_default();
-        if self.playlists.add(at, &song) {
-            self.message = Some((format!("added to {name}"), false));
+        let added = songs.iter().filter(|song| self.playlists.add(at, song)).count();
+        if added > 0 {
+            let what = if songs.len() == 1 { String::new() } else { format!("{added} songs ") };
+            self.message = Some((format!("added {what}to {name}"), false));
             self.store_playlists();
             if self.playlist_view == Some(at) {
                 let keep = self.selected_path();
@@ -4530,10 +5468,12 @@ impl Riff {
     /// A new playlist from the picker, with the song in it.
     fn create_playlist(&mut self, name: &str) {
         let Some(picker) = &self.add_to else { return };
-        let song = picker.song.clone();
+        let songs = picker.songs.clone();
         match self.playlists.create(name) {
             Ok(i) => {
-                self.playlists.add(i, &song);
+                for song in &songs {
+                    self.playlists.add(i, song);
+                }
                 self.add_to = None;
                 self.message = Some((format!("added to {}", name.trim()), false));
                 self.store_playlists();
@@ -4544,7 +5484,7 @@ impl Riff {
 
     /// A key on the playlist picker: `j k` / ↑ ↓ and Enter, Esc closes; while naming a
     /// new playlist, typing, Enter creates it, Esc goes back.
-    fn picker_key(&mut self, k: &gpui::Keystroke, press: keys::Press) {
+    fn picker_key(&mut self, k: &gpui::Keystroke, typed: Option<String>) {
         let rows = self.playlists.all().len() + 1;
         let Some(picker) = &mut self.add_to else { return };
         if let Some(name) = &mut picker.naming {
@@ -4558,8 +5498,8 @@ impl Riff {
                     name.pop();
                 }
                 _ => {
-                    if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
-                        name.push_str(text);
+                    if let Some(text) = typed {
+                        name.push_str(&text);
                     }
                 }
             }
@@ -4578,30 +5518,31 @@ impl Riff {
     }
 
     /// Typing the open playlist's new name in its header: Enter keeps, Esc cancels.
-    fn rename_key(&mut self, k: &gpui::Keystroke, press: keys::Press) {
+    fn rename_key(&mut self, k: &gpui::Keystroke, typed: Option<String>) {
         let Some(name) = &mut self.renaming_playlist else { return };
         match k.key.as_str() {
-            "enter" => {
-                let name = name.clone();
-                if let Some(i) = self.playlist_view {
-                    match self.playlists.rename(i, &name) {
-                        Ok(()) => {
-                            self.renaming_playlist = None;
-                            self.store_playlists();
-                        }
-                        Err(e) => self.message = Some((e, true)),
-                    }
-                }
-            }
+            "enter" => self.rename_playlist(),
             "escape" => self.renaming_playlist = None,
             "backspace" => {
                 name.pop();
             }
             _ => {
-                if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
-                    name.push_str(text);
+                if let Some(text) = typed {
+                    name.push_str(&text);
                 }
             }
+        }
+    }
+
+    /// The open playlist takes the name typed in its header.
+    fn rename_playlist(&mut self) {
+        let (Some(name), Some(i)) = (self.renaming_playlist.clone(), self.playlist_view) else { return };
+        match self.playlists.rename(i, &name) {
+            Ok(()) => {
+                self.renaming_playlist = None;
+                self.store_playlists();
+            }
+            Err(e) => self.message = Some((e, true)),
         }
     }
 
@@ -4619,10 +5560,13 @@ impl Riff {
     /// and "New playlist…", whose name is typed in place.
     fn render_picker(&self, picker: &AddTo, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
-        let title = self.track_at(&picker.song).map(|t| t.title).unwrap_or_default();
+        let title = match picker.songs.as_slice() {
+            [song] => self.track_at(song).map(|t| t.title).unwrap_or_default(),
+            songs => format!("{} songs", ui::count(songs.len())),
+        };
         let rows = self.playlists.all().iter().enumerate().map(|(i, p)| {
             let lit = picker.at == i && picker.naming.is_none();
-            let has = self.playlists.has(i, &picker.song);
+            let has = !picker.songs.is_empty() && picker.songs.iter().all(|s| self.playlists.has(i, s));
             div()
                 .id(("pick", i))
                 .h(px(34.))
@@ -4632,29 +5576,54 @@ impl Riff {
                 .gap_2()
                 .rounded_md()
                 .cursor_pointer()
-                .when(lit, |d| d.bg(rgb(t.raised)))
-                .hover(|d| d.bg(rgb(t.raised)))
-                .child(ui::icon("list-music", 14., if lit { t.accent } else { t.dim }))
-                .child(div().flex_1().truncate().text_sm().text_color(rgb(if lit { t.accent } else { t.text })).child(p.name.clone()))
-                .when(has, |d| d.child(ui::icon("check", 14., t.dim)))
+                .map(|d| selected_cues(d, lit))
+                .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
+                .child(ui::icon("list-music", 14., if lit { t.accent } else { t.text_dim }))
+                .child(
+                    div()
+                        .flex_1()
+                        .truncate()
+                        .text_sm()
+                        .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                        .text_color(rgb(t.text))
+                        .child(p.name.clone()),
+                )
+                .when(has, |d| d.child(ui::icon("check", 14., t.text_dim)))
                 .on_click(cx.listener(move |riff, _, _, cx| {
                     riff.pick_playlist(i);
                     cx.notify();
                 }))
         });
+        let rows: Vec<_> = rows.collect();
         let new_at = self.playlists.all().len();
         let new_row = match &picker.naming {
+            // Cancel, Esc or a click anywhere else goes back to the list.
             Some(name) => div()
                 .h(px(34.))
-                .px_3()
+                .pl_3()
+                .pr_1()
                 .flex()
                 .items_center()
                 .gap_2()
                 .rounded_md()
                 .bg(rgb(t.raised))
+                .on_mouse_down_out(cx.listener(|riff, _, _, cx| {
+                    if let Some(picker) = &mut riff.add_to {
+                        picker.naming = None;
+                    }
+                    cx.notify();
+                }))
                 .child(ui::icon("plus", 14., t.accent))
-                .child(div().flex_1().text_sm().text_color(rgb(t.text)).child(format!("{name}▏")))
-                .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Enter creates"))
+                .child(div().flex_1().min_w_0().truncate().text_sm().text_color(rgb(t.text)).child(format!("{name}▏")))
+                .child(self.choice("new-playlist-cancel", "Cancel", "Esc", t.text, cx, |riff| {
+                    if let Some(picker) = &mut riff.add_to {
+                        picker.naming = None;
+                    }
+                }))
+                .child(self.choice("new-playlist-create", "Create", "Enter", t.accent_text, cx, |riff| {
+                    let name = riff.add_to.as_ref().and_then(|p| p.naming.clone()).unwrap_or_default();
+                    riff.create_playlist(&name);
+                }))
                 .into_any_element(),
             None => {
                 let lit = picker.at == new_at;
@@ -4667,10 +5636,16 @@ impl Riff {
                     .gap_2()
                     .rounded_md()
                     .cursor_pointer()
-                    .when(lit, |d| d.bg(rgb(t.raised)))
-                    .hover(|d| d.bg(rgb(t.raised)))
-                    .child(ui::icon("plus", 14., if lit { t.accent } else { t.dim }))
-                    .child(div().text_sm().text_color(rgb(if lit { t.accent } else { t.text })).child("New playlist…"))
+                    .map(|d| selected_cues(d, lit))
+                    .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
+                    .child(ui::icon("plus", 14., if lit { t.accent } else { t.text_dim }))
+                    .child(
+                        div()
+                            .text_sm()
+                            .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                            .text_color(rgb(t.text))
+                            .child("New playlist…"),
+                    )
                     .on_click(cx.listener(move |riff, _, _, cx| {
                         riff.pick_playlist(new_at);
                         cx.notify();
@@ -4696,15 +5671,24 @@ impl Riff {
                     .rounded_lg()
                     .bg(rgb(t.surface))
                     .border_1()
-                    .border_color(rgb(t.faint))
+                    .border_color(rgb(t.border))
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .pb_2()
                             .flex()
-                            .flex_col()
-                            .child(div().text_color(rgb(t.text)).child("Add to a playlist"))
-                            .child(div().truncate().text_sm().text_color(rgb(t.dim)).child(title)),
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_color(rgb(t.text)).child("Add to a playlist"))
+                                    .child(div().truncate().text_sm().text_color(rgb(t.text_dim)).child(title)),
+                            )
+                            .child(self.button("picker-close", "x", "Close", &[], false, cx, |riff, _, _| riff.add_to = None)),
                     )
                     .children(rows)
                     .child(new_row)
@@ -4713,8 +5697,8 @@ impl Riff {
                             .pt_2()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(t.dim))
-                            .child("j k move   Enter adds   Esc closes"),
+                            .text_color(rgb(t.text_dim))
+                            .child("j k move   Enter or a click adds   Esc closes"),
                     ),
             )
     }
@@ -4735,7 +5719,7 @@ impl Riff {
                 .justify_center()
                 .rounded_md()
                 .cursor_pointer()
-                .hover(|d| d.bg(rgb(t.faint)))
+                .hover(|d| d.bg(rgb(t.hover)))
                 .child(ui::icon(icon, 14., t.text))
                 .tooltip(self.tip(what, &[]))
                 .on_click(cx.listener(move |riff, _, _, cx| {
@@ -4759,8 +5743,14 @@ impl Riff {
                 .text_color(rgb(t.text))
                 .child(named.name.clone()),
         };
-        let actions = if self.renaming_playlist.is_some() {
-            div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Enter keeps, Esc cancels")
+        let renaming = self.renaming_playlist.is_some();
+        let actions = if renaming {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(self.choice("playlist-rename-cancel", "Cancel", "Esc", t.text, cx, |riff| riff.renaming_playlist = None))
+                .child(self.choice("playlist-rename-save", "Save", "Enter", t.accent_text, cx, |riff| riff.rename_playlist()))
         } else if self.deleting_playlist {
             div()
                 .flex()
@@ -4773,10 +5763,10 @@ impl Riff {
                         .py_1()
                         .rounded_md()
                         .cursor_pointer()
-                        .bg(rgb(t.raised))
+                        .bg(rgb(t.danger_soft))
                         .text_sm()
-                        .text_color(rgb(t.error))
-                        .hover(|d| d.bg(rgb(t.faint)))
+                        .text_color(rgb(t.danger))
+                        .hover(|d| d.bg(rgb(t.hover)))
                         .child("Delete for good")
                         .on_click(cx.listener(|riff, _, _, cx| {
                             riff.delete_playlist();
@@ -4803,6 +5793,14 @@ impl Riff {
                 .p_4()
                 .rounded_lg()
                 .bg(rgb(t.surface))
+                .when(!renaming, |d| d.on_mouse_down(MouseButton::Right, opens_menu(|| Menu::shown(Shown::Playlist), cx)))
+                // While renaming, a click anywhere else cancels, as Esc does.
+                .when(renaming, |d| {
+                    d.on_mouse_down_out(cx.listener(|riff, _, _, cx| {
+                        riff.renaming_playlist = None;
+                        cx.notify();
+                    }))
+                })
                 .child(
                     div()
                         .size(px(88.))
@@ -4821,9 +5819,9 @@ impl Riff {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Playlist"))
+                        .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("Playlist"))
                         .child(name)
-                        .child(div().truncate().text_sm().text_color(rgb(t.dim)).child(ui::album_stats(songs.len(), seconds))),
+                        .child(div().truncate().text_sm().text_color(rgb(t.text_dim)).child(ui::album_stats(songs.len(), seconds))),
                 )
                 .child(
                     div()
@@ -4832,7 +5830,7 @@ impl Riff {
                         .items_end()
                         .gap_2()
                         .child(actions)
-                        .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Esc back")),
+                        .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("Esc back")),
                 ),
         )
     }
@@ -4886,6 +5884,13 @@ impl Riff {
         }
     }
 
+    /// Saves the EQ under the name typed for it.
+    fn save_eq_named(&mut self) {
+        if let Some(name) = self.eq_naming.take() {
+            self.save_eq(&name);
+        }
+    }
+
     fn remove_eq_preset(&mut self) {
         let eq = self.settings.eq;
         if let Some(name) = crate::eq::remove(&mut self.settings.eq_presets, &eq) {
@@ -4895,27 +5900,28 @@ impl Riff {
     }
 
     /// A key on the EQ sheet: `h l` pick a column, `k j` move it a dB, `0` resets it,
-    /// `n N` step through the presets, `e` on or off, `w` saves (typing a name), `x`
-    /// removes a saved preset, Esc or Enter close.
-    fn eq_key(&mut self, at: usize, k: &gpui::Keystroke, press: keys::Press) {
+    /// `n N` step through the presets, `e` on or off, `w` or ⌘S saves (typing a name,
+    /// which ⌘S saves too), `x` removes a saved preset, Esc or Enter close.
+    fn eq_key(&mut self, at: usize, k: &gpui::Keystroke, press: keys::Press, typed: Option<String>) {
+        let save = press.cmd && k.key == "s";
         if let Some(name) = &mut self.eq_naming {
             match k.key.as_str() {
-                "enter" => {
-                    let name = name.clone();
-                    self.eq_naming = None;
-                    self.save_eq(&name);
-                }
+                "enter" => self.save_eq_named(),
+                _ if save => self.save_eq_named(),
                 "escape" => self.eq_naming = None,
                 "backspace" => {
                     name.pop();
                 }
                 _ => {
-                    if let Some(text) = k.key_char.as_ref().filter(|_| !press.cmd && !press.ctrl) {
-                        name.push_str(text);
+                    if let Some(text) = typed {
+                        name.push_str(&text);
                     }
                 }
             }
             return;
+        }
+        if save {
+            return self.name_eq_preset();
         }
         match (k.key.as_str(), press.shift) {
             ("escape" | "enter", _) => self.eq_sheet = None,
@@ -4926,14 +5932,17 @@ impl Riff {
             ("0", _) => self.set_eq_column(at, 0, true),
             ("n", shift) => self.eq_step(!shift),
             ("e", false) => self.change_eq(true, |eq| eq.on = !eq.on),
-            ("w", false) => {
-                let name = crate::eq::name_of(&self.settings.eq, &self.settings.eq_presets);
-                let saved = self.settings.eq_presets.iter().any(|p| p.name == name);
-                self.eq_naming = Some(if saved { name } else { String::new() });
-            }
+            ("w", false) => self.name_eq_preset(),
             ("x", false) => self.remove_eq_preset(),
             _ => {}
         }
+    }
+
+    /// Asks for the name to save the EQ under: the preset's own when it is a saved one.
+    fn name_eq_preset(&mut self) {
+        let name = crate::eq::name_of(&self.settings.eq, &self.settings.eq_presets);
+        let saved = self.settings.eq_presets.iter().any(|p| p.name == name);
+        self.eq_naming = Some(if saved { name } else { String::new() });
     }
 
     /// The EQ column at `y` on its track, in whole dB: the top is +12, the bottom -12.
@@ -4962,7 +5971,7 @@ impl Riff {
                 .justify_center()
                 .rounded_md()
                 .cursor_pointer()
-                .hover(|d| d.bg(rgb(t.faint)))
+                .hover(|d| d.bg(rgb(t.hover)))
                 .child(ui::icon(icon, 14., t.text))
                 .tooltip(self.tip(what, &[]))
                 .on_click(cx.listener(move |riff, _, _, cx| {
@@ -4982,7 +5991,7 @@ impl Riff {
             let lit = i == at;
             let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::default();
             let (drawn, pressed) = (bounds.clone(), bounds);
-            let colour = if !eq.on { t.dim } else if lit { t.accent } else { t.text };
+            let colour = if !eq.on { t.text_dim } else if lit { t.accent } else { t.text };
             // The fill runs from the middle (0 dB) to the value.
             let half = db.unsigned_abs() as f32 / crate::eq::RANGE as f32 / 2.;
             let fill = div().absolute().left(px(10.)).w(px(4.)).rounded_full().bg(rgb(colour)).h(relative(half));
@@ -4997,7 +6006,7 @@ impl Riff {
                     div()
                         .font_family(MONO)
                         .text_xs()
-                        .text_color(rgb(if lit { t.accent } else { t.dim }))
+                        .text_color(rgb(if lit { t.accent_text } else { t.text_dim }))
                         .child(if db > 0 { format!("+{db}") } else { db.to_string() }),
                 )
                 .child(
@@ -5007,11 +6016,11 @@ impl Riff {
                         .w(px(24.))
                         .h(px(160.))
                         .rounded_md()
-                        .when(lit, |d| d.bg(rgb(t.raised)))
+                        .when(lit, |d| d.bg(rgb(t.selection)))
                         .cursor(gpui::CursorStyle::ResizeUpDown)
                         .child(canvas(move |b, _, _| drawn.set(b), |_, _, _, _| {}).absolute().size_full())
-                        .child(div().absolute().left(px(11.)).top_0().bottom_0().w(px(2.)).bg(rgb(t.faint)))
-                        .child(div().absolute().left(px(4.)).w(px(16.)).h(px(1.)).top(relative(0.5)).bg(rgb(t.dim)))
+                        .child(div().absolute().left(px(11.)).top_0().bottom_0().w(px(2.)).bg(rgb(t.track)))
+                        .child(div().absolute().left(px(4.)).w(px(16.)).h(px(1.)).top(relative(0.5)).bg(rgb(t.text_dim)))
                         .child(fill)
                         .on_mouse_down(
                             MouseButton::Left,
@@ -5040,19 +6049,28 @@ impl Riff {
                     div()
                         .font_family(MONO)
                         .text_xs()
-                        .text_color(rgb(if lit { t.accent } else { t.dim }))
+                        .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                        .text_color(rgb(if lit { t.accent_text } else { t.text_dim }))
                         .child(label(i)),
                 )
         });
+        let columns: Vec<_> = columns.collect();
         let preset_row = match &self.eq_naming {
+            // A click anywhere else cancels, as Esc does.
             Some(typed) => div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().text_sm().text_color(rgb(t.dim)).child("Save as"))
+                .on_mouse_down_out(cx.listener(|riff, _, _, cx| {
+                    riff.eq_naming = None;
+                    cx.notify();
+                }))
+                .child(div().text_sm().text_color(rgb(t.text_dim)).child("Save as"))
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
+                        .truncate()
                         .px_2()
                         .py_1()
                         .rounded_md()
@@ -5061,7 +6079,8 @@ impl Riff {
                         .text_color(rgb(t.text))
                         .child(format!("{typed}▏")),
                 )
-                .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Enter saves, Esc cancels")),
+                .child(self.choice("eq-name-cancel", "Cancel", "Esc", t.text, cx, |riff| riff.eq_naming = None))
+                .child(self.choice("eq-name-save", "Save", "Enter", t.accent_text, cx, |riff| riff.save_eq_named())),
             None => div()
                 .flex()
                 .items_center()
@@ -5073,7 +6092,7 @@ impl Riff {
                         .flex()
                         .justify_center()
                         .text_sm()
-                        .text_color(rgb(if eq.on { t.text } else { t.dim }))
+                        .text_color(rgb(if eq.on { t.text } else { t.text_dim }))
                         .child(name.clone()),
                 )
                 .child(button("eq-next", "chevron-right", "Next preset", |riff| riff.eq_step(true)))
@@ -5102,7 +6121,7 @@ impl Riff {
                     .rounded_lg()
                     .bg(rgb(t.surface))
                     .border_1()
-                    .border_color(rgb(t.faint))
+                    .border_color(rgb(t.border))
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(
                         div()
@@ -5114,31 +6133,44 @@ impl Riff {
                             .child(
                                 div()
                                     .id("eq-on")
+                                    .h(px(HIT))
+                                    .min_w(px(36.))
                                     .px_2()
-                                    .py_0p5()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
                                     .rounded_md()
                                     .cursor_pointer()
                                     .font_family(MONO)
                                     .text_xs()
-                                    .bg(rgb(if eq.on { t.accent_soft } else { t.raised }))
-                                    .text_color(rgb(if eq.on { t.accent } else { t.dim }))
-                                    .hover(|d| d.bg(rgb(t.faint)))
+                                    .bg(rgb(t.raised))
+                                    .map(|d| lit_cues(d, eq.on))
+                                    .when(eq.on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                                    .text_color(rgb(if eq.on { t.accent_text } else { t.text_dim }))
+                                    .hover(|d| d.bg(rgb(t.hover)))
                                     .child(if eq.on { "on" } else { "off" })
                                     .tooltip(self.tip("EQ on or off (e)", &[]))
                                     .on_click(cx.listener(|riff, _, _, cx| {
                                         riff.change_eq(true, |eq| eq.on = !eq.on);
                                         cx.notify();
                                     })),
-                            ),
+                            )
+                            .child(self.tool("eq-close", "x", "Close", Action::EqSheet, false, cx)),
                     )
                     .child(preset_row)
                     .child(div().flex().items_end().gap_2().children(columns))
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(t.dim))
-                            .child("h l band   k j ±1 dB   0 reset   n N preset   e on/off   w save   x remove   Esc close"),
+                            .text_color(rgb(t.text_dim))
+                            .child("drag or scroll a band, double-click it for 0, click outside to close")
+                            .child(match self.vim() {
+                                true => "h l band   k j ±1 dB   0 reset   n N preset   e on/off   w save   x remove   Esc close",
+                                false => "← → band   ↑ ↓ ±1 dB   0 reset   n N preset   e on/off   ⌘S save   x remove   Esc close",
+                            }),
                     ),
             )
     }
@@ -5170,7 +6202,7 @@ impl Riff {
                     .justify_center()
                     .rounded_md()
                     .cursor_pointer()
-                    .hover(|d| d.bg(rgb(t.faint)))
+                    .hover(|d| d.bg(rgb(t.hover)))
                     .child(ui::icon(icon, 14., t.text))
                     .on_click(cx.listener(move |riff, _, _, cx| {
                         riff.trainer_sheet = Some(i);
@@ -5185,12 +6217,20 @@ impl Riff {
                 .items_center()
                 .gap_2()
                 .rounded_md()
-                .when(i == at, |d| d.bg(rgb(t.raised)))
-                .child(div().flex_1().text_sm().text_color(rgb(if i == at { t.accent } else { t.text })).child(label))
+                .map(|d| selected_cues(d, i == at))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .when(i == at, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                        .text_color(rgb(t.text))
+                        .child(label),
+                )
                 .child(button("trainer-down", "minus", false))
                 .child(div().w(px(84.)).flex().justify_center().font_family(MONO).text_sm().child(value))
                 .child(button("trainer-up", "plus", true))
         });
+        let rows: Vec<_> = rows.collect();
         overlay("trainer-sheet")
             .on_click(cx.listener(|riff, _, _, cx| {
                 riff.trainer_sheet = None;
@@ -5207,17 +6247,16 @@ impl Riff {
                     .rounded_lg()
                     .bg(rgb(t.surface))
                     .border_1()
-                    .border_color(rgb(t.faint))
+                    .border_color(rgb(t.border))
                     // A click inside the sheet is not a click outside it.
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(
-                        div()
-                            .pb_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(ui::icon("trending-up", 16., t.accent))
-                            .child(div().text_color(rgb(t.text)).child("Speed trainer")),
+                        self.sheet_header(
+                            "trending-up",
+                            "Speed trainer",
+                            self.button("trainer-close", "x", "Close", &[], false, cx, |riff, _, _| riff.trainer_sheet = None),
+                        )
+                        .pb_3(),
                     )
                     .children(rows)
                     .child(
@@ -5225,8 +6264,11 @@ impl Riff {
                             .pt_3()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(t.dim))
-                            .child("j k pick   h l change   Enter or Esc close   t starts the trainer"),
+                            .text_color(rgb(t.text_dim))
+                            .child(match self.vim() {
+                                true => "j k pick   h l or − + change   Enter, Esc or a click outside close   t starts the trainer",
+                                false => "↑ ↓ pick   ← → or − + change   Enter, Esc or a click outside close   t starts the trainer",
+                            }),
                     ),
             )
     }
@@ -5258,12 +6300,14 @@ impl Riff {
                 .gap_2()
                 .rounded_md()
                 .cursor_pointer()
-                .bg(rgb(if primary { t.accent_soft } else { t.raised }))
-                .hover(|d| d.bg(rgb(t.faint)))
+                .bg(rgb(t.raised))
+                .map(|d| lit_cues(d, primary))
+                .hover(|d| d.bg(rgb(t.hover)))
                 .text_sm()
-                .text_color(rgb(if primary { t.accent } else { t.text }))
+                .when(primary, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                .text_color(rgb(if primary { t.accent_text } else { t.text }))
                 .child(label)
-                .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(key))
+                .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(key))
         };
         overlay("naming")
             .on_click(cx.listener(|riff, _, _, cx| {
@@ -5281,7 +6325,7 @@ impl Riff {
                     .rounded_lg()
                     .bg(rgb(t.surface))
                     .border_1()
-                    .border_color(rgb(t.faint))
+                    .border_color(rgb(t.border))
                     // A click inside the dialog is not a click outside it.
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(
@@ -5289,10 +6333,10 @@ impl Riff {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(ui::icon("bookmark-plus", 16., t.sections))
+                            .child(ui::icon("bookmark-plus", 16., t.section))
                             .child(div().text_color(rgb(t.text)).child(if renaming { "Rename this section" } else { "Name this section" }))
                             .child(div().flex_1())
-                            .child(div().font_family(MONO).text_xs().text_color(rgb(t.loops)).child(where_.clone())),
+                            .child(div().font_family(MONO).text_xs().text_color(rgb(t.loop_text)).child(where_.clone())),
                     )
                     .child(
                         div()
@@ -5303,12 +6347,12 @@ impl Riff {
                             .rounded_md()
                             .bg(rgb(t.bg))
                             .border_1()
-                            .border_color(rgb(t.accent_soft))
+                            .border_color(rgb(t.focus))
                             .text_color(rgb(t.text))
                             .child(name.clone())
                             .child(div().ml(px(1.)).w(px(2.)).h(px(20.)).bg(rgb(t.accent)))
                             .when(name.is_empty(), |d| {
-                                d.child(div().ml_2().text_color(rgb(t.faint)).child(where_.clone()))
+                                d.child(div().ml_2().text_color(rgb(t.text_dim)).child(where_.clone()))
                             }),
                     )
                     .child(
@@ -5353,15 +6397,16 @@ impl Riff {
                 .rounded_md()
                 .cursor_pointer()
                 .text_sm()
-                .text_color(rgb(if lit { t.accent } else { t.text }))
-                .when(lit, |d| d.bg(rgb(t.accent_soft)))
-                .hover(|d| d.bg(rgb(t.faint)))
-                .child(ui::icon(icon, 14., if lit { t.accent } else { t.dim }))
+                .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                .text_color(rgb(if lit { t.accent_text } else { t.text }))
+                .map(|d| lit_cues(d, lit))
+                .hover(|d| d.bg(rgb(t.hover)))
+                .child(ui::icon(icon, 14., if lit { t.accent } else { t.text_dim }))
                 .when(open, |d| d.child(div().truncate().child(label)))
                 .tooltip(self.tip(
                     match to {
                         Place::Library => "The full list",
-                        Place::Favourites => "The favourites",
+                        Place::Favourites => "The favourites; right-click to play or shuffle them",
                         Place::Playing => "The playing song",
                     },
                     tip,
@@ -5383,9 +6428,9 @@ impl Riff {
                 .rounded_md()
                 .text_sm()
                 .bg(rgb(t.accent_soft))
-                .text_color(rgb(t.accent))
+                .text_color(rgb(t.accent_text))
                 .child(div().flex_1().min_w_0().truncate().child(label))
-                .child(self.tool(id, "x", "Back to the full list", leave, false, cx).h(px(22.)).w(px(22.)))
+                .child(self.tool(id, "x", "Back to the full list", leave, false, cx).h(px(HIT)).w(px(HIT)))
         };
         let toggle = self
             .tool("sidebar", "panel-left", if open { "Collapse the sidebar" } else { "Open the sidebar" }, Action::Sidebar, false, cx)
@@ -5401,10 +6446,10 @@ impl Riff {
                 .justify_center()
                 .rounded_md()
                 .cursor_pointer()
-                .hover(|d| d.bg(rgb(t.faint)))
-                .child(ui::icon("list-plus", 14., if self.queue.is_empty() { t.dim } else { t.accent }))
+                .hover(|d| d.bg(rgb(t.hover)))
+                .child(ui::icon("list-plus", 14., if self.queue.is_empty() { t.text_dim } else { t.accent }))
                 .when(!self.queue.is_empty(), |d| {
-                    d.child(div().font_family(MONO).text_xs().text_color(rgb(t.accent)).child(self.queue.len().to_string()))
+                    d.child(div().font_family(MONO).text_xs().text_color(rgb(t.accent_text)).child(self.queue.len().to_string()))
                 })
                 .tooltip(self.tip("The queue", &[Action::QueueFocus]))
                 .on_click(cx.listener(|riff, _, _, cx| {
@@ -5424,10 +6469,11 @@ impl Riff {
                 .child(toggle)
                 .child(div().w_full().flex().flex_col().gap_0p5().children([
                     place("go-library", "music", "Library", full, Place::Library, &[Action::Clear], cx),
-                    place("go-favourites", "star", "Favourites", false, Place::Favourites, &[], cx),
+                    place("go-favourites", "star", "Favourites", false, Place::Favourites, &[], cx)
+                        .on_mouse_down(MouseButton::Right, opens_menu(Menu::favourites, cx)),
                     place("go-playing", "audio-waveform", "Playing", false, Place::Playing, &[Action::ToPlaying], cx),
                 ]))
-                .child(div().w_full().h(px(1.)).bg(rgb(t.faint)))
+                .child(div().w_full().h(px(1.)).bg(rgb(t.border)))
                 .child(
                     div()
                         .id("open-playlists")
@@ -5438,8 +6484,8 @@ impl Riff {
                         .justify_center()
                         .rounded_md()
                         .cursor_pointer()
-                        .hover(|d| d.bg(rgb(t.faint)))
-                        .child(ui::icon("list-music", 14., if self.playlist_view.is_some() { t.accent } else { t.dim }))
+                        .hover(|d| d.bg(rgb(t.hover)))
+                        .child(ui::icon("list-music", 14., if self.playlist_view.is_some() { t.accent } else { t.text_dim }))
                         .tooltip(self.tip("Playlists", &[]))
                         .on_click(cx.listener(|riff, _, _, cx| {
                             riff.sidebar = true;
@@ -5468,20 +6514,23 @@ impl Riff {
                     .rounded_md()
                     .cursor_pointer()
                     .text_sm()
-                    .text_color(rgb(if on { t.accent } else { t.text }))
-                    .when(on, |d| d.bg(rgb(t.accent_soft)))
-                    .hover(|d| d.bg(rgb(t.faint)))
-                    .child(ui::icon("list-music", 14., if on { t.accent } else { t.dim }))
+                    .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                    .text_color(rgb(if on { t.accent_text } else { t.text }))
+                    .map(|d| lit_cues(d, on))
+                    .hover(|d| d.bg(rgb(t.hover)))
+                    .child(ui::icon("list-music", 14., if on { t.accent } else { t.text_dim }))
                     .child(div().flex_1().min_w_0().truncate().child(p.name.clone()))
-                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child(count.to_string()))
+                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(count.to_string()))
+                    .tooltip(self.tip("Open it; right-click to play, rename or delete it", &[]))
                     .on_click(cx.listener(move |riff, _, _, cx| {
                         riff.open_playlist(i);
                         cx.notify();
                     }))
+                    .on_mouse_down(MouseButton::Right, opens_menu(move || Menu::playlist(i), cx))
             })
             .collect();
         let lit = self.queued_at();
-        let vim = self.settings.vim;
+        let keyboard = self.settings.keyboard;
         let rows: Vec<_> = self
             .queue
             .songs()
@@ -5493,14 +6542,14 @@ impl Riff {
                 let button = |id: &'static str, icon: &'static str, what: &'static str, act: fn(&mut Riff, usize)| {
                     div()
                         .id((id, i))
-                        .size(px(22.))
+                        .size(px(HIT))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded_md()
                         .cursor_pointer()
-                        .hover(|d| d.bg(rgb(t.faint)))
+                        .hover(|d| d.bg(rgb(t.hover)))
                         .child(ui::icon(icon, 13., t.text))
                         .tooltip(self.tip(what, &[]))
                         .on_click(cx.listener(move |riff, _, _, cx| {
@@ -5521,8 +6570,10 @@ impl Riff {
                         .gap_2()
                         .rounded_md()
                         .cursor_pointer()
-                        .when(on, |d| d.bg(rgb(t.raised)))
-                        .hover(|d| d.bg(rgb(t.raised)))
+                        .map(|d| selected_cues(d, on))
+                        .when(!on, |d| d.hover(|d| d.bg(rgb(t.hover))))
+                        // Its buttons show only under the pointer, so the tooltip says so.
+                        .tooltip(self.tip("Click to play it now; to the top and remove at its right; right-click for more", &[]))
                         .on_click(cx.listener(move |riff, _, _, cx| {
                             riff.play_queued(i);
                             cx.notify();
@@ -5546,10 +6597,11 @@ impl Riff {
                                     div()
                                         .truncate()
                                         .text_sm()
-                                        .text_color(rgb(if on { t.accent } else { t.text }))
+                                        .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                                        .text_color(rgb(t.text))
                                         .child(track.title.clone()),
                                 )
-                                .child(div().truncate().text_xs().text_color(rgb(t.dim)).child(track.artist.clone())),
+                                .child(div().truncate().text_xs().text_color(rgb(t.text_dim)).child(track.artist.clone())),
                         )
                         // Over the text's end, only while hovered or highlighted, so
                         // titles use the whole width otherwise.
@@ -5563,7 +6615,7 @@ impl Riff {
                                 .items_center()
                                 .gap_0p5()
                                 .pl_2()
-                                .bg(rgb(t.raised))
+                                .bg(rgb(if on { t.selection } else { t.hover }))
                                 .when(!on, |d| d.opacity(0.).group_hover("queue-row", |s| s.opacity(1.)))
                                 .child(button("queue-top", "arrow-up-to-line", "To the top", |riff, i| riff.queue.to_top(i)))
                                 .child(button("queue-remove", "x", "Remove from the queue", |riff, i| {
@@ -5599,7 +6651,10 @@ impl Riff {
                             .filter(|_| !self.practice)
                             .map(|a| view("leave-artist", a.artist.clone(), Action::Artist, cx)),
                     )
-                    .child(place("go-favourites", "star", "Favourites", false, Place::Favourites, &[], cx))
+                    .child(
+                        place("go-favourites", "star", "Favourites", false, Place::Favourites, &[], cx)
+                            .on_mouse_down(MouseButton::Right, opens_menu(Menu::favourites, cx)),
+                    )
                     .when(self.now.is_some(), |d| {
                         d.child(place("go-playing", "audio-waveform", "Playing", false, Place::Playing, &[Action::ToPlaying], cx))
                     }),
@@ -5617,13 +6672,13 @@ impl Riff {
                             .items_center()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(t.dim))
+                            .text_color(rgb(t.text_dim))
                             .child("Playlists"),
                     )
                     .when(lists.is_empty(), |d| {
-                        d.child(div().px_1().text_xs().text_color(rgb(t.dim)).child(format!(
+                        d.child(div().px_1().text_xs().text_color(rgb(t.text_dim)).child(format!(
                             "{} adds the highlighted song to one",
-                            keys::keys_for(Action::AddToPlaylist, keys::Mode::Library, vim).join(" ")
+                            keys::keys_for(Action::AddToPlaylist, keys::Mode::Library, keyboard).join(" ")
                         )))
                     })
                     .children(lists),
@@ -5644,39 +6699,55 @@ impl Riff {
                             .gap_2()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(if self.queue_at.is_some() { t.accent } else { t.dim }))
+                            .text_color(rgb(if self.queue_at.is_some() { t.accent_text } else { t.text_dim }))
                             .child(div().flex_1().child(match self.queue.len() {
                                 0 => "Queue".to_string(),
                                 n => format!("Queue  {n}"),
                             }))
+                            // Clearing asks once more: "clear all", or keep it.
                             .when(!self.queue.is_empty(), |d| {
-                                d.child(
+                                let text = |id: &'static str, label: &'static str, colour: u32, click: fn(&mut Riff)| {
                                     div()
-                                        .id("queue-clear")
+                                        .id(id)
+                                        .h(px(HIT))
                                         .px_1()
+                                        .flex()
+                                        .items_center()
                                         .rounded_md()
                                         .cursor_pointer()
-                                        .hover(|d| d.bg(rgb(t.faint)).text_color(rgb(t.text)))
-                                        .child("clear")
-                                        .on_click(cx.listener(|riff, _, _, cx| {
-                                            (riff.queue, riff.queue_at) = (Queue::default(), None);
+                                        .text_color(rgb(colour))
+                                        .hover(|d| d.bg(rgb(t.hover)))
+                                        .child(label)
+                                        .on_click(cx.listener(move |riff, _, _, cx| {
+                                            click(riff);
                                             cx.notify();
-                                        })),
-                                )
+                                        }))
+                                };
+                                match self.clearing_queue {
+                                    true => d
+                                        .child(text("queue-clear-all", "clear all", t.danger, |riff| {
+                                            (riff.queue, riff.queue_at, riff.clearing_queue) = (Queue::default(), None, false);
+                                        }))
+                                        .child(text("queue-keep", "keep", t.text, |riff| riff.clearing_queue = false)),
+                                    false => d.child(text("queue-clear", "clear", t.text_dim, |riff| riff.clearing_queue = true)),
+                                }
                             }),
                     )
                     .when(self.queue.is_empty(), |d| {
-                        d.child(div().px_1().text_xs().text_color(rgb(t.dim)).child(format!(
-                            "{} queues the highlighted song",
-                            keys::keys_for(Action::Queue(false), keys::Mode::Library, vim).join(" ")
-                        )))
+                        d.child(
+                            div()
+                                .px_1()
+                                .text_xs()
+                                .text_color(rgb(t.text_dim))
+                                .child(empty::queue_hint(self.first_key(Action::Queue(false), keys::Mode::Library))),
+                        )
                     })
                     .child(div().id("queue").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().children(rows)),
             )
             .into_any_element()
     }
 
-    fn render_artist(&self, of: &Track) -> impl IntoElement {
+    fn render_artist(&self, of: &Track, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
         let songs = library::artist(&self.tracks, of);
         let seconds = songs.iter().map(|&i| self.tracks[i].seconds).sum::<Option<u64>>();
@@ -5697,6 +6768,7 @@ impl Riff {
             .p_4()
             .rounded_lg()
             .bg(rgb(t.surface))
+            .on_mouse_down(MouseButton::Right, opens_menu(|| Menu::shown(Shown::Artist), cx))
             .child(div().flex().gap_2().children(albums.iter().take(4).map(|a| cover(a.cover.clone(), 96.))))
             .child(
                 div()
@@ -5705,7 +6777,7 @@ impl Riff {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.dim)).child("Artist"))
+                    .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("Artist"))
                     .child(
                         div()
                             .truncate()
@@ -5714,15 +6786,15 @@ impl Riff {
                             .text_color(rgb(t.text))
                             .child(if of.artist.is_empty() { "Unknown artist".into() } else { of.artist.clone() }),
                     )
-                    .child(div().truncate().text_sm().text_color(rgb(t.dim)).child(about)),
+                    .child(div().truncate().text_sm().text_color(rgb(t.text_dim)).child(about)),
             )
             .child(
                 div()
                     .flex_none()
                     .font_family(MONO)
                     .text_xs()
-                    .text_color(rgb(t.dim))
-                    .child(format!("{} back", keys::keys_for(Action::Artist, keys::Mode::Library, false).join(" "))),
+                    .text_color(rgb(t.text_dim))
+                    .child(format!("{} back", keys::keys_for(Action::Artist, keys::Mode::Library, Keyboard::Mac).join(" "))),
             )
     }
 
@@ -5736,7 +6808,7 @@ impl Riff {
                 .pb_1()
                 .font_family(MONO)
                 .text_xs()
-                .text_color(rgb(t.dim))
+                .text_color(rgb(t.text_dim))
                 .child(text.to_string())
         };
         let row = |id: (&'static str, usize), lit: bool, icon: &str, label: String| {
@@ -5748,19 +6820,18 @@ impl Riff {
                 .items_center()
                 .gap_3()
                 .rounded_md()
-                .border_l_2()
-                .border_color(rgb(if lit { t.accent } else { t.surface }))
-                .when(lit, |d| d.bg(rgb(t.raised)))
-                .hover(|d| d.bg(rgb(t.raised)))
+                .map(|d| selected_cues(d, lit))
+                .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
                 .cursor_pointer()
-                .child(ui::icon(icon, 16., if lit { t.accent } else { t.dim }))
+                .child(ui::icon(icon, 16., if lit { t.accent } else { t.text_dim }))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .text_sm()
-                        .text_color(rgb(if lit { t.accent } else { t.text }))
+                        .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                        .text_color(rgb(t.text))
                         .child(label),
                 )
         };
@@ -5769,16 +6840,27 @@ impl Riff {
         let counts = scan::per_root(folders, &self.tracks);
         let mut body = div().flex().flex_col().child(title("Folders"));
         for (i, folder) in folders.iter().enumerate() {
+            // A folder the last scan couldn't open says so, and why on hover.
+            let unreadable = self.unreadable.iter().find(|(p, _)| p == folder).map(|(_, why)| why.clone());
             body = body.child(
                 row(("folder", i), lit(i), "folder", tilde(folder))
-                    .child(
-                        div()
+                    .child(match unreadable {
+                        Some(why) => div()
+                            .id(("unreadable", i))
                             .flex_none()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(t.dim))
+                            .text_color(rgb(t.danger))
+                            .tooltip(self.tip(format!("Can't read it: {why}"), &[]))
+                            .child("can't read"),
+                        None => div()
+                            .id(("songs", i))
+                            .flex_none()
+                            .font_family(MONO)
+                            .text_xs()
+                            .text_color(rgb(t.text_dim))
                             .child(format!("{} songs", ui::count(counts[i]))),
-                    )
+                    })
                     .on_click(cx.listener(move |riff, _, _, cx| {
                         if let Some(prefs) = &mut riff.prefs {
                             prefs.row = i;
@@ -5788,10 +6870,15 @@ impl Riff {
                     .child(
                         div()
                             .id(("remove", i))
-                            .p_1()
+                            .size(px(HIT))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .rounded_sm()
-                            .hover(|d| d.bg(rgb(t.faint)))
-                            .child(ui::icon("x", 14., t.dim))
+                            .tooltip(self.tip("Remove this folder", &[]))
+                            .hover(|d| d.bg(rgb(t.hover)))
+                            .child(ui::icon("x", 14., t.text_dim))
                             .on_click(cx.listener(move |riff, _, _, cx| {
                                 cx.stop_propagation();
                                 riff.remove_folder(i);
@@ -5809,17 +6896,33 @@ impl Riff {
                     }),
                 ),
             )
-            .child(title("Theme"));
+            .child(title("Theme"))
+            .child(
+                row(("appearance", 0), lit(folders.len() + 1), "palette", match theme::is_own(&self.settings.theme) {
+                    true => format!("Appearance: {}", self.settings.appearance.label()),
+                    false => format!("Appearance: from the editor theme; Enter for riff's {}", self.settings.appearance.label()),
+                })
+                    .on_click(cx.listener(|riff, _, _, cx| {
+                        riff.next_appearance(cx);
+                        cx.notify();
+                    })),
+            );
+        let theme_label = match self.settings.theme.as_str() {
+            "" => format!("Theme: {}", theme::OWN),
+            name if theme::is_own(name) => format!("Theme: {name}"),
+            name => format!("Theme: {name} (editor theme)"),
+        };
         body = match &prefs.picker {
             None => body.child(
-                row(("theme", 0), lit(folders.len() + 1), "palette", self.settings.theme.clone())
+                row(("theme", 0), lit(folders.len() + 2), "palette", theme_label)
                     .on_click(cx.listener(|riff, _, _, cx| {
-                        riff.open_picker();
+                        riff.open_picker(cx);
                         cx.notify();
                     })),
             ),
             Some(picker) => {
                 let shown = picker.shown();
+                let editors: Vec<bool> = shown.iter().map(|t| t.editor).collect();
                 let first = picker.selected.saturating_sub(PICKER_ROWS - 1);
                 body.child(
                     div()
@@ -5832,7 +6935,7 @@ impl Riff {
                         .bg(rgb(t.bg))
                         .child(ui::icon("search", 14., t.accent))
                         .child(if picker.query.is_empty() {
-                            div().text_sm().text_color(rgb(t.faint)).child("type to filter")
+                            div().text_sm().text_color(rgb(t.text_dim)).child("type to filter")
                         } else {
                             div()
                                 .font_family(MONO)
@@ -5841,27 +6944,48 @@ impl Riff {
                                 .child(picker.query.clone())
                         }),
                 )
-                .children(shown.into_iter().enumerate().skip(first).take(PICKER_ROWS).map(
-                    |(i, theme)| {
-                        let chosen = theme.clone();
-                        row(("pick", i), i == picker.selected, "palette", theme.name.clone())
-                            .children(
-                                (theme.name == self.settings.theme)
-                                    .then(|| ui::icon("check", 14., t.dim)),
-                            )
-                            .on_click(cx.listener(move |riff, _, _, cx| {
-                                riff.keep_theme(chosen.clone());
-                                cx.notify();
-                            }))
-                    },
-                ))
+                // The wheel moves the highlight, previewing as ↑↓ do, so every theme
+                // can be reached with the mouse; a click keeps one.
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .on_scroll_wheel(cx.listener(|riff, e: &gpui::ScrollWheelEvent, _, cx| {
+                            let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
+                            let Some(picker) = riff.prefs.as_mut().and_then(|p| p.picker.as_mut()) else { return };
+                            let rows = ui::wheel_rows(&mut picker.wheel, dy, 20.);
+                            let n = picker.shown().len();
+                            if rows == 0 || n == 0 {
+                                return;
+                            }
+                            picker.selected = (picker.selected as i64 + rows as i64).clamp(0, n as i64 - 1) as usize;
+                            if let Some(t) = picker.highlighted() {
+                                theme::set_active(t.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .children(shown.into_iter().enumerate().skip(first).take(PICKER_ROWS).flat_map(|(i, theme)| {
+                            let chosen = theme.clone();
+                            // Riff's own first, the editor themes under a heading of their own.
+                            let heading = (theme.editor && (i == first || !editors[i - 1]))
+                                .then(|| title("Editor themes (experimental)").into_any_element());
+                            let row = row(("pick", i), i == picker.selected, "palette", theme.name.clone())
+                                .children((theme.saved() == self.settings.theme).then(|| ui::icon("check", 14., t.text_dim)))
+                                .on_click(cx.listener(move |riff, _, _, cx| {
+                                    riff.keep_theme(chosen.clone(), cx);
+                                    cx.notify();
+                                }))
+                                .into_any_element();
+                            heading.into_iter().chain([row])
+                        })),
+                )
             }
         };
-        let vim_label = if self.settings.vim { "Vim keys on" } else { "Vim keys off" };
+        let keyboard_label = if self.vim() { "Keyboard: Vim" } else { "Keyboard: Mac" };
         body = body.child(title("Keys")).child(
-            row(("vim", 0), lit(folders.len() + 2), "keyboard", vim_label.into()).on_click(
+            row(("keyboard", 0), lit(folders.len() + 3), "keyboard", keyboard_label.into()).on_click(
                 cx.listener(|riff, _, _, cx| {
-                    riff.toggle_vim();
+                    riff.toggle_keyboard();
                     cx.notify();
                 }),
             ),
@@ -5875,7 +6999,7 @@ impl Riff {
         body = body.child(title("Output"));
         body = match prefs.choosing {
             None => body.child(
-                row(("output", 0), lit(folders.len() + 3), "headphones", output).on_click(cx.listener(|riff, _, _, cx| {
+                row(("output", 0), lit(folders.len() + 4), "headphones", output).on_click(cx.listener(|riff, _, _, cx| {
                     riff.open_outputs();
                     cx.notify();
                 })),
@@ -5886,7 +7010,7 @@ impl Riff {
                     .chain(prefs.outputs.iter().map(|o| (o.name.clone(), Some(o.id.clone()))));
                 body.children(entries.enumerate().map(|(i, (name, id))| {
                     row(("pick-output", i), i == at, "headphones", name)
-                        .children((id == self.settings.output).then(|| ui::icon("check", 14., t.dim)))
+                        .children((id == self.settings.output).then(|| ui::icon("check", 14., t.text_dim)))
                         .on_click(cx.listener(move |riff, _, _, cx| {
                             riff.choose_output(i);
                             cx.notify();
@@ -5898,23 +7022,23 @@ impl Riff {
         let custom = custom_data_dir();
         let label = if custom { tilde(&data) } else { format!("The default, {}", tilde(&data)) };
         body = body.child(title("Data")).child(
-            row(("data", 0), lit(folders.len() + 4), "folder", label).on_click(cx.listener(|riff, _, _, cx| {
+            row(("data", 0), lit(folders.len() + 5), "folder", label).on_click(cx.listener(|riff, _, _, cx| {
                 riff.pick_data_dir(cx);
                 cx.notify();
             })),
         );
         if custom {
             body = body.child(
-                row(("data", 1), lit(folders.len() + 5), "x", "Back to the default folder".into()).on_click(
+                row(("data", 1), lit(folders.len() + 6), "x", "Back to the default folder".into()).on_click(
                     cx.listener(|riff, _, _, cx| riff.switch_data_dir(None, cx)),
                 ),
             );
         }
-        let hint = match (prefs.picker.is_some(), self.settings.vim) {
-            _ if prefs.choosing.is_some() => "↑↓ move   Enter plays through it   Esc closes",
-            (true, _) => "↑↓ preview   Enter keeps   Esc restores",
-            (false, true) => "j k move   Enter choose   dd remove folder   Esc close",
-            (false, false) => "↑↓ move   Enter choose   ⌫ remove folder   Esc close",
+        let hint = match (prefs.picker.is_some(), self.vim()) {
+            _ if prefs.choosing.is_some() => "↑↓ move   Enter or a click plays through it   Esc closes",
+            (true, _) => "↑↓ or scroll to preview   Enter or a click keeps   Esc restores",
+            (false, true) => "j k move   Enter or a click chooses   dd remove folder   Esc close",
+            (false, false) => "↑↓ move   Enter or a click chooses   ⌫ remove folder   Esc close",
         };
 
         overlay("prefs")
@@ -5933,16 +7057,17 @@ impl Riff {
                     .rounded_lg()
                     .bg(rgb(t.surface))
                     .border_1()
-                    .border_color(rgb(t.faint))
+                    .border_color(rgb(t.border))
                     // A click inside the sheet is not a click outside it.
                     .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(self.sheet_header("settings-2", "Settings", self.tool("prefs-close", "x", "Close", Action::Settings, false, cx)))
                     .child(body)
                     .child(
                         div()
                             .pt_2()
                             .font_family(MONO)
                             .text_xs()
-                            .text_color(rgb(t.dim))
+                            .text_color(rgb(t.text_dim))
                             .child(hint),
                     ),
             )
@@ -5971,6 +7096,30 @@ struct Painting {
 
 fn tint(color: u32, alpha: u8) -> gpui::Rgba {
     gpui::rgba((color << 8) | alpha as u32)
+}
+
+/// A lit control's cues: the soft accent fill and a 1px accent ring. Unlit, the ring is
+/// there but unseen, so lighting a control moves nothing.
+fn lit_cues<E: Styled>(e: E, lit: bool) -> E {
+    let t = t();
+    let e = e.border_1();
+    if lit {
+        e.bg(rgb(t.accent_soft)).border_color(rgb(t.accent))
+    } else {
+        e.border_color(gpui::transparent_black())
+    }
+}
+
+/// A selected row's cues: the selection fill and a full 1px ring (no bar at its left
+/// edge). Unselected, the ring is unseen, so selecting moves nothing.
+fn selected_cues<E: Styled>(e: E, selected: bool) -> E {
+    let t = t();
+    let e = e.border_1();
+    if selected {
+        e.bg(rgb(t.selection)).border_color(rgb(t.selection_ring))
+    } else {
+        e.border_color(gpui::transparent_black())
+    }
 }
 
 /// One bar per pixel: cheap enough to redraw every frame at any zoom.
@@ -6017,20 +7166,21 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
                 }
             };
             // A loop switched off keeps its place, faded.
-            let (region, edge) = if p.looping.off { (0x10, 0x70) } else { (0x26, 0xff) };
+            let (region, edge) = if p.looping.off { (t.loop_fill_off, t.loop_edge_off) } else { (t.loop_fill, 0xff) };
             if let Some(end) = p.looping.end {
                 let (a, b) = (x_of(p.looping.start.unwrap_or_default()), x_of(end));
                 soft(window, a, b, 0., h, tint(t.loops, region));
             }
-            // The stretch the detail shows: outlined, so it reads at a glance.
+            // The stretch the detail shows: outlined, so it reads at a glance. In a
+            // neutral, so on the waveform gold only ever means played.
             if let Some((from, to)) = p.boxed {
                 let (a, b) = (x_of(from), x_of(to).max(x_of(from) + 2.));
-                soft(window, a, b, 0., h, tint(t.accent, 0x24));
+                soft(window, a, b, 0., h, tint(t.text_dim, 0x20));
                 for x in [a, b - 2.] {
-                    soft(window, x, x + 2., 0., h, tint(t.accent, 0xff));
+                    soft(window, x, x + 2., 0., h, tint(t.text_dim, 0xff));
                 }
                 for y in [0., h - 2.] {
-                    soft(window, a, b, y, 2., tint(t.accent, 0xff));
+                    soft(window, a, b, y, 2., tint(t.text_dim, 0xff));
                 }
             }
             // Beats as small chevrons pointing in from the top and bottom edges: a full
@@ -6075,21 +7225,30 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
                         break;
                     }
                     let half = (c.rms() / scale.max(1e-6)).min(1.) * (mid - 2.);
-                    let color = if x < played { t.accent } else { t.dim };
+                    let color = if x < played { t.wave_played } else { t.wave_unplayed };
                     let bar = rect(x.max(0.), mid - half, 1., (half * 2.).max(1.));
                     window.paint_quad(fill(bar, tint(color, 0xff)));
                 }
             }
-            // Each edge as soon as it is set, a start on its own too.
-            for at in [p.looping.start, p.looping.end].into_iter().flatten() {
-                soft(window, x_of(at) - 1., x_of(at) + 1., 0., h, tint(t.loops, edge));
+            // Each edge as soon as it is set, a start on its own too: a bracket, with ticks
+            // at the top and bottom pointing into the loop. Three vertical lines, three
+            // shapes: the loop's brackets, the marker's flag, the playhead's plain line.
+            let tick = if h >= 60. { 6. } else { 4. };
+            for (at, start) in [(p.looping.start, true), (p.looping.end, false)] {
+                let Some(at) = at else { continue };
+                let (x, colour) = (x_of(at), tint(t.loops, edge));
+                soft(window, x - 1., x + 1., 0., h, colour);
+                let (a, b) = if start { (x + 1., x - 1. + tick) } else { (x + 1. - tick, x - 1.) };
+                for y in [0., h - 2.] {
+                    soft(window, a, b, y, 2., colour);
+                }
             }
             if let Some(m) = p.marker.filter(|m| *m >= p.from && *m <= p.to) {
                 let x = x_of(m);
-                soft(window, x - 1., x + 1., 0., h, tint(t.accent, 0xd0));
-                window.paint_quad(fill(rect(x - 1., 0., 8., 6.), tint(t.accent, 0xff)));
+                soft(window, x - 1., x + 1., 0., h, tint(t.marker, 0xff));
+                window.paint_quad(fill(rect(x + 1., 0., 7., 6.), tint(t.marker, 0xff)));
             }
-            soft(window, x_of(p.at), x_of(p.at) + 1., 0., h, tint(t.text, 0xff));
+            soft(window, x_of(p.at), x_of(p.at) + 1., 0., h, tint(t.playhead, 0xff));
         },
     )
 }
@@ -6131,54 +7290,116 @@ fn overlay(id: &'static str) -> Stateful<Div> {
         .flex()
         .items_center()
         .justify_center()
-        .bg(gpui::rgba(t().bg << 8 | 0xcc))
+        .bg(tint(t().bg, t().scrim))
         .occlude()
 }
 
 /// A folder as people write it: `~/Music` rather than `/Users/tim/Music`.
 impl Riff {
     /// The list before any folder is added: what riff wants, and a button for it.
-    fn render_no_music(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The first of an action's keys in `mode`, for a hint ("or press p").
+    fn first_key(&self, action: Action, mode: keys::Mode) -> Option<&'static str> {
+        keys::keys_for(action, mode, self.settings.keyboard).first().copied()
+    }
+
+    /// How to make a loop, with the practice keys for its edges.
+    fn no_loop(&self) -> String {
+        let practice = keys::Mode::Practice;
+        empty::no_loop(self.first_key(Action::LoopStart, practice), self.first_key(Action::LoopEnd, practice))
+    }
+
+    /// Why the list is empty, said in its middle: no folder yet, the first scan, nothing
+    /// found, a search finding nothing, an empty playlist (`empty::why` decides).
+    fn render_empty(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let t = t();
-        div().absolute().size_full().flex().items_center().justify_center().child(
+        let scope = self.scope();
+        let empty = empty::why(empty::List {
+            rows: self.rows.len(),
+            tracks: self.tracks.len(),
+            folders: self.settings.folders.len(),
+            unreadable: self.unreadable.len(),
+            scanning: self.scanning.is_some(),
+            query: !self.query.trim().is_empty(),
+            scoped: scope.is_some(),
+            playlist: self.playlist_view.is_some() && self.album.is_none() && self.artist.is_none(),
+        })?;
+        let folders: Vec<String> = self.settings.folders.iter().map(|f| tilde(f)).collect();
+        let unreadable: Vec<(String, String)> = self.unreadable.iter().map(|(p, why)| (tilde(p), why.clone())).collect();
+        let formats = scan::formats();
+        let library = keys::Mode::Library;
+        let said = empty::said(
+            empty,
+            &empty::About {
+                folders: &folders,
+                unreadable: &unreadable,
+                found: self.scan_shown,
+                query: &self.query,
+                scope: scope.as_deref(),
+                formats: &formats,
+                keys: empty::Keys {
+                    play: self.first_key(Action::Play, library),
+                    settings: self.first_key(Action::Settings, library),
+                    add_to_playlist: self.first_key(Action::AddToPlaylist, library),
+                },
+            },
+        );
+        let icon = match empty {
+            empty::Empty::NoFolder | empty::Empty::Looking | empty::Empty::Unreadable | empty::Empty::NoSongs => "folder",
+            empty::Empty::NoMatch { .. } => "search",
+            empty::Empty::EmptyPlaylist => "list-music",
+        };
+        let button = said.button.map(|(button, label)| {
+            let (icon, tip, keys): (&str, &str, &[Action]) = match button {
+                empty::Button::AddFolder => ("folder", "Add music folder", &[Action::Play]),
+                empty::Button::Settings => ("settings-2", "Settings", &[Action::Settings]),
+                empty::Button::SearchEverything => ("search", "Search all your music", &[]),
+            };
             div()
-                .w(px(360.))
+                .id("empty-action")
+                .mt_2()
+                .h(px(HIT))
+                .px_3()
                 .flex()
-                .flex_col()
                 .items_center()
-                .gap_3()
-                .child(ui::icon("music", 28., t.dim))
-                .child(div().text_lg().text_color(rgb(t.text)).child("Where is your music?"))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_center()
-                        .text_color(rgb(t.dim))
-                        .child("Add the folder your songs are in. Riff finds every song below it and never writes there. More folders can be added in settings."),
-                )
-                .child(
-                    div()
-                        .id("add-music")
-                        .mt_2()
-                        .px_3()
-                        .py_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .bg(rgb(t.accent_soft))
-                        .hover(|d| d.bg(rgb(t.faint)))
-                        .child(ui::icon("folder", 14., t.accent))
-                        .child(div().text_sm().text_color(rgb(t.accent)).child("Add music folder…"))
-                        .tooltip(self.tip("Add music folder", &[Action::Play]))
-                        .on_click(cx.listener(|riff, _, _, cx| {
-                            riff.pick_folders(cx);
-                            cx.notify();
-                        })),
-                ),
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(rgb(t.accent_soft))
+                .hover(|d| d.bg(rgb(t.hover)))
+                .child(ui::icon(icon, 14., t.accent))
+                .child(div().text_sm().text_color(rgb(t.accent_text)).child(label))
+                .tooltip(self.tip(tip, keys))
+                .on_click(cx.listener(move |riff, _, _, cx| {
+                    match button {
+                        empty::Button::AddFolder => riff.pick_folders(cx),
+                        empty::Button::Settings => riff.act(Action::Settings, cx),
+                        empty::Button::SearchEverything => riff.widen_search(),
+                    }
+                    cx.notify();
+                }))
+        });
+        Some(
+            div().absolute().size_full().flex().items_center().justify_center().child(
+                div()
+                    .w(px(400.))
+                    .max_w_full()
+                    .px_4()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::icon(icon, 24., t.text_dim))
+                    .child(div().text_center().font_weight(gpui::FontWeight::MEDIUM).text_color(rgb(t.text_dim)).child(said.title))
+                    .child(div().text_sm().text_center().text_color(rgb(t.text_dim)).child(said.detail))
+                    .children(button),
+            ),
         )
     }
+}
+
+/// Whether macOS shows dark now, the vibrant appearances counting as their base.
+fn system_dark(appearance: gpui::WindowAppearance) -> bool {
+    matches!(appearance, gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark)
 }
 
 /// Whether riff keeps its data somewhere other than the default this run.
@@ -6240,7 +7461,12 @@ impl Render for Riff {
             .on_mouse_move(cx.listener(Self::drag))
             .on_mouse_up(MouseButton::Left, cx.listener(|riff, _, _, cx| {
                 // `|`, not `||`: both drags end, whichever was on.
-                if riff.scrubbing.take().is_some() | riff.grab.take().is_some() | riff.drop_slider() {
+                if riff.scrubbing.take().is_some()
+                    | riff.grab.take().is_some()
+                    | riff.drop_slider()
+                    | riff.drop_pan()
+                    | riff.drop_sweep()
+                {
                     cx.notify();
                 }
                 if riff.eq_drag.take().is_some() {
@@ -6277,8 +7503,20 @@ impl Render for Riff {
                             window.titlebar_double_click();
                         }
                     })
+                    // Centred over the whole window; a layer with no handlers of its own,
+                    // so the title bar around the switch still drags and zooms.
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(self.mode_switch(cx)),
+                    )
                     .when(!self.practice, |d| d.child(self.list_switch(cx)))
-                    .child(self.mode_switch(cx))
                     .child(self.tool("eq", "sliders-vertical", "EQ", Action::EqSheet, !self.settings.eq.flat(), cx))
                     .child(self.tool("keys", "keyboard", "Every key", Action::Help, self.help, cx))
                     .child(self.tool("settings", "settings-2", "Settings", Action::Settings, self.prefs.is_some(), cx)),
@@ -6302,14 +7540,14 @@ impl Render for Riff {
                             .child(self.render_search(cx))
                             .when(self.practice, |d| d.child(self.render_practice(at, cx)))
                             .when(!self.practice, |d| {
-                                d.children(self.album.as_ref().map(|of| self.render_album(of).into_any_element()))
+                                d.children(self.album.as_ref().map(|of| self.render_album(of, cx).into_any_element()))
                                     .children(
                                         self.playlist_view
                                             .filter(|_| self.album.is_none() && self.artist.is_none())
                                             .and_then(|i| self.render_playlist(i, cx))
                                             .map(|h| h.into_any_element()),
                                     )
-                                    .children(self.artist.as_ref().map(|of| self.render_artist(of)))
+                                    .children(self.artist.as_ref().map(|of| self.render_artist(of, cx)))
                                     .child(
                                         div()
                                             .flex_1()
@@ -6337,7 +7575,7 @@ impl Render for Riff {
                                                     )
                                                     .children(self.render_pinned(cx))
                                                     .child(self.render_scrollbar(cx))
-                                                    .when(self.settings.folders.is_empty(), |d| d.child(self.render_no_music(cx))),
+                                                    .children(self.render_empty(cx)),
                                             )
                                             .when(self.browsing(), |d| d.child(self.render_rail(cx)))
                                             // The letter being dragged to, large, while the list glides.
@@ -6351,10 +7589,10 @@ impl Render for Riff {
                                                         .rounded_lg()
                                                         .bg(rgb(t().raised))
                                                         .border_1()
-                                                        .border_color(rgb(t().faint))
+                                                        .border_color(rgb(t().border))
                                                         .text_3xl()
                                                         .font_weight(gpui::FontWeight::MEDIUM)
-                                                        .text_color(rgb(t().accent))
+                                                        .text_color(rgb(t().accent_text))
                                                         .child(letter.to_string()),
                                                 )
                                             })),

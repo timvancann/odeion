@@ -71,6 +71,15 @@ impl Regions {
             .min_by_key(|&i| list[i].end - list[i].start)
     }
 
+    /// Where "section start" plays from: the section in play's start, else the loop's
+    /// start. The marker plays no part (that is `o`).
+    pub fn restart(&self, song: &Path, looping: Loop, at: Duration) -> Option<Duration> {
+        match self.current(song, looping, at) {
+            Some(i) => Some(self.of(song)[i].start),
+            None => looping.end.map(|_| looping.start.unwrap_or_default()),
+        }
+    }
+
     /// Moves section `i`'s start (or end) to `at`, keeping it at least `MIN_LENGTH` long
     /// and the list in song order. Returns where the section is in the list now.
     pub fn move_edge(&mut self, song: &Path, i: usize, start: bool, at: Duration) -> Option<usize> {
@@ -113,8 +122,17 @@ impl Regions {
         Some(name)
     }
 
-    /// The next region after `from` (the loop's start, or the playhead without one), or
-    /// the one before it.
+    /// Where stepping to the next or previous section counts from: the loop's start
+    /// while the playhead is in the loop, else the playhead. A loop left behind (the
+    /// playhead moved before or past it) doesn't count, or next skipped a section.
+    pub fn step_from(looping: Loop, at: Duration) -> Duration {
+        match (looping.start.unwrap_or_default(), looping.end) {
+            (start, Some(end)) if start <= at + SAME && at <= end + SAME => start,
+            _ => at,
+        }
+    }
+
+    /// The next region after `from` (see `step_from`), or the one before it.
     pub fn step(&self, song: &Path, from: Duration, forward: bool) -> Option<&Region> {
         let list = self.of(song);
         if forward {
@@ -125,10 +143,7 @@ impl Regions {
     }
 
     pub fn load(file: &Path) -> Regions {
-        std::fs::read(file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        crate::state::load_json(file)
     }
 
     /// Saves through a temp file and a rename, so a crash can't leave half a file.
@@ -183,6 +198,36 @@ mod tests {
         assert_eq!(r.of(song)[0], region("Chorus", 10.0, 20.0));
         assert_eq!(r.rename(song, 0, ""), Some(Region::default_name(s(10.0), s(20.0))));
         assert_eq!(r.rename(song, 1, "Gone"), None);
+    }
+
+    #[test]
+    fn section_start_is_the_section_in_play_or_else_the_loop() {
+        let song = Path::new("/m/song.mp3");
+        let mut r = Regions::default();
+        r.save(song, region("Verse", 10.0, 40.0));
+        r.save(song, region("Lick", 20.0, 24.0));
+        // The loop shrunk inside the verse: the verse, not where the loop starts.
+        assert_eq!(r.restart(song, looped(30.0, 34.0), s(31.0)), Some(s(10.0)));
+        assert_eq!(r.restart(song, Loop::default(), s(22.0)), Some(s(20.0)));
+        assert_eq!(r.restart(song, looped(50.0, 60.0), s(55.0)), Some(s(50.0)));
+        assert_eq!(r.restart(song, Loop::default(), s(55.0)), None);
+    }
+
+    #[test]
+    fn a_loop_left_behind_doesnt_count_when_stepping() {
+        let song = Path::new("/m/song.mp3");
+        let mut r = Regions::default();
+        for (name, a, b) in [("A", 10.0, 20.0), ("B", 20.0, 30.0)] {
+            r.save(song, region(name, a, b));
+        }
+        // The loop is still A, the playhead back before it: next is A, not B.
+        let from = Regions::step_from(looped(10.0, 20.0), s(4.0));
+        assert_eq!(r.step(song, from, true).unwrap().name, "A");
+        // In the loop, it counts from the loop's start, wherever the playhead is.
+        let from = Regions::step_from(looped(10.0, 20.0), s(19.0));
+        assert_eq!(r.step(song, from, true).unwrap().name, "B");
+        assert!(r.step(song, from, false).is_none());
+        assert_eq!(Regions::step_from(Loop::default(), s(25.0)), s(25.0));
     }
 
     #[test]

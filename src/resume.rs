@@ -63,10 +63,7 @@ impl Resume {
     }
 
     pub fn load(file: &Path) -> Resume {
-        std::fs::read(file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        crate::state::load_json(file)
     }
 
     /// Saves through a temp file and a rename, so a crash can't leave half a file.

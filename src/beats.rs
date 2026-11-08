@@ -7,7 +7,7 @@
 //!
 //! Onsets are SuperFlux-style spectral flux (Böck 2013: vibrato and bends don't count as
 //! hits); the tempo is Ellis's weighted autocorrelation and the beats his dynamic
-//! programming tracker (2007). Tightness 300 suited Tim's library best: measured on
+//! programming tracker (2007). Tightness 300 suited a rock library best: measured on
 //! twelve songs it kept 75% of beats on onsets with 6% jitter, where librosa's 100 gave
 //! 76% and 8%, and 1000 lost songs that drift.
 

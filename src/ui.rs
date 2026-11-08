@@ -1,5 +1,5 @@
 //! How riff looks: the active colours, the embedded fonts and icons, and small drawing
-//! helpers. The default palette is Jasmijn's gold, so the two read as siblings.
+//! helpers. Riff Dark keeps Jasmijn's gold, so the two read as siblings.
 
 use gpui::{App, AssetSource, IntoElement, Result, SharedString, Styled, px, rgb, svg};
 use std::borrow::Cow;
@@ -44,7 +44,8 @@ icons!(
     "zoom-in", "zoom-out", "layers", "layers-plus", "volume-2", "volume-x", "headphones",
     "bookmark-plus", "bookmark-minus", "loop-start", "loop-end", "widen-start", "narrow-start",
     "narrow-end", "widen-end", "slide-back", "slide-on", "loop-play", "loop-clear", "beats",
-    "region-prev", "region-next", "disc", "minus", "trending-up",
+    "region-prev", "region-next", "disc", "minus", "trending-up", "rotate-ccw", "crosshair",
+    "chevron-down", "chevron-up", "circle-alert",
 );
 
 impl AssetSource for Assets {
@@ -95,6 +96,16 @@ pub fn album_stats(songs: usize, seconds: Option<u64>) -> String {
     }
 }
 
+/// How many rows the wheel moves a short list by: `dy` pixels (below 0 is down the
+/// list, as the content follows the fingers) added to what `left` kept, a row every
+/// `row` pixels. A trackpad's many small deltas add up; what isn't a whole row is kept.
+pub fn wheel_rows(left: &mut f32, dy: f32, row: f32) -> i32 {
+    *left += dy;
+    let rows = (*left / row).trunc();
+    *left -= rows * row;
+    -rows as i32
+}
+
 /// 3:07, or 1:02:07 for something very long.
 pub fn clock(d: std::time::Duration) -> String {
     let s = d.as_secs();
@@ -128,6 +139,21 @@ mod tests {
     fn a_scan_without_changes_says_nothing() {
         assert_eq!(scan_result(0, 0), None);
         assert_eq!(scan_result(12, 1), Some("12 new, 1 gone".into()));
+    }
+
+    #[test]
+    fn the_wheel_moves_whole_rows_and_keeps_the_rest() {
+        let mut left = 0.;
+        // A mouse notch is a row.
+        assert_eq!(wheel_rows(&mut left, -20., 20.), 1);
+        assert_eq!(wheel_rows(&mut left, 20., 20.), -1);
+        // A trackpad's small steps add up.
+        assert_eq!(wheel_rows(&mut left, -8., 20.), 0);
+        assert_eq!(wheel_rows(&mut left, -8., 20.), 0);
+        assert_eq!(wheel_rows(&mut left, -8., 20.), 1);
+        assert_eq!(left, -4.);
+        // A fast flick moves several.
+        assert_eq!(wheel_rows(&mut left, -64., 20.), 3);
     }
 
     #[test]
