@@ -441,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // shuts the folder with Unix permissions
     fn a_folder_below_that_cant_be_opened_is_listed_as_missed() {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("riff-missed-{}", std::process::id()));

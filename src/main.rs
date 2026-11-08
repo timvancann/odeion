@@ -53,10 +53,11 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     display_id,
-                    // The theme's background runs up behind the traffic lights.
+                    // On a Mac the theme's background runs up behind the traffic lights;
+                    // elsewhere the system draws its own title bar and buttons.
                     titlebar: Some(TitlebarOptions {
                         title: Some("riff".into()),
-                        appears_transparent: true,
+                        appears_transparent: cfg!(target_os = "macos"),
                         // Centred in riff's 40 px title bar (the lights are 12 px).
                         traffic_light_position: Some(point(px(14.), px(14.))),
                     }),

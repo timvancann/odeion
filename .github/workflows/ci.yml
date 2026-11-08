@@ -17,3 +17,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
       - run: cargo build --release
+
+  # Windows is a trial (2026-11-08): it builds riff.exe to try, warnings allowed, and
+  # its tests don't fail the run yet.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: riff-windows
+          path: target/release/riff.exe
+      - run: cargo test
+        continue-on-error: true

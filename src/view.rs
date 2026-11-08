@@ -845,7 +845,7 @@ impl Riff {
 
     /// Keys while the ⌘, sheet is open. `typed` is what the key types in the theme filter.
     fn prefs_key(&mut self, k: &gpui::Keystroke, typed: Option<String>, cx: &gpui::App) {
-        let (cmd, ctrl) = (k.modifiers.platform, k.modifiers.control);
+        let (cmd, ctrl) = keys::command_keys(k.modifiers.platform, k.modifiers.control);
         let vim = self.vim();
         let Some(prefs) = &mut self.prefs else { return };
         let vim = vim && prefs.picker.is_none() && !cmd && !ctrl;
@@ -2376,10 +2376,11 @@ impl Riff {
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
+        let (cmd, ctrl) = keys::command_keys(k.modifiers.platform, k.modifiers.control);
         let press = keys::Press {
             key: &k.key,
-            cmd: k.modifiers.platform,
-            ctrl: k.modifiers.control,
+            cmd,
+            ctrl,
             shift: k.modifiers.shift,
             alt: k.modifiers.alt,
         };

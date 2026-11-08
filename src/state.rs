@@ -47,9 +47,20 @@ fn home() -> PathBuf {
 }
 
 /// Where riff keeps its data unless another folder is chosen in settings. It also holds
-/// the note naming that other folder.
+/// the note naming that other folder. Each system's usual place: Application Support on
+/// a Mac, `%APPDATA%` on Windows, `$XDG_DATA_HOME` (or `~/.local/share`) on Linux.
 pub fn default_data_dir() -> PathBuf {
-    home().join("Library/Application Support/riff")
+    if cfg!(target_os = "macos") {
+        home().join("Library/Application Support/riff")
+    } else if cfg!(windows) {
+        PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("riff")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home().join(".local/share"))
+            .join("riff")
+    }
 }
 
 /// Where riff keeps its data this run: the folder chosen in settings, or the default.

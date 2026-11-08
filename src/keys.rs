@@ -190,6 +190,13 @@ pub struct Press<'a> {
     pub alt: bool,
 }
 
+/// The ⌘ and ⌃ of a key press from GPUI's platform key (⌘ on a Mac, the Windows or Super
+/// key elsewhere) and Control. Off the Mac, Control is the command key, as Ctrl+F finds
+/// there, and there is no second one: the ⌃ combinations are Mac only for now.
+pub fn command_keys(platform: bool, control: bool) -> (bool, bool) {
+    if cfg!(target_os = "macos") { (platform, control) } else { (control, false) }
+}
+
 /// What a key does in `mode`. `pending` holds the first key of `gg`, `zz` and `dd`.
 pub fn press(mode: Mode, p: Press, keyboard: Keyboard, pending: &mut Option<char>) -> Option<Action> {
     let first = pending.take();
