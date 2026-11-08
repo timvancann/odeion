@@ -2831,7 +2831,13 @@ impl Odeion {
                     None => self.message = Some(("no section or loop here".into(), false)),
                 }
             }
-            Action::Follow => self.panned = None,
+            // Follow on or off: off holds the view where it is now.
+            Action::Follow => {
+                self.panned = match self.panned {
+                    Some(_) => None,
+                    None => Some(self.detail.0.get().1),
+                }
+            }
             // A hand on the speed stops the trainer.
             Action::Slow | Action::Speed(_) | Action::SetSpeed(_) | Action::Pitch(_) | Action::SetPitch(_) => {
                 match action {
@@ -2910,7 +2916,12 @@ impl Odeion {
             }
             Action::Zoom(factor) => {
                 let most = song.unwrap_or(SPAN).max(Duration::from_secs(1));
-                self.span = self.span.mul_f64(factor).clamp(Duration::from_millis(500), most);
+                let span = self.span.mul_f64(factor).clamp(Duration::from_millis(500), most);
+                // A view held away from the playhead zooms about its middle, not its start.
+                if let (Some(from), Some(song)) = (self.panned, song) {
+                    self.panned = Some(wave::zoomed(from, self.span, span, song));
+                }
+                self.span = span;
             }
             Action::ZoomFit => {
                 let Some(song) = song else { return };
@@ -3561,16 +3572,30 @@ impl Odeion {
     }
 
     /// A press on the overview: inside the box showing the detail's stretch it may
-    /// become a drag of that view; anywhere else it is like any strip.
+    /// become a drag of that view; anywhere else it seeks. The loop and the marker are
+    /// only shown here, never grabbed or set (Tim, 2026-11-08): that is the detail's job.
     fn overview_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let overview = self.overview.clone();
         let (_, from, to) = self.detail.0.get();
-        let inside = overview.time_at(event.position.x).is_some_and(|(at, _)| from <= at && at <= to);
-        if !inside || event.modifiers.shift || self.grabbed(&overview, event).is_some() {
-            return self.strip_down(&overview, event, cx);
-        }
         let Some((at, _)) = overview.time_at(event.position.x) else { return };
+        if !(from <= at && at <= to) {
+            // On the grid the playhead lands on the nearest beat; ⌥ places it freely.
+            self.audio.seek(if event.modifiers.alt { at } else { self.snap(at) });
+            return cx.notify();
+        }
         self.panning = Some(Pan { from, at, x: event.position.x, alt: event.modifiers.alt, moved: false });
+    }
+
+    /// A sideways scroll over a waveform, `dx` pixels: the detail view moves along the
+    /// song by as much time as that many of its pixels show, and stops following.
+    fn scroll_view(&mut self, dx: f64) {
+        let Some(song) = self.audio.duration else { return };
+        let (bounds, from, to) = self.detail.0.get();
+        let width = f64::from(f32::from(bounds.size.width)).max(1.0);
+        let per_px = (to - from).as_secs_f64() / width;
+        let from = self.panned.unwrap_or(from);
+        // Content follows the fingers, as in a list: a swipe to the left goes on in time.
+        self.panned = Some(wave::scrolled(from, -dx * per_px, self.span, song));
     }
 
     /// A press on the detail waveform: on a loop edge or the marker it grabs it and
@@ -4824,19 +4849,26 @@ impl Odeion {
                 .id(id)
                 .tooltip(self.tip(
                     if overview {
-                        "Drag the box to look elsewhere (Follow comes back); click to jump; scroll to zoom; right-click for more"
+                        "Drag the box to look elsewhere (Follow comes back); click to jump; scroll up or down to zoom, sideways to move along; right-click for more"
                     } else {
-                        "Click to jump; drag across to loop that stretch; drag a loop edge or the marker; shift-click ends the loop; scroll to zoom; right-click for more"
+                        "Click to jump; drag across to loop that stretch; drag a loop edge or the marker; shift-click ends the loop; scroll up or down to zoom, sideways to move along; right-click for more"
                     },
                     &[],
                 ))
                 .children(boxed(&view))
-                .children(edge_grips(view.looping, view.marker, view.from, view.to))
-                // The wheel zooms, as - and = do: a mouse notch is about one step, and a
-                // trackpad's many small deltas add up to the same.
+                // The overview only shows the loop and the marker; they're moved on the
+                // detail, so only it shows the resize cursor over them.
+                .children((!overview).then(|| edge_grips(view.looping, view.marker, view.from, view.to)).into_iter().flatten())
+                // Up and down zooms, as - and = do: a mouse notch is about one step, and a
+                // trackpad's many small deltas add up to the same. Sideways moves the view
+                // along the song and stops it following.
                 .on_scroll_wheel(cx.listener(|odeion, e: &gpui::ScrollWheelEvent, _, cx| {
-                    let dy = f32::from(e.delta.pixel_delta(px(20.)).y) as f64;
-                    if dy != 0. {
+                    let delta = e.delta.pixel_delta(px(20.));
+                    let (dx, dy) = (f32::from(delta.x) as f64, f32::from(delta.y) as f64);
+                    if dx.abs() > dy.abs() {
+                        odeion.scroll_view(dx);
+                        cx.notify();
+                    } else if dy != 0. {
                         odeion.perform(Action::Zoom(keys::ZOOM.powf(-dy / 20.)));
                         cx.notify();
                     }
@@ -5273,18 +5305,18 @@ impl Odeion {
                             if self.panned.is_some() {
                                 "Follow the playhead again"
                             } else {
-                                "The view follows the playhead; drag the box on the overview to look elsewhere"
+                                "Following the playhead; click to hold the view here (scrolling sideways or dragging the overview's box does too)"
                             },
                             Action::Follow,
-                            self.panned.is_some(),
+                            self.panned.is_none(),
                             cx,
                         )
                         .w_auto()
                         .px_2()
                         .gap_1()
                         .text_sm()
-                        .when(self.panned.is_some(), |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                        .text_color(rgb(if self.panned.is_some() { t.accent_text } else { t.text_dim }))
+                        .when(self.panned.is_none(), |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                        .text_color(rgb(if self.panned.is_none() { t.accent_text } else { t.text_dim }))
                         .child("Follow"),
                     )
                     .child(self.tool("grid", "beats", "Beat grid: loops and steps follow the beats", Action::Grid, self.grid, cx))
@@ -7487,11 +7519,7 @@ impl Render for Odeion {
         let at = self.smooth.at(self.audio.position(), playing, self.started.elapsed(), self.audio.speed());
         // Between frames the smoothed playhead can run a moment past the loop's end,
         // where the audio has already jumped back; draw it where the music is.
-        let looping = self.audio.looping;
-        let at = match (looping.jump(at), looping.end) {
-            (Some(start), Some(end)) => start + (at - end),
-            _ => at,
-        };
+        let at = self.audio.looping.drawn(at, playing);
         if self.practice && playing {
             window.request_animation_frame();
         }

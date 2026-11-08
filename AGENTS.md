@@ -256,7 +256,15 @@ add a key to both or they fail.
   (`wave::zoom_fit`). Dragging the box on the contour moves the detail view
   without moving the playhead (Tim, 2026-10-29: the view was tied to the playhead); it
   stays there until the toolbar's Follow, a section, `o` or another song, and a click
-  in the box that doesn't move still seeks (`wave::pan`, `Odeion::panned`).
+  in the box that doesn't move still seeks (`wave::pan`, `Odeion::panned`). Follow (⌘L
+  too) is lit while the view follows and switches it off and on, off holding the view
+  where it is; scrolling sideways over either waveform moves the view along the song
+  and stops it following too (`wave::scrolled`), and a held view zooms about its middle
+  (`wave::zoomed`), never from its start (Tim, 2026-11-08). The overview only shows the
+  loop and the marker: they can't be dragged or shift-set there, and a press outside
+  its box seeks. The drawn playhead is wrapped into the loop only a moment past its end
+  while playing (`Loop::drawn`); wrapping it whenever it was past the end moved a
+  paused playhead by the loop's length.
   Under the waveform, the controls Tim reaches for with a guitar on his lap are large
   buttons with names (`Odeion::big`, 44 px): previous section, section start (the
   section in play's start, else the loop's, never the marker: `Regions::restart`),

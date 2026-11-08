@@ -126,6 +126,19 @@ pub fn pan(from: Duration, grabbed: Duration, now: Duration, span: Duration, son
     inside(from, span.as_secs_f64(), song).0
 }
 
+/// Where a view held away from the playhead starts after a zoom from `span` to `to`:
+/// stretched or shrunk about its middle, so what was in view stays in view.
+pub fn zoomed(from: Duration, span: Duration, to: Duration, song: Duration) -> Duration {
+    let middle = from.as_secs_f64() + span.as_secs_f64() / 2.0;
+    inside(middle - to.as_secs_f64() / 2.0, to.as_secs_f64(), song).0
+}
+
+/// Where a view starts after a sideways scroll of `by` seconds (negative goes back),
+/// kept inside the song.
+pub fn scrolled(from: Duration, by: f64, span: Duration, song: Duration) -> Duration {
+    inside(from.as_secs_f64() + by, span.as_secs_f64(), song).0
+}
+
 /// `span` seconds from `from`, moved inside the song where it fits.
 fn inside(from: f64, span: f64, song: Duration) -> (Duration, Duration) {
     let from = from.min(song.as_secs_f64() - span).max(0.0);
@@ -417,6 +430,20 @@ mod tests {
         // Near the start or end it stays inside the song.
         assert_eq!(window(s(1.0), Loop::default(), s(8.0), s(100.0)), (s(0.0), s(8.0)));
         assert_eq!(window(s(99.0), Loop::default(), s(8.0), s(100.0)), (s(92.0), s(100.0)));
+    }
+
+    #[test]
+    fn a_held_view_zooms_about_its_middle_and_scrolls_sideways() {
+        // 20 to 28 s shown, zoomed in to 4 s: 22 to 26, the middle kept at 24.
+        assert_eq!(zoomed(s(20.0), s(8.0), s(4.0), s(100.0)), s(22.0));
+        // Zoomed out to 16 s: 16 to 32.
+        assert_eq!(zoomed(s(20.0), s(8.0), s(16.0), s(100.0)), s(16.0));
+        // Near the start it stays inside the song.
+        assert_eq!(zoomed(s(1.0), s(8.0), s(16.0), s(100.0)), s(0.0));
+        // Sideways: forward and back, never past either end.
+        assert_eq!(scrolled(s(20.0), 3.0, s(8.0), s(100.0)), s(23.0));
+        assert_eq!(scrolled(s(20.0), -30.0, s(8.0), s(100.0)), s(0.0));
+        assert_eq!(scrolled(s(90.0), 30.0, s(8.0), s(100.0)), s(92.0));
     }
 
     #[test]

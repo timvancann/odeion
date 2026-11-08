@@ -757,7 +757,7 @@ pub const SHEET: &[Group] = &[
             ("T", "", "", "the trainer's settings"),
             ("- =", "", "", "zoom out or in"),
             ("⌘0", "", "", "zoom to fit the loop, or the whole song"),
-            ("⌘L", "", "", "follow the playhead again"),
+            ("⌘L", "", "", "follow the playhead, or hold the view here"),
             ("v", "", "", "next recording: the song, its variations"),
             ("V ⌘O", "", "", "add a variation (or drop files on the waveform)"),
             ("X", "", "", "remove the playing variation (twice)"),

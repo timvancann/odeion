@@ -62,6 +62,18 @@ impl Loop {
         (at >= end).then(|| self.start.unwrap_or_default())
     }
 
+    /// Where to draw a smoothed playhead at `at`. Playing, it can run a moment past the
+    /// loop's end where the audio has already jumped back, so it is drawn wrapped. A
+    /// playhead that is simply past the end (paused there, or left there when the loop
+    /// was set) stays where it is: wrapping it moved it by the loop's length.
+    pub fn drawn(&self, at: Duration, playing: bool) -> Duration {
+        const MOMENT: Duration = Duration::from_millis(250);
+        match (self.jump(at), self.end) {
+            (Some(start), Some(end)) if playing && at - end < MOMENT => start + (at - end),
+            _ => at,
+        }
+    }
+
     /// Moves the start to `at`, keeping it at least `MIN_LOOP` before the end.
     pub fn move_start(&mut self, at: Duration) {
         self.start = Some(match self.end {
@@ -1021,6 +1033,21 @@ pub fn replay_from(marker: Option<Duration>, looping: Loop) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_playhead_is_drawn_wrapped_only_a_moment_past_a_playing_loop() {
+        let s = Duration::from_secs_f64;
+        let looping = Loop { start: Some(s(40.0)), end: Some(s(50.0)), off: false };
+        // Playing, a hair past the end: drawn where the music already is.
+        assert_eq!(looping.drawn(s(50.1), true), s(40.1));
+        // Paused past the end, or playing well past it (left there): where it is.
+        assert_eq!(looping.drawn(s(54.0), false), s(54.0));
+        assert_eq!(looping.drawn(s(54.0), true), s(54.0));
+        assert_eq!(looping.drawn(s(50.1), false), s(50.1));
+        // Inside the loop, or with looping off: untouched.
+        assert_eq!(looping.drawn(s(45.0), true), s(45.0));
+        assert_eq!(Loop { off: true, ..looping }.drawn(s(50.1), true), s(50.1));
+    }
+
     #[test]
     fn the_marker_is_dropped_and_then_cleared_from_anywhere() {
         let s = Duration::from_secs_f64;
