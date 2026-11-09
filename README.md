@@ -22,7 +22,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-PolyForm_Noncommercial-18181b" alt="Licence: PolyForm Noncommercial"></a>
 </p>
 
-![The library](docs/screenshots/library.png)
+<a href="https://youtu.be/_kaOeKP2ras"><img src="docs/demo.gif" alt="Scrolling the library, opening a song in practice mode, a loop playing, then the song's stems with the lead guitar muted"></a>
+
+<p align="center"><a href="https://youtu.be/_kaOeKP2ras"><b>Watch the five-minute demo</b></a></p>
 
 <p align="center"><sub>Named after the <a href="https://en.wikipedia.org/wiki/Odeon_(building)">odeion</a>,
 the small concert hall of ancient Greece, where people came to hear music and musicians
@@ -34,6 +36,8 @@ came to play it.</sub></p>
 
 - Your own music folder, opened instantly, even with thousands of songs.
 - Search as you type, albums, artists, favourites, a queue and playlists.
+
+![The library](docs/screenshots/library.png)
 
 **Practise**
 
