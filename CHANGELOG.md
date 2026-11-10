@@ -5,6 +5,32 @@ release's notes on GitHub.
 
 ## Unreleased
 
+## 0.4.0 (2026-11-10)
+
+**New**
+
+- Column headers over a playlist's songs sort it by title, artist, album or length.
+  Click again to reverse, a third time for the playlist's own order. The songs play in
+  the order shown; the playlist itself stays as it was.
+- The gauge beside the speed is a button: full speed, and again back to the slowed
+  speed.
+
+**Changed**
+
+- `s` and the gauge change only the speed. A pitch shift stays until you change it.
+  A song you left at full speed with `s` while it had a pitch shift now opens with that
+  shift; the pitch control's right-click menu puts it back to as recorded.
+
+**Fixed**
+
+- Left and right no longer swap after playing from the loop's start or the marker, or
+  clicking around, in a slowed-down or pitch-shifted song, nor when the speed changes.
+- The song Odeion reopens with goes on to the next one when it ends, through the list
+  it was started from.
+- Switching to a backing track or stems that start later than the song no longer
+  crashes Odeion.
+- Windows: the cover shows in the media controls when its path has a space.
+
 ## 0.3.0 (2026-11-10)
 
 **New**

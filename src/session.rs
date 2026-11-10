@@ -13,6 +13,9 @@ use std::time::Duration;
 pub struct Session {
     /// The song that was playing (or paused).
     pub playing: Option<PathBuf>,
+    /// The list it was started from (an album, an artist, a playlist, search results),
+    /// as shown: what plays after it. Without it the reopened song was the last.
+    pub list: Vec<PathBuf>,
     /// The highlighted song.
     pub selected: Option<PathBuf>,
     /// The practice view was open.
@@ -59,6 +62,7 @@ mod tests {
         let file = std::env::temp_dir().join(format!("odeion-session-{}.json", std::process::id()));
         let session = Session {
             playing: Some("/m/song.mp3".into()),
+            list: vec!["/m/song.mp3".into(), "/m/after.mp3".into()],
             selected: Some("/m/other.mp3".into()),
             practice: true,
             album: None,
@@ -81,6 +85,7 @@ mod tests {
     fn a_session_from_before_the_queue_loads_with_an_empty_one() {
         let old: Session = serde_json::from_str(r#"{"playing":"/m/a.mp3","grid":true}"#).unwrap();
         assert!(old.queue.is_empty());
+        assert!(old.list.is_empty());
         assert!(old.grid);
     }
 }

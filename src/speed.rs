@@ -1,6 +1,7 @@
 //! How the song plays: its speed, in whole percent of the recorded speed, and its
-//! pitch, in cents, each apart from the other. A song remembers both even while it
-//! plays as recorded, so `s` goes back and forth between the two. `,` `.` step the
+//! pitch, in cents, each apart from the other. A song remembers its speed even while it
+//! plays at full speed, so `s` goes back and forth between the two; `s` leaves the
+//! pitch alone (Tim, 2026-11-10: it took the pitch along). `,` `.` step the
 //! speed by 5%, the slider (and the trainer) set any whole percent from 25 to 110;
 //! `k j` move the pitch a semitone and `K J` 5 cents, up to an octave either way.
 
@@ -21,10 +22,10 @@ pub const PRESETS: [u16; 5] = [50, 60, 70, 80, 90];
 pub struct Speed {
     /// The slowed (or sped up) speed, kept while `on` is off.
     pub percent: u16,
-    /// The pitch, up or down, kept while `on` is off.
+    /// The pitch, up or down. It plays whatever the speed does.
     #[serde(default)]
     pub cents: i16,
-    /// Playing at `percent` and `cents`; off plays as recorded.
+    /// Playing at `percent`; off plays at full speed.
     pub on: bool,
 }
 
@@ -47,36 +48,31 @@ impl Speed {
 
     /// The pitch now, in cents.
     pub fn pitch(&self) -> i16 {
-        if self.on { self.cents } else { 0 }
+        self.cents
     }
 
-    /// `s`: as recorded, and again back to the kept speed and pitch.
+    /// `s`: full speed, and again back to the kept speed. The pitch stays.
     pub fn toggle(&mut self) {
-        self.on = !self.on && (self.percent != 100 || self.cents != 0);
+        self.on = !self.on && self.percent != 100;
     }
 
-    /// Plays at `percent` (clamped to 25 to 110), at the pitch playing now. Back to as
-    /// recorded switches off, keeping what it came from for `s`.
+    /// Plays at `percent` (clamped to 25 to 110). Full speed switches off, keeping what
+    /// it came from for `s`.
     pub fn set(&mut self, percent: u16) {
-        self.play(percent.clamp(SLOWEST, FASTEST), self.pitch());
+        match percent.clamp(SLOWEST, FASTEST) {
+            100 => self.on = false,
+            percent => (self.percent, self.on) = (percent, true),
+        }
     }
 
     /// Plays at `cents` (up to an octave either way), at the speed playing now.
     pub fn set_pitch(&mut self, cents: i16) {
-        self.play(self.now(), cents.clamp(-OCTAVE, OCTAVE));
+        self.cents = cents.clamp(-OCTAVE, OCTAVE);
     }
 
     /// `k j` (by a semitone, 100) and `K J` (by 5 cents).
     pub fn shift(&mut self, by: i16) {
         self.set_pitch(self.pitch().saturating_add(by));
-    }
-
-    fn play(&mut self, percent: u16, cents: i16) {
-        if percent == 100 && cents == 0 {
-            self.on = false;
-        } else {
-            (self.percent, self.cents, self.on) = (percent, cents, true);
-        }
     }
 
     /// `,` (slower) and `.` (faster): to the next 5% from what plays now.
@@ -156,7 +152,7 @@ mod tests {
         let mut s = Speed::default();
         s.shift(100);
         // A pitch alone plays at full speed: the kept 70% doesn't come along.
-        assert_eq!((s.now(), s.pitch(), s.on), (100, 100, true));
+        assert_eq!((s.now(), s.pitch(), s.on), (100, 100, false));
         s.shift(-5);
         assert_eq!(s.pitch(), 95);
         for _ in 0..20 {
@@ -172,21 +168,22 @@ mod tests {
     }
 
     #[test]
-    fn s_puts_speed_and_pitch_back_and_brings_both_back() {
+    fn s_switches_the_speed_and_leaves_the_pitch_alone() {
+        // `s` used to put the pitch back too (Tim, 2026-11-10: it shouldn't).
         let mut s = Speed::default();
         s.set(80);
         s.shift(-200);
         s.toggle();
-        assert_eq!((s.now(), s.pitch(), s.factor()), (100, 0, 1.0));
+        assert_eq!((s.now(), s.pitch(), s.factor()), (100, -200, 1.0));
         s.toggle();
         assert_eq!((s.now(), s.pitch()), (80, -200));
-        // Back to as recorded by hand keeps both for `s`.
-        s.set(100);
-        s.set_pitch(0);
-        assert!(!s.on);
-        s.set(100);
+        // A pitch shift alone: `s` slows to the first slowed speed and keeps the pitch.
+        let mut s = Speed::default();
+        s.shift(300);
         s.toggle();
-        assert_eq!((s.now(), s.pitch()), (100, -200));
+        assert_eq!((s.now(), s.pitch()), (FIRST, 300));
+        s.toggle();
+        assert_eq!((s.now(), s.pitch()), (100, 300));
     }
 
     #[test]

@@ -101,8 +101,10 @@ and draws:
 - `resume.rs`: where each song was left (`resume.json`): its recording (song or
   variation), speed, playhead and each recording's loop, marker and stem levels. Old
   entries' slow-down preset (an index) is read as its percentage.
-- `session.rs`: what Odeion showed when it closed (`session.json`): the playing song,
-  the highlighted one, practice, album or artist view, grid and zoom. Odeion opens that
+- `session.rs`: what Odeion showed when it closed (`session.json`): the playing song
+  and the list it was started from (so it plays on through it when it ends; without it
+  the reopened song was the last), the highlighted one, practice, album or artist view,
+  grid and zoom. Odeion opens that
   way, the song paused where it was (its recording, loops and playhead come from
   `resume.json`), never playing on its own. Saved within a second of a change, on ⌘Q
   and when the window closes. With no cached library (deleted or unreadable) it is
@@ -301,7 +303,8 @@ add a key to both or they fail.
   closing the window.
 - **Speed**, per song, in whole percent from 25 to 110: `,` `.` in practice step 5%
   (onto the 5% grid), `s` goes to full speed and again back to the kept speed. The
-  now-playing card has − value + (a click on the value is `s`), the practice toolbar a
+  now-playing card has a gauge, − value + (a click on the gauge or the value is `s`; the
+  gauge is lit while slowed or sped up), the practice toolbar a
   slider for any percent (the only way to 1% steps, by Tim's choice), and a right-click
   on either, or the card's chevron, gives presets 50 to 110% and the trainer's settings. Pitch is kept: Signalsmith
   Stretch at its full preset (Tim compared it with SoundTouch, "night and day"; the
@@ -312,8 +315,9 @@ add a key to both or they fail.
   ⇧↑ ⇧↓ (Vim `K J`), up to an
   octave either way, through the same stretcher (`set_transpose_factor_semitones`). The
   practice toolbar has − value + by semitones; the wheel over it moves 5 cents and a
-  right-click gives cents and "as recorded". `s` puts speed and pitch back to as
-  recorded and again brings both back. A pitch change doesn't stop the trainer. It reports what it holds back (~0.1 s) so the playhead
+  right-click gives cents and "as recorded". `s` and the gauge switch only the speed
+  and leave the pitch alone (Tim, 2026-11-10; they used to put both back); the pitch
+  goes back by hand. A pitch change doesn't stop the trainer. It reports what it holds back (~0.1 s) so the playhead
   shows what's heard, and a soft limiter keeps its rare peaks (up to 1.8) under full
   scale.
 - **The speed trainer** (`t` or the toolbar button; `T` or the speed menu for its
@@ -373,7 +377,11 @@ add a key to both or they fail.
   menus (sidebar and header) sort it by artist (the library's order) or title, once:
   the order is saved and stays Tim's to change (`Playlists::sort_by`). The picker also takes a whole
   list from a menu's "Add all to playlist…". Enter plays from that song through the playlist. The
-  session keeps an open playlist by name.
+  session keeps an open playlist by name. Column headers over its songs (Title, Artist,
+  Album, Time; Tim, 2026-11-10, only for playlists) sort the view: a click sorts, again
+  reverses, a third time back to the playlist's own order (`library::next_sorting`).
+  Sorted is also the play order; the saved order never changes, and songs move only in
+  it (the up and down buttons hide, the keys say so). Each playlist opens in its own order.
 - **The EQ** (⌘E, ⌥⌘E or the title bar's sliders button, lit while it does something):
   a sheet with on/off, the preset by name (‹ › to step, save, remove) and a vertical
   slider per column, the preamp first. Drag, wheel or double-click to 0; ← → or `h l` pick

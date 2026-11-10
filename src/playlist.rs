@@ -48,6 +48,29 @@ impl Playlist {
         }
     }
 
+    /// The list as it was shown, unshuffled.
+    pub fn list(&self) -> &[PathBuf] {
+        &self.list
+    }
+
+    /// Whether `shown` holds the same songs as the list playing, in any order: the list
+    /// re-sorted, which the playing song then goes on through.
+    pub fn same_songs(&self, shown: &[PathBuf]) -> bool {
+        let sorted = |l: &[PathBuf]| {
+            let mut l = l.to_vec();
+            l.sort();
+            l
+        };
+        sorted(&self.list) == sorted(shown)
+    }
+
+    /// The list to carry on with when odeion reopens on `current`: the one kept in the
+    /// session, or else `shown`, the run of songs `current` sits in now (a session from
+    /// before lists were kept has none).
+    pub fn reopened(kept: Vec<PathBuf>, shown: Vec<PathBuf>, current: &Path) -> Vec<PathBuf> {
+        if kept.iter().any(|p| p == current) { kept } else { shown }
+    }
+
     /// The queue's first song, which leaves the queue, or else the list's next.
     pub fn next(&mut self, queue: &mut Queue) -> Option<PathBuf> {
         if let Some(song) = queue.take(0) {
@@ -180,6 +203,27 @@ mod tests {
         assert_eq!(p.previous(Duration::ZERO), Some(&"a".into()));
         p.play_queued(Path::new("x"));
         assert_eq!(p.next(&mut Queue::default()), Some("b".into()));
+    }
+
+    #[test]
+    fn a_reopened_song_plays_on_through_its_kept_list_or_the_one_it_sits_in() {
+        // Reopened, the song was the last: it ended and nothing followed (Tim, 2026-11-10).
+        let kept = list(&["a", "b", "c"]);
+        let shown = list(&["x", "b", "y"]);
+        let mut p = Playlist::new(Playlist::reopened(kept.clone(), shown.clone(), Path::new("b")), Path::new("b"), None);
+        assert_eq!(p.next(&mut Queue::default()), Some("c".into()));
+        // A session from before lists were kept, or a list that lost the song.
+        let mut p = Playlist::new(Playlist::reopened(vec![], shown.clone(), Path::new("b")), Path::new("b"), None);
+        assert_eq!(p.next(&mut Queue::default()), Some("y".into()));
+        assert_eq!(Playlist::reopened(kept, shown.clone(), Path::new("y")), shown);
+    }
+
+    #[test]
+    fn a_list_sorted_anew_holds_the_same_songs_another_does_not() {
+        let p = Playlist::new(list(&["a", "b", "c"]), Path::new("b"), None);
+        assert!(p.same_songs(&list(&["c", "a", "b"])));
+        assert!(!p.same_songs(&list(&["c", "a"])));
+        assert!(!p.same_songs(&list(&["c", "a", "x"])));
     }
 
     #[test]

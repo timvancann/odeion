@@ -287,6 +287,10 @@ struct Stretched<S> {
     carry: f64,
     /// Whether the last sample came through the stretcher.
     stretching: bool,
+    /// Which channel of its frame the next sample is.
+    phase: usize,
+    /// Silent samples owed to finish the frame a seek cut into.
+    pad: usize,
     /// The pitch shift the stretcher has, in semitones.
     transposed: f32,
 }
@@ -306,6 +310,8 @@ impl<S: Source> Stretched<S> {
             input: Vec::new(),
             carry: 0.0,
             stretching: false,
+            phase: 0,
+            pad: 0,
             transposed: 0.0,
         }
     }
@@ -323,21 +329,33 @@ impl<S: Source> Iterator for Stretched<S> {
     type Item = rodio::Sample;
 
     fn next(&mut self) -> Option<rodio::Sample> {
+        if self.pad > 0 {
+            self.pad -= 1;
+            self.phase = (self.phase + 1) % self.channels;
+            return Some(0.0);
+        }
         let speed = f32::from_bits(self.shared.speed.load(Ordering::Relaxed)) as f64;
         let pitch = f32::from_bits(self.shared.pitch.load(Ordering::Relaxed));
-        if (speed - 1.0).abs() < 1e-4 && pitch == 0.0 {
-            if self.stretching {
+        let full = (speed - 1.0).abs() < 1e-4 && pitch == 0.0;
+        // Only between frames: the stretcher reads whole frames, so switching mid-frame
+        // would swap left and right from then on.
+        if self.phase == 0 && full == self.stretching {
+            self.stretching = !full;
+            self.restart();
+            if full {
                 // Back to full speed: what the stretcher held back is dropped.
-                self.stretching = false;
-                self.restart();
                 self.shared.delay.store(0, Ordering::Relaxed);
             }
-            return self.inner.next();
         }
-        if !self.stretching {
-            self.stretching = true;
-            self.restart();
-        }
+        let v = if self.stretching { self.stretched(speed, pitch) } else { self.inner.next() }?;
+        self.phase = (self.phase + 1) % self.channels;
+        Some(v)
+    }
+}
+
+impl<S: Source> Stretched<S> {
+    /// The next sample out of the stretcher.
+    fn stretched(&mut self, speed: f64, pitch: f32) -> Option<rodio::Sample> {
         if pitch != self.transposed {
             self.stretch.set_transpose_factor_semitones(pitch, None);
             self.transposed = pitch;
@@ -392,6 +410,10 @@ impl<S: Source> Source for Stretched<S> {
         self.inner.try_seek(at)?;
         if self.stretching {
             self.restart();
+            // rodio's player seeks every 441 samples of 44.1 kHz stereo, so it can cut
+            // between a frame's left and right. The stretcher starts on a left: the rest of
+            // the cut frame is silence, or left and right would swap from here on.
+            self.pad = (self.channels - self.phase) % self.channels;
         }
         Ok(())
     }
@@ -497,7 +519,9 @@ impl<S: Source> Source for Equalized<S> {
     fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
         self.inner.try_seek(at)?;
         self.states.iter_mut().for_each(|s| *s = Default::default());
-        (self.channel, self.until) = (0, 0);
+        // The channel carries on: a seek can come between a frame's left and right, and
+        // what follows still starts where the frame left off.
+        self.until = 0;
         Ok(())
     }
 }
@@ -1426,6 +1450,56 @@ mod tests {
         song.try_seek(Duration::ZERO).unwrap();
         assert_eq!(song.next(), Some(0.0));
         assert_eq!(shared.delay.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn going_back_to_full_speed_mid_frame_keeps_left_and_right() {
+        let shared = Arc::new(Shared::default());
+        shared.speed.store(0.5f32.to_bits(), Ordering::Relaxed);
+        // Left 0.5, right -0.5.
+        let samples: Vec<rodio::Sample> = (0..8000).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let stereo =
+            rodio::buffer::SamplesBuffer::new(ChannelCount::new(2).unwrap(), SampleRate::new(1000).unwrap(), samples);
+        let mut song = Stretched::new(stereo, shared.clone());
+        // Stop on a left sample, then go back to full speed.
+        let heard = song.by_ref().take(3001).count();
+        shared.speed.store(1.0f32.to_bits(), Ordering::Relaxed);
+        for (i, v) in song.take(100).enumerate() {
+            if (heard + i) % 2 == 1 && shared.delay.load(Ordering::Relaxed) == 0 {
+                assert_eq!(v, -0.5, "sample {} is the wrong channel", heard + i);
+            }
+        }
+    }
+
+    /// Seconds of stereo at 44.1 kHz: a tone on the left, silence on the right.
+    fn left_only(seconds: usize) -> rodio::buffer::SamplesBuffer {
+        let tone = |i: usize| 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin();
+        let samples: Vec<rodio::Sample> =
+            (0..44_100 * 2 * seconds).map(|i| if i % 2 == 0 { tone(i / 2) } else { 0.0 }).collect();
+        rodio::buffer::SamplesBuffer::new(ChannelCount::new(2).unwrap(), SampleRate::new(44_100).unwrap(), samples)
+    }
+
+    #[test]
+    fn a_seek_between_left_and_right_keeps_them_apart_while_slowed() {
+        // rodio's player takes a seek every 441 samples of 44.1 kHz stereo, so every other
+        // one lands between a frame's left and right. The stretcher then started on a
+        // left where a right was due, and left and right stayed swapped (Tim, 2026-11-10).
+        // At full speed samples pass through, and the decoder keeps the channel itself.
+        let cases = [(0.8f32, 0.0f32), (1.0, 2.0), (1.0, 0.0)];
+        for ((speed, pitch), before) in cases.into_iter().flat_map(|c| [(c, 20_000), (c, 20_001)]) {
+            let shared = Arc::new(Shared::default());
+            shared.speed.store(speed.to_bits(), Ordering::Relaxed);
+            shared.pitch.store(pitch.to_bits(), Ordering::Relaxed);
+            let mut song = Stretched::new(left_only(4), shared.clone());
+            let heard = song.by_ref().take(before).count();
+            song.try_seek(Duration::from_secs(1)).unwrap();
+            let (mut left, mut right) = (0.0, 0.0);
+            // Past the stretcher's start-up, where the left and right are told apart.
+            for (i, v) in song.take(40_000).enumerate().skip(10_000) {
+                if (heard + i) % 2 == 0 { left += v * v } else { right += v * v }
+            }
+            assert!(left > 100.0 * right, "at {speed} and {pitch} st after {before}: left {left}, right {right}");
+        }
     }
 
     #[test]

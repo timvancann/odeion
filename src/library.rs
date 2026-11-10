@@ -164,6 +164,52 @@ pub fn search(tracks: &[Track], query: &str) -> Vec<usize> {
     hits.into_iter().map(|(_, i)| i).collect()
 }
 
+/// A column a playlist's view sorts by, from its header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Column {
+    Title,
+    Artist,
+    Album,
+    Time,
+}
+
+/// How a playlist's view is sorted: by a column, `true` reversed. `None` is the
+/// playlist's own order, the only one its songs can be moved in.
+pub type Sorting = Option<(Column, bool)>;
+
+/// The sorting after a click on `column`'s header: by it, then reversed, then the
+/// playlist's own order again.
+pub fn next_sorting(now: Sorting, column: Column) -> Sorting {
+    match now {
+        Some((c, false)) if c == column => Some((column, true)),
+        Some((c, true)) if c == column => None,
+        _ => Some((column, false)),
+    }
+}
+
+/// `songs` (indices into the sorted `tracks`) by `column`, case and accents aside.
+/// Reversing turns only the column around: ties stay in library order, so an artist's
+/// songs still run album by album, track by track.
+pub fn sort_by(tracks: &[Track], songs: &mut [usize], column: Column, reversed: bool) {
+    let key = |i: usize| {
+        let t = &tracks[i];
+        match column {
+            Column::Title => (fold(&t.title), 0),
+            Column::Artist => (fold(&t.artist), 0),
+            Column::Album => (fold(&t.album), 0),
+            Column::Time => (String::new(), t.seconds.unwrap_or(u64::MAX)),
+        }
+    };
+    let mut keyed: Vec<_> = songs.iter().map(|&i| (key(i), i)).collect();
+    keyed.sort_by(|a, b| {
+        let by = a.0.cmp(&b.0);
+        if reversed { by.reverse() } else { by }.then(a.1.cmp(&b.1))
+    });
+    for (slot, (_, i)) in songs.iter_mut().zip(keyed) {
+        *slot = i;
+    }
+}
+
 /// The songs among `songs` that match `query` (every word somewhere in artist, album or
 /// title), in their own order: searching inside an album, an artist or a playlist.
 pub fn filter(tracks: &[Track], songs: &[usize], query: &str) -> Vec<usize> {
@@ -340,6 +386,44 @@ mod tests {
             disc: None,
             reader: 0,
         }
+    }
+
+    #[test]
+    fn a_playlist_sorts_by_a_column_and_reversing_keeps_ties_in_library_order() {
+        let mut tracks = vec![
+            track("ac/dc", "Highway to Hell", 2, "Girls Got Rhythm"),
+            track("AC/DC", "Back in Black", 1, "Hells Bells"),
+            track("Ártica", "Zero", 1, "beta"),
+            track("AC/DC", "Back in Black", 2, "Shoot to Thrill"),
+        ];
+        tracks[0].seconds = Some(200);
+        tracks[1].seconds = Some(310);
+        tracks[3].seconds = Some(317);
+        sort(&mut tracks);
+        let titles = |songs: &[usize]| songs.iter().map(|&i| tracks[i].title.as_str()).collect::<Vec<_>>();
+        // Added in this order to the playlist.
+        let added = [2, 3, 0, 1];
+        let mut songs = added.to_vec();
+        sort_by(&tracks, &mut songs, Column::Title, false);
+        assert_eq!(titles(&songs), ["beta", "Girls Got Rhythm", "Hells Bells", "Shoot to Thrill"]);
+        // Case and accents aside; an artist's songs by album and track, also reversed.
+        let mut songs = added.to_vec();
+        sort_by(&tracks, &mut songs, Column::Artist, true);
+        assert_eq!(titles(&songs), ["beta", "Hells Bells", "Shoot to Thrill", "Girls Got Rhythm"]);
+        // A song without a length goes last.
+        let mut songs = added.to_vec();
+        sort_by(&tracks, &mut songs, Column::Time, false);
+        assert_eq!(titles(&songs), ["Girls Got Rhythm", "Hells Bells", "Shoot to Thrill", "beta"]);
+    }
+
+    #[test]
+    fn a_header_click_sorts_then_reverses_then_goes_back_to_the_playlists_order() {
+        let mut s = next_sorting(None, Column::Artist);
+        assert_eq!(s, Some((Column::Artist, false)));
+        s = next_sorting(s, Column::Artist);
+        assert_eq!(s, Some((Column::Artist, true)));
+        assert_eq!(next_sorting(s, Column::Title), Some((Column::Title, false)));
+        assert_eq!(next_sorting(s, Column::Artist), None);
     }
 
     #[test]

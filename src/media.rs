@@ -53,11 +53,12 @@ impl Media {
         }
         self.shown = shown;
         self.reported = None;
-        // NSURL wants the space in "Application Support" escaped.
-        let cover = track
-            .cover
-            .as_ref()
-            .map(|c| format!("file://{}", c.display()).replace(' ', "%20"));
+        // NSURL wants the space in "Application Support" escaped; souvlaki on Windows takes
+        // what follows file:// as a plain path, so a space stays a space there.
+        let cover = track.cover.as_ref().map(|c| {
+            let url = format!("file://{}", c.display());
+            if cfg!(target_os = "macos") { url.replace(' ', "%20") } else { url }
+        });
         let _ = self.controls.set_metadata(MediaMetadata {
             title: Some(&track.title),
             artist: Some(&track.artist),

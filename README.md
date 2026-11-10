@@ -22,7 +22,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-PolyForm_Noncommercial-18181b" alt="Licence: PolyForm Noncommercial"></a>
 </p>
 
-<a href="https://youtu.be/_kaOeKP2ras"><img src="docs/demo.gif" alt="Scrolling the library, opening a song in practice mode, a loop playing, then the song's stems with the lead guitar muted"></a>
+<a href="https://youtu.be/_kaOeKP2ras"><img src="docs/demo.gif" alt="Searching the library, opening a song in practice mode, a loop playing, then the song's stems with the lead guitar muted"></a>
 
 <p align="center"><a href="https://youtu.be/_kaOeKP2ras"><b>Watch the five-minute demo</b></a></p>
 

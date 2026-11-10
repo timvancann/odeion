@@ -456,6 +456,9 @@ pub struct Odeion {
     playlists: Playlists,
     /// The playlist shown in the list, by its place.
     playlist_view: Option<usize>,
+    /// How the open playlist is sorted, from its column headers: shown and played in
+    /// that order. Each playlist opens in its own.
+    playlist_sort: library::Sorting,
     /// The playlist picker: the song to add and the highlighted row (the last is "New
     /// playlist…"), with the new playlist's name while it's typed.
     add_to: Option<AddTo>,
@@ -670,6 +673,7 @@ impl Odeion {
             queue_at: None,
             playlists: Playlists::load(&playlists_file()),
             playlist_view: None,
+            playlist_sort: None,
             add_to: None,
             renaming_playlist: None,
             deleting_playlist: false,
@@ -1322,10 +1326,15 @@ impl Odeion {
             // Likewise the artist's, see `render_artist`.
             Some(library::artist(&self.tracks, of))
         } else {
-            // In the playlist's order; songs gone since a rescan aren't listed.
-            self.playlist_view
-                .and_then(|i| self.playlists.get(i))
-                .map(|named| named.songs.iter().filter_map(|p| self.by_path.get(p).copied()).collect())
+            // In the playlist's order, or as its headers sort it; songs gone since a
+            // rescan aren't listed.
+            self.playlist_view.and_then(|i| self.playlists.get(i)).map(|named| {
+                let mut songs: Vec<usize> = named.songs.iter().filter_map(|p| self.by_path.get(p).copied()).collect();
+                if let Some((column, reversed)) = self.playlist_sort {
+                    library::sort_by(&self.tracks, &mut songs, column, reversed);
+                }
+                songs
+            })
         };
         if let Some(songs) = open {
             let songs = library::filter(&self.tracks, &songs, &self.query);
@@ -1480,6 +1489,7 @@ impl Odeion {
     fn session(&self) -> Session {
         Session {
             playing: self.now.as_ref().map(|n| n.path.clone()),
+            list: self.playlist.list().to_vec(),
             selected: self.selected_path(),
             practice: self.practice,
             album: self.album.as_ref().map(|t| t.path.clone()),
@@ -1547,6 +1557,17 @@ impl Odeion {
         self.practice = session.practice;
         self.reindex(session.selected.clone());
         self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+        // The reopened song plays on through the list it was started from.
+        if let Some(path) = self.now.as_ref().map(|n| n.path.clone()) {
+            let row = if self.selected_path().as_ref() == Some(&path) {
+                Some(self.selected)
+            } else {
+                self.rows.iter().position(|r| matches!(r, Row::Track(i) if self.tracks[*i].path == path))
+            };
+            let shown = row.map(|r| self.run_around(r)).unwrap_or_default();
+            let list = Playlist::reopened(session.list.clone(), shown, &path);
+            self.playlist = Playlist::new(list, &path, self.seed());
+        }
         self.saved = session;
     }
 
@@ -1634,6 +1655,12 @@ impl Odeion {
         let t = t();
         let on = self.speed.on;
         let label = if self.training.is_some() { format!("{}% trainer", self.speed.now()) } else { format!("{}%", self.speed.now()) };
+        // What `s` does from here: to full speed, or back to the kept speed.
+        let switch = match (on, self.speed.percent) {
+            (true, kept) => format!("Full speed, again back to {kept}%"),
+            (false, 100) => "Full speed; − slows it down".to_string(),
+            (false, kept) => format!("Back to {kept}%, again full speed"),
+        };
         div()
             .id("speed")
             .flex()
@@ -1652,7 +1679,15 @@ impl Odeion {
                     cx.notify();
                 }),
             )
-            .child(div().px_1().child(ui::icon("gauge", 16., if on { t.accent } else { t.text_dim })))
+            // Full speed and back to the slowed one, as `s` does; the pitch stays.
+            .child(self.tool(
+                "speed-toggle",
+                "gauge",
+                &format!("{switch}; the pitch stays"),
+                Action::Slow,
+                on,
+                cx,
+            ))
             .child(self.tool("slower", "minus", "5% slower, pitch kept", Action::Speed(false), false, cx))
             .child(
                 div()
@@ -1672,7 +1707,7 @@ impl Odeion {
                     .hover(|d| d.bg(rgb(t.hover)))
                     .text_color(rgb(if on { t.accent_text } else { t.text_dim }))
                     .slow_tooltip(self.tip(
-                        format!("Full speed, again back to {}%; the chevron or a right-click for presets and the trainer", self.speed.percent),
+                        format!("{switch}; the chevron or a right-click for presets and the trainer"),
                         &[Action::Slow],
                     ))
                     .child(label)
@@ -2326,19 +2361,22 @@ impl Odeion {
         let Some(track) = self.selected_track().cloned() else {
             return;
         };
-        // The list is the run of songs between the section headers around the
-        // selection; artist rows are part of it.
+        self.playlist = Playlist::new(self.run_around(self.selected), &track.path, self.seed());
+        self.play(track, true);
+    }
+
+    /// The songs in the run of rows between the section headers around `row`: the list
+    /// a song there plays on through. Artist rows are part of it.
+    fn run_around(&self, row: usize) -> Vec<PathBuf> {
         let is_track = |r: &usize| !matches!(self.rows[*r], Row::Header(_));
-        let start = (0..self.selected).rev().take_while(is_track).last().unwrap_or(self.selected);
-        let list = (start..self.rows.len())
+        let start = (0..row).rev().take_while(is_track).last().unwrap_or(row);
+        (start..self.rows.len())
             .take_while(is_track)
             .filter_map(|r| match self.rows[r] {
                 Row::Track(i) => Some(self.tracks[i].path.clone()),
                 Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Playlist(_) => None,
             })
-            .collect();
-        self.playlist = Playlist::new(list, &track.path, self.seed());
-        self.play(track, true);
+            .collect()
     }
 
     /// A fresh shuffle when shuffling, none otherwise.
@@ -2737,6 +2775,11 @@ impl Odeion {
             }
             Action::PlaylistMove(up) => {
                 let (Some(i), Some(song)) = (self.playlist_view, self.selected_path()) else { return };
+                if self.playlist_sort.is_some() {
+                    let how = "songs move in the playlist's own order: click the sorted column until its arrow goes";
+                    self.message = Some((how.into(), false));
+                    return;
+                }
                 if self.playlists.shift(i, &song, up) {
                     self.store_playlists();
                     self.reindex(Some(song));
@@ -3339,8 +3382,10 @@ impl Odeion {
                 times: beats
                     .times
                     .iter()
-                    .map(|t| Duration::from_secs_f64(t.as_secs_f64() + o))
-                    .filter(|t| !t.is_zero())
+                    // A recording that starts later (o < 0) has no beats before it starts.
+                    .map(|t| t.as_secs_f64() + o)
+                    .filter(|&t| t > 0.0)
+                    .map(Duration::from_secs_f64)
                     .collect(),
             })),
             _ => Some(beats),
@@ -4068,8 +4113,9 @@ impl Odeion {
                     })
                     // In a playlist's view a song drags to another place: the row under
                     // the pointer shows a line on the side it lands, and a drop puts it
-                    // in that row's place (`Playlists::place`).
-                    .when(in_playlist, |d| {
+                    // in that row's place (`Playlists::place`). Only in the playlist's
+                    // own order: in a sorted view the line wouldn't say where it lands.
+                    .when(in_playlist && self.playlist_sort.is_none(), |d| {
                         let (song, title) = (track.path.clone(), gpui::SharedString::from(track.title.clone()));
                         d.on_drag(DraggedSong { song, row: ix }, move |_, at, _, cx| {
                             let title = title.clone();
@@ -4201,10 +4247,13 @@ impl Odeion {
                             .justify_end()
                             .gap_1()
                             .when(playing, |d| d.child(ui::icon("music", 14., t().accent)))
-                            .when(in_playlist, |d| {
+                            // Songs move only in the playlist's own order, not a sorted one.
+                            .when(in_playlist && self.playlist_sort.is_none(), |d| {
                                 d.child(listed("playlist-up", "chevron-up", "Move up", Action::PlaylistMove(true)))
                                     .child(listed("playlist-down", "chevron-down", "Move down", Action::PlaylistMove(false)))
-                                    .child(listed("playlist-remove", "x", "Remove from the playlist", Action::PlaylistRemove))
+                            })
+                            .when(in_playlist, |d| {
+                                d.child(listed("playlist-remove", "x", "Remove from the playlist", Action::PlaylistRemove))
                             })
                             // Queued songs show it; others when highlighted or under the
                             // pointer, to click.
@@ -5695,13 +5744,31 @@ impl Odeion {
     fn open_playlist(&mut self, i: usize) {
         (self.practice, self.searching, self.queue_at) = (false, false, None);
         self.set_query(String::new());
-        self.playlist_view = Some(i);
+        (self.playlist_view, self.playlist_sort) = (Some(i), None);
         self.rebuild_rows();
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 
+    /// A click on a column header of the open playlist: sorted by it, reversed, then the
+    /// playlist's own order. The highlighted song stays highlighted.
+    fn sort_view(&mut self, column: library::Column) {
+        let keep = self.selected_path();
+        self.playlist_sort = library::next_sorting(self.playlist_sort, column);
+        self.reindex(keep);
+        self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
+        // A song playing from this playlist goes on in the order now shown.
+        if let Some(now) = self.now.as_ref().map(|n| n.path.clone())
+            && let Some(row) = self.rows.iter().position(|r| matches!(r, Row::Track(i) if self.tracks[*i].path == now))
+        {
+            let shown = self.run_around(row);
+            if self.playlist.same_songs(&shown) {
+                self.playlist = Playlist::new(shown, &now, self.seed());
+            }
+        }
+    }
+
     fn leave_playlist(&mut self) {
-        self.playlist_view = None;
+        (self.playlist_view, self.playlist_sort) = (None, None);
         (self.renaming_playlist, self.deleting_playlist) = (None, false);
     }
 
@@ -6098,6 +6165,54 @@ impl Odeion {
                         .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("Esc back")),
                 ),
         )
+    }
+
+    /// The open playlist's column headers, over its songs and lined up with their
+    /// columns: a click sorts by one, again reverses, a third time back to the playlist's
+    /// own order.
+    fn render_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use library::Column;
+        let t = t();
+        let header = |column: Column, label: &'static str| {
+            let sorted = self.playlist_sort.filter(|(c, _)| *c == column).map(|(_, reversed)| reversed);
+            let tip = match sorted {
+                None => format!("Sort by {}", label.to_lowercase()),
+                Some(false) => "Reverse the order".into(),
+                Some(true) => "Back to the playlist's own order".into(),
+            };
+            div()
+                .id(("column", column as usize))
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .font_family(MONO)
+                .text_xs()
+                .text_color(rgb(if sorted.is_some() { t.text } else { t.text_dim }))
+                .hover(|d| d.text_color(rgb(t.text)))
+                .child(label)
+                .children(sorted.map(|reversed| ui::icon(if reversed { "chevron-down" } else { "chevron-up" }, 12., t.accent)))
+                .slow_tooltip(self.tip(&tip, &[]))
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    odeion.sort_view(column);
+                    cx.notify();
+                }))
+        };
+        // The same widths as a playlist's song row, see `render_row`.
+        div()
+            .w_full()
+            .h(px(24.))
+            .flex_none()
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().w(px(30.)).flex_none())
+            .child(div().flex_1().min_w_0().flex().child(header(Column::Title, "Title")))
+            .child(div().w(relative(0.24)).flex_none().min_w_0().flex().child(header(Column::Artist, "Artist")))
+            .child(div().w(relative(0.24)).flex_none().min_w_0().flex().child(header(Column::Album, "Album")))
+            .child(div().w(px(52.)).flex_none().flex().justify_end().child(header(Column::Time, "Time")))
+            .child(div().w(px(188.)).flex_none())
     }
 
     fn toggle_eq_sheet(&mut self) {
@@ -7851,6 +7966,14 @@ impl Render for Odeion {
                                             .filter(|_| self.album.is_none() && self.artist.is_none())
                                             .and_then(|i| self.render_playlist(i, cx))
                                             .map(|h| h.into_any_element()),
+                                    )
+                                    // Its column headers, once it has songs to sort.
+                                    .when(
+                                        self.playlist_view.is_some()
+                                            && self.album.is_none()
+                                            && self.artist.is_none()
+                                            && self.rows.iter().any(|r| matches!(r, Row::Track(_))),
+                                        |d| d.child(self.render_columns(cx)),
                                     )
                                     .children(self.artist.as_ref().map(|of| self.render_artist(of, cx)))
                                     .child(

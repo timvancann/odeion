@@ -118,7 +118,7 @@ pub enum Action {
     /// Minimise the window, or make it full screen (no menu bar does it for odeion).
     Minimize,
     FullScreen,
-    /// Speed and pitch as recorded, and again back to the song's kept ones.
+    /// Full speed, and again back to the song's kept speed. The pitch stays.
     Slow,
     /// 5% slower (false) or faster (true), from 25 to 110%.
     Speed(bool),
@@ -760,7 +760,7 @@ pub const SHEET: &[Group] = &[
             (", .", "", "", "slower or faster by 5%, 25 to 110%, pitch kept"),
             ("", "k j", "↑ ↓", "pitch up or down a semitone, speed kept"),
             ("", "K J", "⇧↑ ⇧↓", "pitch up or down 5 cents"),
-            ("s", "", "", "speed and pitch as recorded, again back"),
+            ("s", "", "", "full speed, again back to the slowed one"),
             ("t", "", "", "speed trainer: the loop speeds up as it repeats"),
             ("T", "", "", "the trainer's settings"),
             ("- =", "", "", "zoom out or in"),
