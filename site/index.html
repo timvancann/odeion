@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Odeion</title>
+<meta name="description" content="A music player and a practice tool in one, for macOS. Play your own library, then loop the solo, slow it down, mute the guitar and play along.">
+<meta property="og:title" content="Odeion: practice any song">
+<meta property="og:description" content="Loops, slow-down and stems, right in your music player. Free for macOS.">
+<meta property="og:image" content="https://timvancann.github.io/odeion/media/og.png">
+<meta property="og:url" content="https://timvancann.github.io/odeion/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="media/icons/odeion.svg" type="image/svg+xml">
+<style>
+  /* Spacing runs on 4 / 8 / 16 / 24 / 32 / 48 / 64 / 112. */
+  :root {
+    --bg: #0d0e11; --raised: #15161a; --sunk: #1c1e23; --line: rgba(255,255,255,.08);
+    --text: #f4f4f5; --dim: #a1a1aa; --faint: #71717a;
+    --accent: #6fd3e4; --tile: rgba(111,211,228,.12);
+    --button: #2350d6; --button-hover: #2d5ef0;
+    --shadow: 0 24px 64px rgba(0,0,0,.5);
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fafafa; --raised: #ffffff; --sunk: #f1f1f3; --line: rgba(0,0,0,.08);
+      --text: #18181b; --dim: #52525b; --faint: #71717a;
+      --accent: #0e7490; --tile: rgba(14,116,144,.09);
+      --shadow: 0 24px 64px rgba(24,24,27,.14);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 17px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; }
+  img, video, svg { display: block; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { text-decoration-thickness: 2px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+  code { font: .88em/1.5 ui-monospace, "SF Mono", Menlo, monospace; background: var(--sunk);
+         padding: 2px 6px; border-radius: 5px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  /* A link's own mark in front of it, as in kwek and T3 Code. */
+  .fi { display: inline-block; width: 1.05em; height: 1.05em; vertical-align: -.18em; margin-right: .35em;
+        border-radius: 3px; flex: none; }
+  img.fi { box-shadow: 0 0 0 1px var(--line); }
+  .fi.line { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .fi.solid { fill: currentColor; }
+
+  /* nav */
+  nav { display: flex; align-items: center; justify-content: space-between; gap: 24px; height: 88px; }
+  nav .mark img { height: 30px; width: auto; }
+  nav ul { display: flex; align-items: center; gap: 32px; margin: 0; padding: 0; list-style: none; }
+  nav ul a { color: var(--dim); text-decoration: none; font-size: 15px; font-weight: 500; }
+  nav ul a:hover { color: var(--text); }
+
+  /* buttons */
+  .buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; height: 52px;
+         padding: 0 24px; border-radius: 12px; font-weight: 600; font-size: 16px; text-decoration: none;
+         background: var(--button); color: #fff; }
+  .btn:hover { background: var(--button-hover); }
+  .btn.quiet { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+  .btn.quiet:hover { background: var(--sunk); }
+  .btn .fi { width: 18px; height: 18px; margin: 0; vertical-align: 0; }
+  .btn small { font-weight: 500; opacity: .7; font-size: 14px; }
+
+  /* hero */
+  .hero { text-align: center; padding: 64px 0 48px; }
+  h1 { margin: 0 auto; font-size: clamp(46px, 8.4vw, 92px); line-height: 1; font-weight: 800;
+       letter-spacing: -.04em; }
+  h1 em { font-style: normal; color: var(--accent); }
+  .hero .sub { margin: 24px auto 0; max-width: 620px; font-size: 21px; line-height: 1.5; color: var(--dim); }
+  .hero .buttons { margin-top: 40px; }
+  .hero .meta { margin: 16px 0 0; font-size: 14px; color: var(--faint); }
+  .hero .meta a { color: var(--dim); }
+
+  .frame { border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow), 0 0 0 1px var(--line);
+           background: var(--sunk); }
+  .frame > img, .frame > video { width: 100%; height: auto; }
+  .hook { max-width: 1040px; margin: 0 auto; }
+
+  /* sections */
+  section { padding-top: 112px; scroll-margin-top: 24px; }
+  .head { max-width: 640px; margin-bottom: 48px; }
+  .head.center { margin-left: auto; margin-right: auto; text-align: center; }
+  h2 { margin: 0; font-size: clamp(28px, 3.4vw, 34px); line-height: 1.15; font-weight: 700; letter-spacing: -.015em; }
+  .head p { margin: 16px 0 0; font-size: 19px; color: var(--dim); }
+  h3 { margin: 0; font-size: 17px; line-height: 1.4; }
+
+  .split { display: grid; grid-template-columns: 5fr 7fr; gap: 64px; align-items: center; }
+  .split + .split { margin-top: 112px; }
+  .split.flip { grid-template-columns: 7fr 5fr; }
+  .split.flip .copy { order: 2; }
+  .split .head { margin-bottom: 32px; }
+
+  .points { display: grid; gap: 24px; margin: 0; padding: 0; list-style: none; }
+  .points li { display: grid; grid-template-columns: 40px 1fr; gap: 16px; align-items: center; }
+  .points p { margin: 0; color: var(--dim); font-size: 16px; line-height: 1.55; }
+  .tile { width: 40px; height: 40px; border-radius: 10px; background: var(--tile); color: var(--accent);
+          display: grid; place-items: center; }
+  .tile svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2;
+              stroke-linecap: round; stroke-linejoin: round; }
+
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 112px; }
+  .card { background: var(--raised); border-radius: var(--radius); padding: 24px;
+          box-shadow: 0 0 0 1px var(--line); }
+  .card .tile { margin-bottom: 16px; }
+  .card p { margin: 0; color: var(--dim); font-size: 15px; line-height: 1.55; }
+
+  /* demo */
+  .player { position: relative; aspect-ratio: 16 / 9; }
+  .player button.poster { all: unset; position: absolute; inset: 0; cursor: pointer; }
+  .player .poster img { width: 100%; height: 100%; object-fit: cover; }
+  .player .play { position: absolute; left: 50%; top: 50%; width: 88px; height: 62px; margin: -31px 0 0 -44px;
+                  border-radius: 16px; background: rgba(13,14,17,.82); display: grid; place-items: center;
+                  transition: background .15s, transform .15s; }
+  .player .poster:hover .play, .player .poster:focus-visible .play { background: #ff0033; transform: scale(1.05); }
+  .player .play svg { width: 26px; height: 26px; fill: #fff; margin-left: 4px; }
+  .player .poster:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; }
+  .player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .chapters { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 24px 0 0; padding: 0;
+              list-style: none; }
+  .chapters button { all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 2px; width: 100%;
+                     height: 100%; padding: 12px 14px; border-radius: 10px; cursor: pointer;
+                     background: var(--raised); box-shadow: 0 0 0 1px var(--line); font-size: 14px; line-height: 1.35; }
+  .chapters button:hover { background: var(--sunk); }
+  .chapters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .chapters time { font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; color: var(--accent); }
+  .after { margin: 24px 0 0; text-align: center; font-size: 15px; }
+
+  /* install */
+  .install { display: grid; grid-template-columns: 7fr 5fr; gap: 16px; align-items: stretch; }
+  .stack { display: grid; gap: 16px; grid-template-rows: auto 1fr; }
+  /* grid children may shrink below their content (the long Terminal line scrolls instead) */
+  .split > *, .install > *, .stack > *, .cards > * { min-width: 0; }
+  .install .card { padding: 32px; }
+  .install h3 { display: flex; align-items: center; gap: 10px; font-size: 19px; margin-bottom: 24px; }
+  .install h3 .fi { margin: 0; width: 20px; height: 20px; }
+  .install .card > p { margin: 0; font-size: 16px; }
+  ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 20px; }
+  ol.steps li { counter-increment: step; display: grid; grid-template-columns: 28px 1fr; gap: 16px;
+                color: var(--dim); font-size: 16px; }
+  ol.steps li::before { content: counter(step); width: 28px; height: 28px; border-radius: 50%;
+                        background: var(--button); color: #fff; font-weight: 700; font-size: 14px;
+                        display: grid; place-items: center; margin-top: 0; }
+  ol.steps strong { color: var(--text); font-weight: 600; }
+  .note { margin: 24px 0 0 !important; padding-top: 24px; border-top: 1px solid var(--line); font-size: 15px !important; }
+  .cmd { display: flex; gap: 8px; margin-top: 16px; }
+  .cmd code { flex: 1; min-width: 0; padding: 12px 14px;
+              border-radius: 10px; font-size: 13px; }
+  .cmd button { all: unset; display: inline-flex; align-items: center; gap: 6px; padding: 0 14px;
+                border-radius: 10px; background: var(--sunk); font-size: 14px; font-weight: 500; cursor: pointer; }
+  .cmd button:hover { box-shadow: inset 0 0 0 1px var(--line); }
+  .cmd button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .cmd button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2;
+                    stroke-linecap: round; stroke-linejoin: round; }
+
+  footer { margin-top: 64px; padding: 32px 0 48px; border-top: 1px solid var(--line); font-size: 14px;
+           color: var(--faint); display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: space-between;
+           align-items: center; }
+  footer p { margin: 0; }
+  footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 0; padding: 0; list-style: none; }
+  footer a { color: var(--dim); text-decoration: none; }
+  footer a:hover { color: var(--text); }
+
+  @media (max-width: 960px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .chapters { grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 820px) {
+    nav ul li.page { display: none; }
+    .split, .split.flip, .install { grid-template-columns: 1fr; gap: 40px; }
+    .split.flip .copy { order: 0; }
+    .split + .split, .cards { margin-top: 80px; }
+    section { padding-top: 80px; }
+    .install { gap: 16px; }
+  }
+  @media (max-width: 520px) {
+    .wrap { padding: 0 16px; }
+    nav { height: 72px; }
+    nav .mark img { height: 26px; }
+    .hero { padding: 32px 0 40px; }
+    .hero .sub { font-size: 18px; }
+    .buttons { flex-direction: column; }
+    .btn { width: 100%; }
+    .cards { grid-template-columns: 1fr; }
+    .chapters { grid-template-columns: repeat(2, 1fr); }
+    .install .card { padding: 24px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Icons: Lucide (ISC) and Odeion's own from assets/icons, plus the sites' own marks. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-apple" viewBox="0 0 24 24"><path d="M16.37 12.6c-.02-2.2 1.8-3.26 1.88-3.31-1.03-1.5-2.62-1.7-3.18-1.73-1.35-.14-2.64.8-3.33.8-.69 0-1.74-.78-2.87-.76-1.47.02-2.83.86-3.59 2.18-1.53 2.66-.39 6.59 1.1 8.75.73 1.05 1.59 2.24 2.72 2.2 1.1-.05 1.51-.71 2.83-.71 1.32 0 1.69.71 2.85.69 1.18-.02 1.92-1.07 2.64-2.13.83-1.22 1.17-2.4 1.19-2.46-.03-.01-2.27-.87-2.29-3.45zM14.2 6.13c.6-.73 1.01-1.75.9-2.76-.87.04-1.92.58-2.54 1.31-.56.65-1.05 1.68-.92 2.67.97.08 1.96-.49 2.56-1.22z"/></symbol>
+  <symbol id="i-windows" viewBox="0 0 24 24"><path d="M3 5.5 10.5 4.5v7H3zM11.5 4.35 21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zM11.5 12.5H21V21l-9.5-1.35z"/></symbol>
+  <symbol id="i-github" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></symbol>
+  <symbol id="i-youtube" viewBox="0 0 24 24"><rect x="1" y="4.5" width="22" height="15" rx="4.5" fill="#ff0033"/><path d="M9.75 8.6v6.8L15.6 12z" fill="#fff"/></symbol>
+  <symbol id="i-wikipedia" viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#f4f4f5"/><text x="12" y="17.6" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="16" fill="#18181b">W</text></symbol>
+  <symbol id="i-scale" viewBox="0 0 24 24"><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1ZM2 16l3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1ZM7 21h10M12 3v18M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/></symbol>
+  <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M19 12l-7 7-7-7"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+  <symbol id="i-headphones" viewBox="0 0 24 24"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></symbol>
+  <symbol id="i-list-music" viewBox="0 0 24 24"><path d="M21 15V6M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM12 12H3M16 6H3M12 18H3"/></symbol>
+  <symbol id="i-loop" viewBox="0 0 24 24"><path d="M7 5H4v14h3M10 7l9 5-9 5z"/></symbol>
+  <symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
+  <symbol id="i-trending-up" viewBox="0 0 24 24"><path d="M16 7h6v6M22 7l-8.5 8.5-5-5L2 17"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></symbol>
+  <symbol id="i-beats" viewBox="0 0 24 24"><path d="M4 4l2 3 2-3M10 4l2 3 2-3M16 4l2 3 2-3M4 20l2-3 2 3M10 20l2-3 2 3M16 20l2-3 2 3M6 10v4M12 10v4M18 10v4"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><path d="M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.33 2q2 0 3.07-.8A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2a6 6 0 0 0-4 1.53"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><path d="M10 8h.01M12 12h.01M14 8h.01M16 12h.01M18 8h.01M6 8h.01M7 16h10M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+  <symbol id="i-volume-x" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5zM22 9l-6 6M16 9l6 6"/></symbol>
+  <symbol id="i-disc" viewBox="0 0 24 24"><path d="M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0zM14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM6 12a6 6 0 0 1 6-6"/></symbol>
+  <symbol id="i-play"viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></symbol>
+</svg>
+
+<div class="wrap">
+
+<nav aria-label="Main">
+  <a class="mark" href="./">
+    <picture>
+      <source media="(prefers-color-scheme: light)" srcset="media/wordmark-on-light.svg">
+      <img src="media/wordmark-on-dark.svg" width="128" height="30" alt="Odeion">
+    </picture>
+  </a>
+  <ul>
+    <li class="page"><a href="#features">Features</a></li>
+    <li class="page"><a href="#demo">Demo</a></li>
+    <li class="page"><a href="#install">Install</a></li>
+    <li><a href="https://github.com/timvancann/odeion"><svg class="fi solid"><use href="#i-github"/></svg>GitHub</a></li>
+  </ul>
+</nav>
+
+<header class="hero">
+  <h1>Practice <em>any song</em></h1>
+  <p class="sub">A music player and a practice tool in one. Listen to your own library, or
+     loop the solo, slow it down, mute the guitar and play along.</p>
+  <div class="buttons">
+    <a class="btn" href="https://github.com/timvancann/odeion/releases/latest/download/Odeion-macOS.zip">
+      <svg class="fi solid"><use href="#i-apple"/></svg>Download for macOS
+    </a>
+    <a class="btn quiet" href="https://github.com/timvancann/odeion/releases/latest/download/Odeion-Windows.zip">
+      <svg class="fi solid"><use href="#i-windows"/></svg>Windows <small>trial</small>
+    </a>
+  </div>
+  <p class="meta">Free for noncommercial use. macOS 13 or later, Apple silicon and Intel.
+     <a href="#install"><svg class="fi line"><use href="#i-arrow-down"/></svg>Blocked by macOS?</a></p>
+</header>
+
+<div class="hook frame">
+  <video id="hook" autoplay muted loop playsinline preload="auto" width="1600" height="1144"
+         poster="media/demo-poster.jpg"
+         aria-label="Searching the library, opening a song in practice mode, a loop playing, then the song's stems with the lead guitar muted">
+    <source src="media/demo.mp4" type="video/mp4">
+  </video>
+</div>
+
+<section id="features">
+  <div class="split">
+    <div class="copy">
+      <div class="head">
+        <h2>Listen</h2>
+        <p>Odeion plays the music folder you already have. Your songs stay where they are;
+           it never writes next to them.</p>
+      </div>
+      <ul class="points">
+        <li><span class="tile"><svg><use href="#i-folder"/></svg></span>
+            <p>Opens instantly, even with thousands of songs.</p></li>
+        <li><span class="tile"><svg><use href="#i-search"/></svg></span>
+            <p>Search as you type, or browse albums, artists and favourites.</p></li>
+        <li><span class="tile"><svg><use href="#i-list-music"/></svg></span>
+            <p>A queue, playlists and a 10-band EQ.</p></li>
+      </ul>
+    </div>
+    <div class="frame"><img src="media/library.webp" width="1600" height="1256" loading="lazy"
+         alt="The library, songs grouped under their artists"></div>
+  </div>
+
+  <div class="split flip">
+    <div class="copy">
+      <div class="head">
+        <h2>Practise</h2>
+        <p>Press Tab on a song and the list makes way for its waveform.</p>
+      </div>
+      <ul class="points">
+        <li><span class="tile"><svg><use href="#i-loop"/></svg></span>
+            <p>Drag across the waveform to loop a part. Loops are gapless and snap to the beats,
+               even on old records that drift.</p></li>
+        <li><span class="tile"><svg><use href="#i-gauge"/></svg></span>
+            <p>Slow down or change key, one without the other. The speed trainer brings the
+               loop up to speed a few percent at a time.</p></li>
+        <li><span class="tile"><svg><use href="#i-volume-x"/></svg></span>
+            <p>Drop in stems from <a href="https://moises.ai"><img class="fi" src="media/icons/moises.svg" alt="">Moises</a>
+               or any other splitter and Odeion lines them up. Mute or solo each with one key.</p></li>
+        <li><span class="tile"><svg><use href="#i-flag"/></svg></span>
+            <p>Name sections and drop a marker. Every song comes back as you left it.</p></li>
+      </ul>
+    </div>
+    <div class="frame"><img src="media/stems.webp" width="1600" height="1256" loading="lazy"
+         alt="A song in practice mode with its stems, one lane each"></div>
+  </div>
+
+  <div class="cards">
+    <div class="card"><span class="tile"><svg><use href="#i-keyboard"/></svg></span>
+      <p>Keyboard first, with Mac or Vim keys. Every key is also a button, and <code>⌘?</code> lists them.</p></div>
+    <div class="card"><span class="tile"><svg><use href="#i-lock"/></svg></span>
+      <p>No account. Odeion only goes online when you ask it to check for updates.</p></div>
+    <div class="card"><span class="tile"><svg><use href="#i-layers"/></svg></span>
+      <p>Keep a backing track or a live version next to a song and switch between them.</p></div>
+    <div class="card"><span class="tile"><svg><use href="#i-disc"/></svg></span>
+      <p>Plays mp3, flac, wav, aiff, m4a and ogg.</p></div>
+  </div>
+</section>
+
+<section id="demo">
+  <div class="head center">
+    <h2>Demo</h2>
+    <p>Five minutes, from adding a music folder to muting the guitar. Click a chapter to
+       start there.</p>
+  </div>
+  <div class="frame player" id="player">
+    <button class="poster" type="button" data-start="0" aria-label="Play the demo video">
+      <img src="media/og.png" width="1280" height="720" loading="lazy" alt="">
+      <span class="play"><svg><use href="#i-play"/></svg></span>
+    </button>
+  </div>
+  <ol class="chapters">
+    <li><button type="button" data-start="0"><time>0:00</time>Intro</button></li>
+    <li><button type="button" data-start="31"><time>0:31</time>Setting up</button></li>
+    <li><button type="button" data-start="45"><time>0:45</time>Navigation</button></li>
+    <li><button type="button" data-start="81"><time>1:21</time>Collections</button></li>
+    <li><button type="button" data-start="126"><time>2:06</time>Basic looping</button></li>
+    <li><button type="button" data-start="148"><time>2:28</time>Practice mode</button></li>
+    <li><button type="button" data-start="178"><time>2:58</time>Sections</button></li>
+    <li><button type="button" data-start="212"><time>3:32</time>Pitch and speed trainer</button></li>
+    <li><button type="button" data-start="233"><time>3:53</time>Stems</button></li>
+    <li><button type="button" data-start="282"><time>4:42</time>Variations</button></li>
+  </ol>
+  <p class="after"><a href="https://youtu.be/_kaOeKP2ras"><svg class="fi"><use href="#i-youtube"/></svg>Watch on YouTube</a></p>
+</section>
+
+<section id="install">
+  <div class="head">
+    <h2>Installing</h2>
+    <p>Apple charges 99 dollars a year to notarize an app, and Odeion is a free hobby
+       project, so macOS blocks it the first time you open it. You only have to allow it once.</p>
+  </div>
+
+  <div class="install">
+    <div class="card">
+      <h3><svg class="fi solid"><use href="#i-apple"/></svg>macOS 15 and later</h3>
+      <ol class="steps">
+        <li><div><strong>Download and unzip.</strong> Safari unzips on its own. Drag Odeion
+            into Applications.</div></li>
+        <li><div><strong>Open Odeion.</strong> macOS says it can't check the app. Click Done.</div></li>
+        <li><div><strong>Open System Settings, Privacy &amp; Security.</strong> Scroll down to
+            "Odeion was blocked", click Open Anyway and confirm with your password or Touch ID.</div></li>
+        <li><div><strong>Click Open Anyway once more.</strong> After that it just opens.</div></li>
+      </ol>
+      <p class="note">On macOS 13 and 14 it's quicker: right-click Odeion in Applications,
+         choose Open, then Open again.</p>
+    </div>
+
+    <div class="stack">
+      <div class="card">
+        <h3><svg class="fi line"><use href="#i-terminal"/></svg>Terminal</h3>
+        <p>Or skip the clicking. Once Odeion is in Applications, run:</p>
+        <div class="cmd">
+          <code id="xattr">xattr -dr com.apple.quarantine /Applications/Odeion.app</code>
+          <button type="button" data-copy="xattr"><svg><use href="#i-copy"/></svg><span>Copy</span></button>
+        </div>
+      </div>
+      <div class="card">
+        <h3><svg class="fi solid"><use href="#i-windows"/></svg>Windows</h3>
+        <p>Unzip and run <code>odeion.exe</code>. When Windows says it protected your PC, click
+           More info, then Run anyway. Ctrl does what ⌘ does on a Mac.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="why">
+  <div class="head">
+    <h2>Why</h2>
+    <p>I learned songs with <a href="https://www.seventhstring.com">Transcribe!</a> for years,
+       but finding a file in it is painful. Odeion started as a way to find songs for it, and
+       grew until it did everything I used Transcribe! for. Keeping backing tracks and stems
+       next to the original is an idea from Moises. The source is on
+       <a href="https://github.com/timvancann/odeion"><svg class="fi solid"><use href="#i-github"/></svg>GitHub</a>,
+       free for noncommercial use.</p>
+  </div>
+</section>
+
+<footer>
+  <p>Named after the <a href="https://en.wikipedia.org/wiki/Odeon_(building)"><svg class="fi"><use href="#i-wikipedia"/></svg>odeion</a>,
+     the small concert hall of ancient Greece.</p>
+  <ul>
+    <li><a href="https://github.com/timvancann/odeion/releases"><svg class="fi solid"><use href="#i-github"/></svg>All releases</a></li>
+    <li><a href="https://github.com/timvancann/odeion/blob/main/LICENSE"><svg class="fi line"><use href="#i-scale"/></svg>PolyForm Noncommercial</a></li>
+    <li><a href="https://youtu.be/_kaOeKP2ras"><svg class="fi"><use href="#i-youtube"/></svg>Demo video</a></li>
+  </ul>
+</footer>
+
+</div>
+
+<script>
+  // The demo loads YouTube only once someone asks for it, at the chapter they picked.
+  var player = document.getElementById("player");
+  function play(start) {
+    // YouTube won't play an embed without knowing the site it's on (error 153), which a
+    // page opened from disk can't tell it: go to YouTube itself instead.
+    if (location.protocol === "file:") {
+      window.open("https://www.youtube.com/watch?v=_kaOeKP2ras&t=" + start + "s", "_blank", "noopener");
+      return;
+    }
+    var frame = player.querySelector("iframe");
+    var src = "https://www.youtube-nocookie.com/embed/_kaOeKP2ras?autoplay=1&rel=0&start=" + start;
+    if (!frame) {
+      frame = document.createElement("iframe");
+      frame.title = "Odeion demo";
+      frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+      frame.referrerPolicy = "strict-origin-when-cross-origin";
+      frame.allowFullscreen = true;
+      player.replaceChildren(frame);
+    }
+    frame.src = src;
+  }
+  document.querySelectorAll("[data-start]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      play(b.dataset.start);
+      if (b.closest(".chapters")) player.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  });
+
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var label = b.querySelector("span"), icon = b.querySelector("use");
+      navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent).then(function () {
+        label.textContent = "Copied"; icon.setAttribute("href", "#i-check");
+        setTimeout(function () { label.textContent = "Copy"; icon.setAttribute("href", "#i-copy"); }, 1500);
+      });
+    });
+  });
+
+  // Moving pictures only for people who haven't asked for less motion.
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    var hook = document.getElementById("hook");
+    hook.removeAttribute("autoplay"); hook.pause(); hook.controls = true;
+  }
+</script>
+</body>
+</html>
