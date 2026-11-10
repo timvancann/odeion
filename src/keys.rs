@@ -152,7 +152,8 @@ pub enum Action {
     QueueTop,
     /// In the queue: remove the highlighted song.
     QueueRemove,
-    /// The list in columns or grouped by artist; the title bar's switch, no key yet.
+    /// The list in columns or grouped (by artist; an artist's songs by album); the title
+    /// bar's switch, no key yet.
     ListView,
     /// The EQ sheet open or closed.
     EqSheet,
@@ -177,6 +178,8 @@ pub enum Action {
     /// on. No key.
     RenamePlaylist,
     DeletePlaylist,
+    /// Sort the open playlist, or the one a menu was opened on, once. No key.
+    SortPlaylist(crate::playlists::SortBy),
 }
 
 /// A key as GPUI reports it: `key` is the character or a name like "left", with shift
@@ -618,13 +621,18 @@ pub fn shown(cap: &'static str) -> &'static str {
 pub type Line = (&'static str, &'static str, &'static str, &'static str);
 
 /// The keycaps a line shows with `keyboard`: the shared ones, then the keyboard's own.
+/// Off the Mac the ⌃ keys are left out: Control is the command key there and can't be
+/// pressed as a second one (`command_keys`), so the sheet said "Ctrl+Ctrl+F".
 pub fn caps(line: Line, keyboard: Keyboard) -> impl Iterator<Item = &'static str> {
     let (shared, vim, mac, _) = line;
     let own = match keyboard {
         Keyboard::Vim => vim,
         Keyboard::Mac => mac,
     };
-    shared.split_whitespace().chain(own.split_whitespace())
+    shared
+        .split_whitespace()
+        .chain(own.split_whitespace())
+        .filter(|cap| cfg!(target_os = "macos") || !cap.contains('⌃'))
 }
 
 /// A group of lines on the ⌘? sheet, and the modes whose sheet shows it.
@@ -881,21 +889,29 @@ mod tests {
 
     #[test]
     fn tooltips_find_every_key_for_an_action_in_the_mode() {
-        assert_eq!(keys_for(Action::Previous, Library, Vim), ["⌘←", "H"]);
-        assert_eq!(keys_for(Action::Previous, Library, Mac), ["⌘←"]);
-        assert_eq!(keys_for(Action::Previous, Practice, Vim), ["⌘←"]);
+        // Written as on a Mac; elsewhere tooltips spell them out (`shown`).
+        let on = |keys: &[&'static str]| keys.iter().map(|&k| shown(k)).collect::<Vec<_>>();
+        assert_eq!(keys_for(Action::Previous, Library, Vim), on(&["⌘←", "H"]));
+        assert_eq!(keys_for(Action::Previous, Library, Mac), on(&["⌘←"]));
+        assert_eq!(keys_for(Action::Previous, Practice, Vim), on(&["⌘←"]));
         assert_eq!(keys_for(Action::Toggle, Library, Mac), ["Space"]);
-        assert_eq!(keys_for(Action::FullScreen, Search, Mac), ["⌃⌘F"]);
         assert_eq!(keys_for(Action::Practice, Library, Mac), ["Tab"]);
         assert_eq!(keys_for(Action::Practice, Library, Vim), ["Tab", "p"]);
         assert_eq!(keys_for(Action::Practice, Practice, Vim), ["Esc", "Tab", "p"]);
         assert_eq!(keys_for(Action::RemoveRegion, Practice, Vim), ["dd"]);
         assert!(keys_for(Action::RemoveRegion, Practice, Mac).is_empty());
-        assert_eq!(keys_for(Action::LoopSwitch, Practice, Mac), ["\\", "⌥⌘L", "l"]);
-        assert_eq!(keys_for(Action::Search, Library, Mac), ["⌘P"]);
-        assert_eq!(keys_for(Action::Find, Library, Vim), ["⌘F"]);
+        assert_eq!(keys_for(Action::LoopSwitch, Practice, Mac), on(&["\\", "⌥⌘L", "l"]));
+        assert_eq!(keys_for(Action::Search, Library, Mac), on(&["⌘P"]));
+        assert_eq!(keys_for(Action::Find, Library, Vim), on(&["⌘F"]));
         assert!(keys_for(Action::LoopStart, Library, Vim).is_empty());
-        assert!(keys_for(Action::Quit, Practice, Mac).contains(&"⌘Q"));
+        assert!(keys_for(Action::Quit, Practice, Mac).contains(&shown("⌘Q")));
+        // ⌃ keys only on the Mac (`caps`).
+        let full = keys_for(Action::FullScreen, Search, Mac);
+        if cfg!(target_os = "macos") {
+            assert_eq!(full, ["⌃⌘F"]);
+        } else {
+            assert!(full.is_empty(), "{full:?}");
+        }
     }
 
     #[test]

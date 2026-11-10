@@ -289,10 +289,7 @@ fn thumbnail(data: &[u8], covers: &Path) -> Option<PathBuf> {
 /// The cached library. A cover is a file in `covers/` beside it, named by its content; one
 /// kept under another folder (a data folder moved or renamed) is found there again.
 pub fn load_cache(path: &Path) -> Vec<Track> {
-    let mut tracks: Vec<Track> = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let mut tracks: Vec<Track> = crate::state::load_json(path);
     let covers = path.with_file_name("covers");
     for track in &mut tracks {
         if let Some(cover) = &track.cover

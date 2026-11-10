@@ -81,8 +81,8 @@ impl Beats {
 }
 
 /// The detector's version. Raise it when detection changes, and every song's beats are
-/// found again rather than read from the cache.
-const DETECTOR: u32 = 1;
+/// found again rather than read from the cache. 2: MP3s read gapless (`wave::open`).
+const DETECTOR: u32 = 2;
 
 /// A song's beats as cached: valid while the file and the detector are unchanged.
 #[derive(Serialize, Deserialize)]

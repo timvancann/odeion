@@ -179,11 +179,19 @@ fn shifted(at: Duration, by: f64) -> Duration {
 
 type Song = Mix<Decoder<BufReader<File>>>;
 
+/// How long a stem takes to reach a new level, from full to silent at the most. A mute or
+/// solo from one sample to the next clicks, and dragging a level makes a zipper noise.
+const GLIDE: f32 = 0.010;
+
 /// Several recordings played as one, sample by sample: a stem set summed, each at its
-/// own gain, read live so muting a stem is instant. A single file is a mix of one.
+/// own gain, read live so muting a stem starts at once, gliding there over `GLIDE`. A
+/// single file is a mix of one.
 pub(crate) struct Mix<S> {
     stems: Vec<S>,
     gains: Arc<Vec<AtomicU32>>,
+    /// Each stem's level as heard, moving toward its gain by `step` a sample.
+    heard: Vec<f32>,
+    step: f32,
 }
 
 impl<S: Source> Mix<S> {
@@ -193,7 +201,9 @@ impl<S: Source> Mix<S> {
         if stems.iter().any(|s| s.channels() != channels || s.sample_rate() != rate) {
             return Err("the stems differ in channels or sample rate".into());
         }
-        Ok(Mix { stems, gains })
+        let heard = gains.iter().map(|g| f32::from_bits(g.load(Ordering::Relaxed))).collect();
+        let step = 1.0 / (GLIDE * rate.get() as f32 * channels.get() as f32);
+        Ok(Mix { stems, gains, heard, step })
     }
 }
 
@@ -203,10 +213,13 @@ impl<S: Source> Iterator for Mix<S> {
     fn next(&mut self) -> Option<rodio::Sample> {
         let mut sum = 0.0;
         let mut any = false;
-        for (stem, gain) in self.stems.iter_mut().zip(self.gains.iter()) {
+        let step = self.step;
+        for ((stem, gain), heard) in self.stems.iter_mut().zip(self.gains.iter()).zip(self.heard.iter_mut()) {
+            let want = f32::from_bits(gain.load(Ordering::Relaxed));
+            *heard = if (want - *heard).abs() <= step { want } else { *heard + step.copysign(want - *heard) };
             // A stem that ends early is silence from there on.
             if let Some(v) = stem.next() {
-                sum += v * f32::from_bits(gain.load(Ordering::Relaxed));
+                sum += v * *heard;
                 any = true;
             }
         }
@@ -1331,12 +1344,29 @@ mod tests {
         // Frame 2 (both channels): 2 + 0.5 * 2.
         let first: Vec<rodio::Sample> = mix.by_ref().take(6).collect();
         assert_eq!(first[4], 3.0);
-        // Muted from here on; the second stem ends after frame 3 anyway.
+        // Muted from here on, gliding out (`a_muted_stem_glides_out`); the second stem ends
+        // after frame 3 anyway.
         g[1].store(0.0f32.to_bits(), Ordering::Relaxed);
-        assert_eq!(mix.next(), Some(3.0));
+        // Frame 3: 3 + 3 * (0.5 - 0.05), the second stem's level one step down.
+        let muting = mix.next().unwrap();
+        assert!((muting - 4.35).abs() < 1e-5, "{muting}");
         let rest: Vec<rodio::Sample> = mix.collect();
         assert_eq!(rest.len(), 2 * 10 - 7);
         assert_eq!(rest.last(), Some(&9.0));
+    }
+
+    #[test]
+    fn a_muted_stem_glides_out() {
+        let g = gains(&[0.0, 1.0]);
+        let mut mix =
+            Mix::new(vec![Counting { at: 0, frames: 100 }, Counting { at: 0, frames: 100 }], g.clone()).unwrap();
+        mix.try_seek(Duration::from_millis(50)).unwrap();
+        g[1].store(0.0f32.to_bits(), Ordering::Relaxed);
+        let out: Vec<rodio::Sample> = mix.take(30).collect();
+        // 1000 frames a second in two channels: 10 ms is 20 samples, 0.05 lower each.
+        assert!((out[0] - 50.0 * 0.95).abs() < 1e-3, "{}", out[0]);
+        assert!(out[..20].windows(2).all(|w| w[1] < w[0]), "{out:?}");
+        assert!(out[20..].iter().all(|&v| v == 0.0), "{out:?}");
     }
 
     #[test]

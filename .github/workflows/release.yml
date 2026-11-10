@@ -113,8 +113,17 @@ jobs:
             mac="**macOS:** download Odeion-macOS.zip, unzip it and drag Odeion into Applications. This build isn't notarized by Apple, so macOS blocks it the first time: open it once, then go to System Settings, Privacy & Security, and click Open Anyway. Or run \`xattr -dr com.apple.quarantine /Applications/Odeion.app\` in Terminal."
           fi
           windows="**Windows (trial):** download Odeion-Windows.zip, unzip it and run odeion.exe. Windows warns about an unknown publisher the first time: click More info, then Run anyway."
+          # What changed: CHANGELOG.md's section headed with this version ("## 0.3.0 ..."),
+          # up to the next heading, without its leading blank lines.
+          changes="$(awk -v v="$VERSION" '/^## / { if (found) exit; if ($2 == v) { found = 1; next } } found' CHANGELOG.md | sed '/./,$!d')"
+          if [ -z "$changes" ]; then
+            echo "::warning::CHANGELOG.md has no section for $VERSION: the release notes only say how to install."
+            notes="$mac"$'\n\n'"$windows"
+          else
+            notes="$changes"$'\n\n'"$mac"$'\n\n'"$windows"
+          fi
           gh release create "$GITHUB_REF_NAME" "$zip" Odeion-macOS.zip --title "Odeion $VERSION" \
-            --notes "$mac"$'\n\n'"$windows" --generate-notes
+            --notes "$notes" --generate-notes
 
   # The Windows build (a trial), added to the release the job above made. No signing
   # secrets here; the build cache is read-only, written by ci.yml's windows job on main.

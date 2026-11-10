@@ -49,8 +49,8 @@ jobs:
       - run: cargo build --release --target aarch64-apple-darwin
       - run: cargo build --release --target x86_64-apple-darwin
 
-  # Windows is a trial (2026-11-08): it builds odeion.exe to try, warnings allowed, and
-  # its tests don't fail the run yet.
+  # Windows is a trial (2026-11-08): it builds odeion.exe to try, warnings allowed. Its
+  # tests fail the run since 2026-11-10: left to pass quietly, one had failed unseen.
   windows:
     runs-on: windows-latest
     steps:
@@ -69,4 +69,3 @@ jobs:
           name: odeion-windows
           path: target/release/odeion.exe
       - run: cargo test
-        continue-on-error: true

@@ -30,6 +30,10 @@ too:
   acknowledgements, no keymap (the ⌘? sheet is the reference). A feature that changes
   what Odeion does updates the README in the same commit, and a new dependency or
   borrowed algorithm gets a line in its acknowledgements.
+- `CHANGELOG.md` is the release notes (`release.yml` publishes the tag's section). Every
+  change a user would notice gets a line under `## Unreleased` in the same commit, in
+  the user's words: what they can do now or what no longer goes wrong, never the code.
+  New and Fixed apart. `docs/releasing.md` renames the section when releasing.
 - Screenshots in `docs/screenshots/` (`library.png`, `stems.png`) are Tim's to take.
 - Bundled assets need a licence that allows it, with the licence file beside them
   (the fonts' OFL; Lucide's ISC for the icons).
@@ -81,6 +85,8 @@ and draws:
   placed by packet timestamps, with a second of decoder warm-up), summarised to one
   column per pixel, and which stretch the detail view shows. At most `MOST` points
   (64 MB): a file claiming a longer length is read by its packets and stops there.
+  `wave::open` (beats and alignment read through it too) is gapless, as rodio plays:
+  otherwise an MP3's encoder delay put the waveform and beats 25 ms behind the music.
 - `beats.rs`: where the beats fall (SuperFlux onsets, Ellis tempo and tracker at
   tightness 300, each beat moved onto its attack to within ~1 ms) and the grid rules on
   them. Found in the background when a song starts, about 0.3 s, and cached in
@@ -99,7 +105,9 @@ and draws:
   the highlighted one, practice, album or artist view, grid and zoom. Odeion opens that
   way, the song paused where it was (its recording, loops and playhead come from
   `resume.json`), never playing on its own. Saved within a second of a change, on ⌘Q
-  and when the window closes. Closing the window quits Odeion (`QuitMode::LastWindowClosed`
+  and when the window closes. With no cached library (deleted or unreadable) it is
+  restored once a scan finds songs and not saved before: restored against an empty list it
+  lost the queue for good (`Odeion::restoring`). Closing the window quits Odeion (`QuitMode::LastWindowClosed`
   in `main.rs`): GPUI's macOS default left a windowless process with no way back.
 - `regions.rs`: sections (still "regions" in the code and `regions.json`): named
   stretches per recording, in order; renaming the same stretch, dragging an edge,
@@ -176,7 +184,10 @@ add a key to both or they fail.
 - **Modes, like vim**: the library (finding and playing songs; Odeion opens here unless
   it was left in practice), search inside it, and practice (the practice view; the mode
   *is* the view). Tab or ⌘2 enters practice, Esc, Tab or ⌘1 leaves (Vim's `p` both); the title bar's
-  Library / Practice switch does the same. Typing on the ⌘? sheet finds keys
+  Library / Practice switch does the same. The mouse's back button (or the swipe some
+  mice send) is Esc everywhere, run through the same key handler, so it closes a menu or
+  sheet, leaves search, an album, artist or playlist, and practice (Tim, 2026-11-10;
+  heard on the window, since menus and sheets occlude the views). Typing on the ⌘? sheet finds keys
   (`keys::found`). The ⌘? sheet and every tooltip show the
   current mode's keys. There is no hint bar at the bottom (removed 2026-10-08, the
   buttons' tooltips say the keys); messages ("queued, 3rd") show for a few seconds on
@@ -238,7 +249,8 @@ add a key to both or they fail.
   playing song's entries, then its loop and marker while it has them), the loop bar
   (on or off, replay, save, clear; without a loop, its edges at the playhead), a
   playlist in the sidebar or the search results (open, play, shuffle, queue all,
-  rename, delete), Favourites in the sidebar, an artist's row in the grouped list, and
+  sort by artist or title, rename, delete), Favourites in the sidebar, an artist's row in
+  the grouped list (or an album's, in an artist's view), and
   the album, artist and playlist headers (play, shuffle, queue all, add all to a
   playlist, back, or rename and delete). Rename and delete open the playlist, whose
   header asks for the name or "for good". Thin lines set groups apart (`Menu::then`).
@@ -341,7 +353,8 @@ add a key to both or they fail.
   file) and remembers its own loop: switching puts this one's away and brings the
   next one's back. Tim's choice, over sharing them across aligned recordings.
   Everything plays through one `audio::Mix`, a single file being a mix of one, so a
-  stem set's `1`–`9` mute and `⌥1`–`⌥9` solo are instant; the practice view adds a
+  stem set's `1`–`9` mute and `⌥1`–`⌥9` solo are instant, each level gliding there over
+  10 ms (`audio::GLIDE`; a jump clicked); the practice view adds a
   lane per stem. A metronome stem starts muted. Each stem has a level: drag across its
   number and name (filled to the level; the level moves with the drag, so a click
   alone leaves it) or scroll over them, or its right-click menu
@@ -355,7 +368,10 @@ add a key to both or they fail.
   delete asks "for good"). Names typed in place (a new playlist, a rename, an EQ
   preset) have Save and Cancel buttons beside them, and a click elsewhere cancels. In its view ⌫ (Vim `x` too) removes a song, ⇧↑ ⇧↓ (Vim `K J` too) move it,
   also from the row's menu and from its up, down and × buttons (shown like the queue
-  buttons, on the highlighted row or under the pointer). The picker also takes a whole
+  buttons, on the highlighted row or under the pointer), or dragged to another place:
+  a line on the row under the pointer shows where it lands (`Playlists::place`). Its
+  menus (sidebar and header) sort it by artist (the library's order) or title, once:
+  the order is saved and stays Tim's to change (`Playlists::sort_by`). The picker also takes a whole
   list from a menu's "Add all to playlist…". Enter plays from that song through the playlist. The
   session keeps an open playlist by name.
 - **The EQ** (⌘E, ⌥⌘E or the title bar's sliders button, lit while it does something):
@@ -385,7 +401,9 @@ add a key to both or they fail.
   folder or go back to the default, and Odeion saves where everything is, then reopens
   from the new folder (`open -n` on the bundle, or the binary again from source).
 - **Every action has a button too**, built with `Odeion::tool` (an icon, a tooltip and
-  the action, done through `Odeion::act` exactly as its key would). Tooltips list keys
+  the action, done through `Odeion::act` exactly as its key would). Tooltips show after
+  the pointer rests a second (`slow_tooltip`, `TIP_DELAY`; GPUI's 500 ms was too quick
+  for Tim), and list keys
   from `keys::keys_for`, which reads the ⌘? sheet through the real keymap, so they stay
   right if keys are ever remapped; never write a key into a tooltip by hand. A control
   that isn't an action (a sheet's ×, a menu opened by a click, a delete that asks
@@ -411,9 +429,12 @@ add a key to both or they fail.
   album alike in the dim small type, by Tim's choice) and
   *grouped* (the full list and favourites under a row per artist with its song count,
   songs indented with their covers, without the artist; the top artist stays pinned until the next one
-  pushes it up, Tim's condition for this view). Search, album and artist views aren't
-  grouped; album and artist views drop the columns their header already names. Artist
-  rows are part of a section's run, so playing a song still queues up the whole list.
+  pushes it up, Tim's condition for this view). An artist's view, grouped, puts its songs
+  under a row per album (`library::by_album`; Tim, 2026-11-10: the switch did nothing
+  there), pinned the same way; a click opens the album. Search, album and playlist views
+  aren't grouped; album and artist views drop the columns their header (or album row)
+  already names. Artist and album rows are part of a section's run, so playing a song
+  still queues up the whole list.
 - **The list has a scrollbar like Zed's**, drawn by Odeion (GPUI has none): a thin
   thumb shown while the list moves and for a second after, or with the pointer on it.
   Dragging the thumb scrolls directly; a click elsewhere on the track glides there.

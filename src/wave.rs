@@ -168,6 +168,9 @@ pub fn fit(span: Duration, length: Duration) -> Duration {
     if length.as_secs_f64() * 1.1 > span.as_secs_f64() { frame(length) } else { span }
 }
 
+/// A song opened for reading its waveform or beats. Gapless, as rodio plays it: an MP3's
+/// encoder delay is left out, or the waveform and beats would run behind the music by it
+/// (about 25 ms with LAME).
 pub(crate) fn open(path: &Path) -> Result<Box<dyn FormatReader>, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let mut hint = Hint::new();
@@ -175,8 +178,9 @@ pub(crate) fn open(path: &Path) -> Result<Box<dyn FormatReader>, String> {
         hint.with_extension(ext);
     }
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let options = FormatOptions { enable_gapless: true, ..Default::default() };
     symphonia::default::get_probe()
-        .format(&hint, stream, &FormatOptions::default(), &MetadataOptions::default())
+        .format(&hint, stream, &options, &MetadataOptions::default())
         .map(|p| p.format)
         .map_err(|e| e.to_string())
 }

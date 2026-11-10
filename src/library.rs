@@ -247,28 +247,45 @@ pub fn album(tracks: &[Track], of: &Track) -> Vec<usize> {
     hits
 }
 
-/// One row of a list grouped by artist: the artist, said once with how many songs
-/// follow, or a song.
+/// One row of a grouped list: the artist (or, in an artist's view, the album), said once
+/// with how many songs follow, or a song.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Grouped {
     Artist(String, usize),
+    Album(String, usize),
     Track(usize),
 }
 
 /// `songs` (in library order) with each run by one artist under a row naming it.
 /// Names match ignoring case and accents; the first song's spelling is shown.
 pub fn grouped(tracks: &[Track], songs: &[usize]) -> Vec<Grouped> {
+    runs(tracks, songs, |t| (None, fold(&t.artist)), |t| Grouped::Artist(t.artist.clone(), 0))
+}
+
+/// An artist's `songs` (in library order) with each album's run under a row naming it.
+/// An album is as in `album`: the same name in the same folder.
+pub fn by_album(tracks: &[Track], songs: &[usize]) -> Vec<Grouped> {
+    runs(tracks, songs, |t| (t.path.parent(), fold(&t.album)), |t| Grouped::Album(t.album.clone(), 0))
+}
+
+/// `songs` with a `head` row above each run of the same `key`, counting the run.
+fn runs<'t>(
+    tracks: &'t [Track],
+    songs: &[usize],
+    key: impl Fn(&'t Track) -> (Option<&'t Path>, String),
+    head: impl Fn(&Track) -> Grouped,
+) -> Vec<Grouped> {
     let mut rows = Vec::with_capacity(songs.len() * 5 / 4);
-    let mut head = 0;
-    let mut name = None;
+    let mut at = 0;
+    let mut last = None;
     for &i in songs {
-        let this = fold(&tracks[i].artist);
-        if name.as_ref() != Some(&this) {
-            head = rows.len();
-            rows.push(Grouped::Artist(tracks[i].artist.clone(), 0));
-            name = Some(this);
+        let this = key(&tracks[i]);
+        if last.as_ref() != Some(&this) {
+            at = rows.len();
+            rows.push(head(&tracks[i]));
+            last = Some(this);
         }
-        if let Grouped::Artist(_, n) = &mut rows[head] {
+        if let Grouped::Artist(_, n) | Grouped::Album(_, n) = &mut rows[at] {
             *n += 1;
         }
         rows.push(Grouped::Track(i));
@@ -281,6 +298,7 @@ pub fn grouped(tracks: &[Track], songs: &[usize]) -> Vec<Grouped> {
 pub enum Kind {
     /// "Favourites", "Library": the list's sections.
     Section,
+    /// An artist's row, or an album's in an artist's view: the rows that pin.
     Artist,
     Track,
 }
@@ -522,6 +540,31 @@ mod tests {
             ]
         );
         assert!(grouped(&tracks, &[]).is_empty());
+    }
+
+    #[test]
+    fn an_artists_songs_group_under_each_album() {
+        let mut tracks = vec![
+            track("Dio", "Holy Diver", 1, "Stand Up and Shout"),
+            track("Dio", "Holy Diver", 2, "Holy Diver"),
+            track("Dio", "The Last in Line", 1, "We Rock"),
+        ];
+        // The same name in another folder is another album.
+        let mut elsewhere = track("Dio", "The Last in Line", 2, "The Last in Line");
+        elsewhere.path = PathBuf::from("/m/Dio/Live/02 The Last in Line.mp3");
+        tracks.push(elsewhere);
+        assert_eq!(
+            by_album(&tracks, &[0, 1, 2, 3]),
+            vec![
+                Grouped::Album("Holy Diver".into(), 2),
+                Grouped::Track(0),
+                Grouped::Track(1),
+                Grouped::Album("The Last in Line".into(), 1),
+                Grouped::Track(2),
+                Grouped::Album("The Last in Line".into(), 1),
+                Grouped::Track(3),
+            ]
+        );
     }
 
     #[test]

@@ -6,6 +6,15 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// What a playlist can be sorted by, from its menus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortBy {
+    /// As the library is: artist, then album, then track number.
+    Artist,
+    /// By title, then artist.
+    Title,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Named {
     pub name: String,
@@ -101,6 +110,34 @@ impl Playlists {
         }
     }
 
+    /// Moves `song` into `onto`'s place in playlist `i`, as dropping a dragged song does:
+    /// the songs between move one place toward where it came from. By path, so songs gone
+    /// from the library (kept in the file, unlisted) don't count. Returns whether it moved.
+    pub fn place(&mut self, i: usize, song: &Path, onto: &Path) -> bool {
+        let Some(p) = self.0.get_mut(i) else { return false };
+        let at = |s: &Path| p.songs.iter().position(|x| x == s);
+        let (Some(from), Some(to)) = (at(song), at(onto)) else { return false };
+        if from == to {
+            return false;
+        }
+        let moved = p.songs.remove(from);
+        p.songs.insert(to, moved);
+        true
+    }
+
+    /// Puts playlist `i` in the order `key` gives, once: the order is saved and stays the
+    /// user's to change. Songs with equal keys keep their order, and songs the key doesn't
+    /// know (gone from the library) go last. Returns whether anything moved.
+    pub fn sort_by<K: Ord>(&mut self, i: usize, key: impl Fn(&Path) -> Option<K>) -> bool {
+        let Some(p) = self.0.get_mut(i) else { return false };
+        let was = p.songs.clone();
+        p.songs.sort_by_cached_key(|s| {
+            let k = key(s);
+            (k.is_none(), k)
+        });
+        p.songs != was
+    }
+
     pub fn load(file: &Path) -> Playlists {
         crate::state::load_json(file)
     }
@@ -156,6 +193,42 @@ mod tests {
         assert!(!p.shift(0, Path::new("b"), false));
         p.remove(0, Path::new("a"));
         assert_eq!(songs(&p, 0), ["c", "b"]);
+    }
+
+    #[test]
+    fn a_dropped_song_takes_the_place_it_was_dropped_on() {
+        let mut p = Playlists::default();
+        p.create("MDR").unwrap();
+        for s in ["a", "b", "c", "d"] {
+            p.add(0, Path::new(s));
+        }
+        // Down: the songs between move up one.
+        assert!(p.place(0, Path::new("a"), Path::new("c")));
+        assert_eq!(songs(&p, 0), ["b", "c", "a", "d"]);
+        // Up, to the top.
+        assert!(p.place(0, Path::new("d"), Path::new("b")));
+        assert_eq!(songs(&p, 0), ["d", "b", "c", "a"]);
+        // Onto itself, onto a song not in it, or in no such playlist: nothing moves.
+        assert!(!p.place(0, Path::new("b"), Path::new("b")));
+        assert!(!p.place(0, Path::new("b"), Path::new("x")));
+        assert!(!p.place(3, Path::new("b"), Path::new("c")));
+        assert_eq!(songs(&p, 0), ["d", "b", "c", "a"]);
+    }
+
+    #[test]
+    fn sorting_keeps_ties_in_order_and_gone_songs_last() {
+        let mut p = Playlists::default();
+        p.create("MDR").unwrap();
+        for s in ["gone", "c2", "a", "c1", "b"] {
+            p.add(0, Path::new(s));
+        }
+        // Keyed by the first letter; "gone" isn't in the library.
+        let first = |s: &Path| s.to_str().filter(|s| *s != "gone").map(|s| s.chars().next());
+        assert!(p.sort_by(0, first));
+        assert_eq!(songs(&p, 0), ["a", "b", "c2", "c1", "gone"]);
+        // Already in order: nothing moves.
+        assert!(!p.sort_by(0, first));
+        assert!(!p.sort_by(4, first));
     }
 
     #[test]

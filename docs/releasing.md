@@ -3,8 +3,10 @@
 ## A release
 
 1. Set the new version in `Cargo.toml` (`version = "0.2.0"`), run `cargo build` so
-   `Cargo.lock` follows, and commit. `Cargo.toml` is the only place it lives: the
-   bundle script writes it into the app's Info.plist.
+   `Cargo.lock` follows, rename `## Unreleased` in `CHANGELOG.md` to the version and
+   the day (`## 0.2.0 (2026-11-08)`) with a new, empty `## Unreleased` above it, and
+   commit. `Cargo.toml` is the only place the
+   version lives: the bundle script writes it into the app's Info.plist.
 2. Tag it and push the tag:
 
    ```sh
@@ -16,7 +18,8 @@ The Release workflow (`.github/workflows/release.yml`) then runs the tests, buil
 `Odeion.app` for Apple silicon and Intel in one, and publishes `Odeion-0.2.0.zip` (and
 the same as `Odeion-macOS.zip`) on the repo's Releases page; a second job then builds
 Windows and adds `Odeion-0.2.0-Windows.zip` and `Odeion-Windows.zip`. A tag that doesn't match `Cargo.toml` fails the run before
-anything is built.
+anything is built. The release notes are the changelog's section for the version, then
+how to install; without a section the run warns and the notes only say how to install.
 
 A tag on a mistake can go again: delete the release and the tag on GitHub
 (`gh release delete v0.2.0 --cleanup-tag`), fix, tag again.

@@ -4,7 +4,12 @@
 //! playhead or on the highlighted song.
 
 use crate::keys::Action;
+use crate::playlists::SortBy;
 use std::time::Duration;
+
+/// A playlist's sorting, in its menus: once, the order saved.
+const SORT: [(&str, Action); 2] =
+    [("Sort by artist", Action::SortPlaylist(SortBy::Artist)), ("Sort by title", Action::SortPlaylist(SortBy::Title))];
 
 /// What a menu was opened on.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,6 +42,8 @@ pub enum Target {
     Shown,
     /// An artist's row in the grouped list, by its row.
     Artist(usize),
+    /// An album's row in an artist's grouped view, by its row.
+    AlbumRow(usize),
 }
 
 pub struct Menu {
@@ -161,6 +168,7 @@ impl Menu {
                 ("Queue all", Action::QueueAll),
             ],
         )
+        .then(SORT)
         .then([("Rename…", Action::RenamePlaylist), ("Delete…", Action::DeletePlaylist)])
     }
 
@@ -187,8 +195,24 @@ impl Menu {
         match of {
             Shown::Album => menu.then([("Back from the album", Action::Album)]),
             Shown::Artist => menu.then([("Back from the artist", Action::Artist)]),
-            Shown::Playlist => menu.then([("Rename…", Action::RenamePlaylist), ("Delete…", Action::DeletePlaylist)]),
+            Shown::Playlist => {
+                menu.then(SORT).then([("Rename…", Action::RenamePlaylist), ("Delete…", Action::DeletePlaylist)])
+            }
         }
+    }
+
+    /// On an album's row in an artist's grouped view, `row`.
+    pub fn album_row(row: usize) -> Menu {
+        Menu::new(
+            Target::AlbumRow(row),
+            vec![
+                ("Only this album", Action::Album),
+                ("Play", Action::PlayAll),
+                ("Shuffle", Action::ShuffleAll),
+                ("Queue all", Action::QueueAll),
+                ("Add all to playlist…", Action::AddAllToPlaylist),
+            ],
+        )
     }
 
     /// On an artist's row in the grouped list, `row`.
@@ -408,7 +432,9 @@ mod tests {
 
     #[test]
     fn list_menus_play_shuffle_and_queue_their_songs() {
-        for menu in [Menu::playlist(0), Menu::favourites(), Menu::shown(Shown::Album), Menu::artist(0)] {
+        for menu in
+            [Menu::playlist(0), Menu::favourites(), Menu::shown(Shown::Album), Menu::artist(0), Menu::album_row(0)]
+        {
             let actions: Vec<Action> = menu.entries.iter().map(|e| e.1).collect();
             for a in [Action::PlayAll, Action::ShuffleAll, Action::QueueAll] {
                 assert!(actions.contains(&a), "{a:?} missing");

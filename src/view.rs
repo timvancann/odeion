@@ -146,6 +146,55 @@ impl Strip {
     }
 }
 
+/// A song in a playlist's view, dragged to another place in it.
+struct DraggedSong {
+    song: PathBuf,
+    /// Its row, so the row under the pointer can show which side it will land on.
+    row: usize,
+}
+
+/// What a dragged song shows under the pointer: its title. GPUI places a drag's view where
+/// the row was grabbed, so the title is moved over by `at` to sit at the pointer.
+struct SongGhost {
+    title: gpui::SharedString,
+    at: gpui::Point<Pixels>,
+}
+
+impl Render for SongGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        div().pl(self.at.x + px(12.)).pt(px((f32::from(self.at.y) - 12.).max(0.))).child(
+            div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgb(t.tooltip_bg))
+                .border_1()
+                .border_color(rgb(t.border))
+                .font_family(UI)
+                .text_sm()
+                .text_color(rgb(t.tooltip_text))
+                .child(self.title.clone()),
+        )
+    }
+}
+
+/// How long the pointer rests before a tooltip shows. GPUI's 500 ms put them up while it
+/// was only passing over the buttons.
+const TIP_DELAY: Duration = Duration::from_millis(1000);
+
+/// Tooltips after Odeion's `TIP_DELAY`.
+trait SlowTooltip: StatefulInteractiveElement {
+    fn slow_tooltip(self, build: impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static) -> Self
+    where
+        Self: Sized,
+    {
+        self.tooltip(build).tooltip_show_delay(TIP_DELAY)
+    }
+}
+
+impl<E: StatefulInteractiveElement> SlowTooltip for E {}
+
 /// A tooltip: what a control does, and the keys that do the same, looked up from the
 /// keymap so they stay right when keys change.
 struct Tip {
@@ -256,9 +305,21 @@ enum Row {
     Header(String),
     /// An artist and how many songs follow, in the list grouped by artist.
     Artist(String, usize),
+    /// An album and how many songs follow, in an artist's view when the list is grouped.
+    Album(String, usize),
     Track(usize),
     /// A playlist whose name matches the search; Enter or a click opens it.
     Playlist(usize),
+}
+
+impl From<Grouped> for Row {
+    fn from(g: Grouped) -> Row {
+        match g {
+            Grouped::Artist(name, n) => Row::Artist(name, n),
+            Grouped::Album(name, n) => Row::Album(name, n),
+            Grouped::Track(i) => Row::Track(i),
+        }
+    }
 }
 
 pub struct Odeion {
@@ -266,6 +327,10 @@ pub struct Odeion {
     tracks: Vec<Track>,
     by_path: HashMap<PathBuf, usize>,
     scanning: Option<Receiver<Scanned>>,
+    /// The session to open as, held back until a scan finds songs when the cached library
+    /// was empty (deleted or unreadable): restored against an empty list it would lose the
+    /// queue and the playing song, and that would be saved within a second.
+    restoring: Option<Session>,
     /// Songs the scan under way has found so far, counted on its thread.
     scan_found: Arc<AtomicUsize>,
     /// The count last drawn, so the list redraws only when it moves.
@@ -532,6 +597,7 @@ impl Odeion {
             tracks,
             by_path: HashMap::new(),
             scanning: None,
+            restoring: None,
             scan_found: Arc::default(),
             scan_shown: 0,
             unreadable: Vec::new(),
@@ -631,7 +697,12 @@ impl Odeion {
         odeion.apply_theme(cx);
         odeion.message = odeion.audio.error.clone().map(|e| (e, true));
         odeion.reindex(None);
-        odeion.restore(Session::load(&session_file()));
+        let session = Session::load(&session_file());
+        if odeion.tracks.is_empty() {
+            odeion.restoring = Some(session);
+        } else {
+            odeion.restore(session);
+        }
         let aside: Vec<String> = state::take_set_aside().iter().map(|p| tilde(p)).collect();
         if let Some(note) = empty::set_aside(&aside) {
             odeion.message = Some((note, true));
@@ -1157,6 +1228,12 @@ impl Odeion {
                 ));
             }
             self.reindex(keep);
+            // Only once there are songs: a folder that couldn't be read gave none.
+            if !self.tracks.is_empty()
+                && let Some(session) = self.restoring.take()
+            {
+                self.restore(session);
+            }
             scan::save_cache(&cache_file(), &self.tracks);
             changed = true;
         }
@@ -1251,7 +1328,13 @@ impl Odeion {
                 .map(|named| named.songs.iter().filter_map(|p| self.by_path.get(p).copied()).collect())
         };
         if let Some(songs) = open {
-            self.rows.extend(library::filter(&self.tracks, &songs, &self.query).into_iter().map(Row::Track));
+            let songs = library::filter(&self.tracks, &songs, &self.query);
+            // An artist's songs in the grouped view sit under each album.
+            if self.artist.is_some() && self.grouped() {
+                self.rows.extend(library::by_album(&self.tracks, &songs).into_iter().map(Row::from));
+            } else {
+                self.rows.extend(songs.into_iter().map(Row::Track));
+            }
         } else if self.query.trim().is_empty() {
             // Library order, since the tracks are sorted.
             let mut favorites: Vec<usize> = self
@@ -1295,22 +1378,16 @@ impl Odeion {
     fn list_rows(&self, songs: &[usize]) -> Vec<Row> {
         match self.settings.list {
             ListView::Columns => songs.iter().map(|&i| Row::Track(i)).collect(),
-            ListView::Grouped => library::grouped(&self.tracks, songs)
-                .into_iter()
-                .map(|g| match g {
-                    Grouped::Artist(name, n) => Row::Artist(name, n),
-                    Grouped::Track(i) => Row::Track(i),
-                })
-                .collect(),
+            ListView::Grouped => library::grouped(&self.tracks, songs).into_iter().map(Row::from).collect(),
         }
     }
 
-    /// Whether the rows are grouped under artists: the full list in the grouped view.
+    /// Whether the rows are grouped in the grouped view: the full list under artists, an
+    /// artist's songs under albums (an artist opened from a playlist shows over it).
     fn grouped(&self) -> bool {
         self.settings.list == ListView::Grouped
-            && self.playlist_view.is_none()
+            && (self.playlist_view.is_none() || self.artist.is_some())
             && self.album.is_none()
-            && self.artist.is_none()
             && self.query.trim().is_empty()
     }
 
@@ -1330,7 +1407,7 @@ impl Odeion {
     fn selected_track(&self) -> Option<&Track> {
         match self.rows.get(self.selected)? {
             Row::Track(i) => self.tracks.get(*i),
-            Row::Header(_) | Row::Artist(..) | Row::Playlist(_) => None,
+            Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Playlist(_) => None,
         }
     }
 
@@ -1420,6 +1497,10 @@ impl Odeion {
     /// Saves what odeion shows, when it changed. Returns whether that worked.
     fn save_session(&mut self) -> bool {
         self.saved_at = std::time::Instant::now();
+        // Not restored yet: the file still holds the session to open as.
+        if self.restoring.is_some() {
+            return true;
+        }
         let session = self.session();
         let mut saved = true;
         if session != self.saved {
@@ -1590,7 +1671,7 @@ impl Odeion {
                     .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                     .hover(|d| d.bg(rgb(t.hover)))
                     .text_color(rgb(if on { t.accent_text } else { t.text_dim }))
-                    .tooltip(self.tip(
+                    .slow_tooltip(self.tip(
                         format!("Full speed, again back to {}%; the chevron or a right-click for presets and the trainer", self.speed.percent),
                         &[Action::Slow],
                     ))
@@ -1645,7 +1726,7 @@ impl Odeion {
                     .map(|d| lit_cues(d, on))
                     .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                     .text_color(rgb(if on { t.accent_text } else { t.text_dim }))
-                    .tooltip(self.tip("Pitch: scroll for 5 cents; right-click for more", &[Action::Pitch(5), Action::Pitch(-5)]))
+                    .slow_tooltip(self.tip("Pitch: scroll for 5 cents; right-click for more", &[Action::Pitch(5), Action::Pitch(-5)]))
                     .child(ui::icon("music", 12., if on { t.accent } else { t.text_dim }))
                     .child(crate::speed::pitch_label(cents)),
             )
@@ -1667,7 +1748,7 @@ impl Odeion {
             .child(ui::icon(if volume == 0.0 { "volume-x" } else { "volume-2" }, 16., t.text_dim))
             .child(
                 self.level_area("volume", Slider::Volume, gpui::rgb(t.accent), true, cx)
-                    .tooltip(self.tip(format!("Volume {:.0}%: drag or scroll", volume * 100.), &[Action::Volume(true), Action::Volume(false)]))
+                    .slow_tooltip(self.tip(format!("Volume {:.0}%: drag or scroll", volume * 100.), &[Action::Volume(true), Action::Volume(false)]))
                     .w(px(72.))
                     .h(px(HIT)),
             )
@@ -1694,7 +1775,7 @@ impl Odeion {
                 .child(ui::icon(icon, 16., if on { t.on_accent } else { t.text_dim }))
                 .child(label)
                 .when(!on, |d| {
-                    d.tooltip(self.tip(format!("{label} mode"), &[Action::Practice])).on_click(cx.listener(
+                    d.slow_tooltip(self.tip(format!("{label} mode"), &[Action::Practice])).on_click(cx.listener(
                         |odeion, _, _, cx| {
                             // Not also a click on the title bar.
                             cx.stop_propagation();
@@ -1724,7 +1805,7 @@ impl Odeion {
                 .map(|d| lit_cues(d, on))
                 .when(!on, |d| d.cursor_pointer().hover(|d| d.bg(rgb(t.hover))))
                 .child(ui::icon(icon, 14., if on { t.accent } else { t.text_dim }))
-                .tooltip(self.tip(what, &[Action::ListView]))
+                .slow_tooltip(self.tip(what, &[Action::ListView]))
                 .when(!on, |d| {
                     d.on_click(cx.listener(|odeion, _, _, cx| {
                         cx.stop_propagation();
@@ -1807,7 +1888,7 @@ impl Odeion {
             .map(|d| lit_cues(d, lit))
             .hover(|d| d.bg(rgb(t.hover)))
             .child(ui::icon(icon, 16., if lit { t.accent } else { t.text }))
-            .tooltip(self.tip(what.to_string(), keys))
+            .slow_tooltip(self.tip(what.to_string(), keys))
             .on_click(cx.listener(move |odeion, e, _, cx| {
                 // Not also a click on what it sits on (a row, the title bar).
                 cx.stop_propagation();
@@ -1897,7 +1978,7 @@ impl Odeion {
             .text_color(rgb(if lit { t.accent_text } else { t.text }))
             .child(ui::icon(icon, 20., if lit { t.accent } else { t.text }))
             .child(label.to_string())
-            .tooltip(self.tip(what.to_string(), &[action]))
+            .slow_tooltip(self.tip(what.to_string(), &[action]))
             .on_click(cx.listener(move |odeion, _, _, cx| {
                 cx.stop_propagation();
                 odeion.act(action, cx);
@@ -2253,7 +2334,7 @@ impl Odeion {
             .take_while(is_track)
             .filter_map(|r| match self.rows[r] {
                 Row::Track(i) => Some(self.tracks[i].path.clone()),
-                Row::Header(_) | Row::Artist(..) | Row::Playlist(_) => None,
+                Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Playlist(_) => None,
             })
             .collect();
         self.playlist = Playlist::new(list, &track.path, self.seed());
@@ -2365,7 +2446,7 @@ impl Odeion {
     fn toggle_favorite(&mut self) {
         let Some(path) = self.selected_path() else { return };
         self.favorites.toggle(&path);
-        self.favorites.save(&favorites_file());
+        self.store_favorites();
         self.reindex(Some(path));
         self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
     }
@@ -2676,6 +2757,11 @@ impl Odeion {
                 self.renaming_playlist = self.playlist_view.and_then(|i| self.playlists.get(i)).map(|p| p.name.clone());
             }
             Action::DeletePlaylist => self.deleting_playlist = self.playlist_view.is_some(),
+            Action::SortPlaylist(by) => {
+                if let Some(i) = self.playlist_view {
+                    self.sort_playlist(i, by);
+                }
+            }
             Action::ListView => {
                 self.settings.list = match self.settings.list {
                     ListView::Columns => ListView::Grouped,
@@ -3068,17 +3154,18 @@ impl Odeion {
                 }
             }
             (Target::Playlist(i), Action::OpenPlaylist) => self.open_playlist(i),
+            (Target::Playlist(i), Action::SortPlaylist(by)) => self.sort_playlist(i, by),
             // Renaming and deleting happen in its header, which asks for the name or "for good".
             (Target::Playlist(i), Action::RenamePlaylist | Action::DeletePlaylist) => {
                 self.open_playlist(i);
                 self.act(action, cx);
             }
-            (Target::Artist(row), Action::Artist) => {
+            (Target::Artist(row), Action::Artist) | (Target::AlbumRow(row), Action::Album) => {
                 self.selected = row + 1;
                 self.act(action, cx);
             }
             (
-                target @ (Target::Playlist(_) | Target::Favourites | Target::Artist(_)),
+                target @ (Target::Playlist(_) | Target::Favourites | Target::Artist(_) | Target::AlbumRow(_)),
                 Action::PlayAll | Action::ShuffleAll | Action::QueueAll | Action::AddAllToPlaylist,
             ) => {
                 let songs = self.songs_for(target);
@@ -3112,7 +3199,7 @@ impl Odeion {
             Action::AddVariation => self.pick_variation(song, cx),
             Action::Favorite => {
                 self.favorites.toggle(&song);
-                self.favorites.save(&favorites_file());
+                self.store_favorites();
                 let keep = self.selected_path();
                 self.reindex(keep);
             }
@@ -3158,6 +3245,10 @@ impl Odeion {
             }
             Target::Artist(row) => match self.rows.get(row + 1) {
                 Some(&Row::Track(i)) => library::artist(&self.tracks, &self.tracks[i]).into_iter().map(path).collect(),
+                _ => Vec::new(),
+            },
+            Target::AlbumRow(row) => match self.rows.get(row + 1) {
+                Some(&Row::Track(i)) => library::album(&self.tracks, &self.tracks[i]).into_iter().map(path).collect(),
                 _ => Vec::new(),
             },
             _ => self.rows.iter().filter_map(|r| if let Row::Track(i) = r { Some(path(*i)) } else { None }).collect(),
@@ -3289,7 +3380,7 @@ impl Odeion {
         let from = self.rows.iter().position(|r| matches!(r, Row::Header(h) if h == "Library")).map_or(0, |h| h + 1);
         library::letters((from..self.rows.len()).filter_map(|r| match self.rows[r] {
             Row::Track(i) => Some((r, self.tracks[i].artist.as_str())),
-            Row::Header(_) | Row::Artist(..) | Row::Playlist(_) => None,
+            Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Playlist(_) => None,
         }))
     }
 
@@ -3759,11 +3850,22 @@ impl Odeion {
         }
     }
 
-    /// An artist over its songs in the grouped list; also pinned on top of the list.
-    /// A click opens the artist view.
-    fn render_artist_row(&self, ix: usize, name: &str, songs: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// An artist over its songs in the grouped list, or an album in an artist's; also
+    /// pinned on top of the list. A click opens the artist's or the album's view.
+    fn render_group_row(
+        &self,
+        ix: usize,
+        name: &str,
+        songs: usize,
+        album: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (action, tip) = match album {
+            true => (Action::Album, "Only this album; right-click to play or queue it"),
+            false => (Action::Artist, "Only this artist; right-click to play or queue them all"),
+        };
         div()
-            .id(("artist-row", ix))
+            .id(("group-row", ix))
             .w_full()
             .h(px(ROW))
             .px_3()
@@ -3790,12 +3892,15 @@ impl Odeion {
                     .text_color(rgb(t().text_dim))
                     .child(if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") }),
             )
-            .tooltip(self.tip("Only this artist; right-click to play or queue them all", &[Action::Artist]))
+            .slow_tooltip(self.tip(tip, &[action]))
             .on_click(cx.listener(move |odeion, _, _, cx| {
                 odeion.selected = ix + 1;
-                odeion.act(Action::Artist, cx);
+                odeion.act(action, cx);
             }))
-            .on_mouse_down(MouseButton::Right, opens_menu(move || Menu::artist(ix), cx))
+            .on_mouse_down(
+                MouseButton::Right,
+                opens_menu(move || if album { Menu::album_row(ix) } else { Menu::artist(ix) }, cx),
+            )
             .into_any_element()
     }
 
@@ -3811,19 +3916,23 @@ impl Odeion {
             .iter()
             .map(|r| match r {
                 Row::Header(_) | Row::Playlist(_) => Kind::Section,
-                Row::Artist(..) => Kind::Artist,
+                Row::Artist(..) | Row::Album(..) => Kind::Artist,
                 Row::Track(_) => Kind::Track,
             })
             .collect();
         let (head, push) = library::pinned(&kinds, -offset / row)?;
-        let Row::Artist(name, songs) = &self.rows[head] else { return None };
+        let (name, songs, album) = match &self.rows[head] {
+            Row::Artist(name, songs) => (name, *songs, false),
+            Row::Album(name, songs) => (name, *songs, true),
+            _ => return None,
+        };
         Some(
             div()
                 .absolute()
                 .top(-row * push)
                 .left_0()
                 .right(px(14.))
-                .child(self.render_artist_row(head, name, *songs, cx))
+                .child(self.render_group_row(head, name, songs, album, cx))
                 .into_any_element(),
         )
     }
@@ -3842,7 +3951,8 @@ impl Odeion {
                 .text_color(rgb(t().text_dim))
                 .child(label.clone())
                 .into_any_element(),
-            Row::Artist(name, songs) => self.render_artist_row(ix, name, *songs, cx),
+            Row::Artist(name, songs) => self.render_group_row(ix, name, *songs, false, cx),
+            Row::Album(name, songs) => self.render_group_row(ix, name, *songs, true, cx),
             Row::Playlist(i) => {
                 let i = *i;
                 let selected = ix == self.selected;
@@ -3890,11 +4000,12 @@ impl Odeion {
                 let selected = ix == self.selected;
                 let playing = self.now.as_ref().is_some_and(|n| n.path == track.path);
                 let favorite = self.favorites.contains(&track.path);
-                // The album view's header already names the album.
-                let album = (self.album.is_none()).then(|| track.album.clone());
+                let in_group = self.grouped();
+                // The album view's header already names the album, and so does an album's
+                // row over its songs in an artist's grouped view.
+                let album = (self.album.is_none() && !(in_group && self.artist.is_some())).then(|| track.album.clone());
                 let variations = self.variations.of(&track.path).len();
                 let queued = self.queue.songs().contains(&track.path);
-                let in_group = self.grouped();
                 let show_artist = !in_group && self.album.is_none() && self.artist.is_none();
                 let in_playlist = self.playlist_view.is_some() && self.album.is_none() && self.artist.is_none();
                 // In a playlist's view: moving and removing the song, shown like the
@@ -3912,7 +4023,7 @@ impl Odeion {
                         .hover(|d| d.bg(rgb(t().hover)))
                         .when(!selected, |d| d.opacity(0.).group_hover("song-row", |s| s.opacity(1.)))
                         .child(ui::icon(icon, 14., t().text_dim))
-                        .tooltip(self.tip(what, &[action]))
+                        .slow_tooltip(self.tip(what, &[action]))
                         .on_click(cx.listener(move |odeion, _, _, cx| {
                             cx.stop_propagation();
                             odeion.selected = ix;
@@ -3953,6 +4064,31 @@ impl Odeion {
                         cx.listener(move |odeion, dropped: &ExternalPaths, _, cx| {
                             odeion.add_variation(song.clone(), dropped.paths().to_vec());
                             cx.notify();
+                        })
+                    })
+                    // In a playlist's view a song drags to another place: the row under
+                    // the pointer shows a line on the side it lands, and a drop puts it
+                    // in that row's place (`Playlists::place`).
+                    .when(in_playlist, |d| {
+                        let (song, title) = (track.path.clone(), gpui::SharedString::from(track.title.clone()));
+                        d.on_drag(DraggedSong { song, row: ix }, move |_, at, _, cx| {
+                            let title = title.clone();
+                            cx.new(|_| SongGhost { title, at })
+                        })
+                        .drag_over::<DraggedSong>(move |style, dragged, _, _| {
+                            let line = rgb(t().focus);
+                            match dragged.row.cmp(&ix) {
+                                std::cmp::Ordering::Less => style.border_b_2().border_color(line),
+                                std::cmp::Ordering::Greater => style.border_t_2().border_color(line),
+                                std::cmp::Ordering::Equal => style,
+                            }
+                        })
+                        .on_drop({
+                            let onto = track.path.clone();
+                            cx.listener(move |odeion, dragged: &DraggedSong, _, cx| {
+                                odeion.drop_song(&dragged.song, &onto);
+                                cx.notify();
+                            })
                         })
                     })
                     // In the album view the header shows the cover; rows show the number.
@@ -4010,7 +4146,7 @@ impl Odeion {
                                     .text_color(rgb(t().text_dim))
                                     .cursor_pointer()
                                     .hover(|d| d.text_color(rgb(t().accent_text)).underline())
-                                    .tooltip(self.tip("Only this artist", &[Action::Artist]))
+                                    .slow_tooltip(self.tip("Only this artist", &[Action::Artist]))
                                     .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
                                         odeion.selected = ix;
@@ -4035,7 +4171,7 @@ impl Odeion {
                                     .text_color(rgb(t().text_dim))
                                     .cursor_pointer()
                                     .hover(|d| d.text_color(rgb(t().accent_text)).underline())
-                                    .tooltip(self.tip("Only this album", &[Action::Album]))
+                                    .slow_tooltip(self.tip("Only this album", &[Action::Album]))
                                     .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
                                         odeion.selected = ix;
@@ -4087,7 +4223,7 @@ impl Odeion {
                                         d.opacity(0.).group_hover("song-row", |s| s.opacity(1.))
                                     })
                                     .child(ui::icon("list-plus", 14., if queued { t().accent } else { t().text_dim }))
-                                    .tooltip(self.tip(if queued { "Queued" } else { "Queue it" }, &[Action::Queue(false)]))
+                                    .slow_tooltip(self.tip(if queued { "Queued" } else { "Queue it" }, &[Action::Queue(false)]))
                                     .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
                                         odeion.selected = ix;
@@ -4109,7 +4245,7 @@ impl Odeion {
                                     .hover(|d| d.bg(rgb(t().hover)))
                                     .when(!selected, |d| d.opacity(0.).group_hover("song-row", |s| s.opacity(1.)))
                                     .child(ui::icon("arrow-up-to-line", 14., t().text_dim))
-                                    .tooltip(self.tip("Queue it next", &[Action::Queue(true)]))
+                                    .slow_tooltip(self.tip("Queue it next", &[Action::Queue(true)]))
                                     .on_click(cx.listener(move |odeion, _, _, cx| {
                                         cx.stop_propagation();
                                         odeion.selected = ix;
@@ -4137,7 +4273,7 @@ impl Odeion {
                                         14.,
                                         if favorite { t().accent } else { t().text_dim },
                                     ))
-                                    .tooltip(self.tip(
+                                    .slow_tooltip(self.tip(
                                         if favorite { "Not a favourite" } else { "Favourite" },
                                         &[Action::Favorite],
                                     ))
@@ -4180,7 +4316,7 @@ impl Odeion {
             .bg(rgb(t().surface))
             .cursor_text()
             .when(self.searching, |d| d.border_1().border_color(rgb(t().focus)))
-            .when(!self.searching, |d| d.tooltip(self.tip("Search", &[Action::Find, Action::Search])))
+            .when(!self.searching, |d| d.slow_tooltip(self.tip("Search", &[Action::Find, Action::Search])))
             // Typing goes to the search in the library, so a click there leaves practice.
             .on_click(cx.listener(|odeion, _, _, cx| {
                 (odeion.practice, odeion.searching) = (false, true);
@@ -4215,7 +4351,7 @@ impl Odeion {
                             .cursor_pointer()
                             .hover(|d| d.bg(rgb(t().hover)))
                             .child(ui::icon("x", 12., t().text_dim))
-                            .tooltip(self.tip("Search everything", &[]))
+                            .slow_tooltip(self.tip("Search everything", &[]))
                             .on_click(cx.listener(|odeion, _, _, cx| {
                                 cx.stop_propagation();
                                 odeion.widen_search();
@@ -4324,7 +4460,7 @@ impl Odeion {
 
         let progress = div()
             .id("progress")
-            .tooltip(self.tip("Click to jump; drag a loop edge or the marker; shift-click ends the loop; right-click for more", &[]))
+            .slow_tooltip(self.tip("Click to jump; drag a loop edge or the marker; shift-click ends the loop; right-click for more", &[]))
             .children(duration.map(|d| edge_grips(looping, self.marker(), Duration::ZERO, d)).into_iter().flatten())
             .relative()
             .h(px(16.))
@@ -4847,7 +4983,7 @@ impl Odeion {
             let overview = view.boxed.is_some();
             div()
                 .id(id)
-                .tooltip(self.tip(
+                .slow_tooltip(self.tip(
                     if overview {
                         "Drag the box to look elsewhere (Follow comes back); click to jump; scroll up or down to zoom, sideways to move along; right-click for more"
                     } else {
@@ -4994,7 +5130,7 @@ impl Odeion {
                         // The number and name are the level's slider, filled to it.
                         .child(
                             self.level_area(("stem-level", i), Slider::Stem(i), rgb(t.level), false, cx)
-                                .tooltip(self.tip(
+                                .slow_tooltip(self.tip(
                                     format!("{name} at {:.0}%: drag across or scroll to change; right-click for more", self.level(Slider::Stem(i)) * 100.),
                                     &[],
                                 ))
@@ -5044,7 +5180,7 @@ impl Odeion {
                     let (down, right) = (strip.clone(), strip.clone());
                     div()
                         .id(("stem-wave", i))
-                        .tooltip(self.tip("Click to jump", &[]))
+                        .slow_tooltip(self.tip("Click to jump", &[]))
                         .children(edge_grips(self.audio.looping, self.marker(), Duration::ZERO, song))
                         .flex_1()
                         .h_full()
@@ -5136,7 +5272,7 @@ impl Odeion {
             let name = region.name.clone();
             div()
                 .id(("region", i))
-                .tooltip(self.tip(format!("Loop {}; drag its edges to change it; right-click for more", region.name), &[Action::Region(false), Action::Region(true)]))
+                .slow_tooltip(self.tip(format!("Loop {}; drag its edges to change it; right-click for more", region.name), &[Action::Region(false), Action::Region(true)]))
                 .absolute()
                 .top_0()
                 .h_full()
@@ -5233,7 +5369,7 @@ impl Odeion {
                 .text_color(rgb(if lit { t.accent_text } else { t.text_dim }))
                 .child(ui::icon(if i == 0 { "music" } else { "layers" }, 14., if lit { t.accent } else { t.text_dim }))
                 .child(div().max_w(px(160.)).truncate().child(name.clone()))
-                .tooltip(self.tip(format!("Play {}", if i == 0 { "the song itself".to_string() } else { name }), &[Action::Variation]))
+                .slow_tooltip(self.tip(format!("Play {}", if i == 0 { "the song itself".to_string() } else { name }), &[Action::Variation]))
                 .on_click(cx.listener(move |odeion, _, _, cx| {
                     odeion.select_recording(i);
                     cx.notify();
@@ -5278,7 +5414,7 @@ impl Odeion {
                     .child(div().pl_1().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("25"))
                     .child(
                         self.level_area("speed-level", Slider::Speed, gpui::rgb(if self.speed.on { t.accent } else { t.text_dim }), true, cx)
-                            .tooltip(self.tip(
+                            .slow_tooltip(self.tip(
                                 format!("{}% speed: drag or scroll for any speed; right-click for presets", self.speed.now()),
                                 &[Action::Speed(false), Action::Speed(true)],
                             ))
@@ -5495,7 +5631,7 @@ impl Odeion {
                 .flex_none()
                 .cursor_pointer()
                 .hover(|d| d.text_color(rgb(t.accent_text)).underline())
-                .tooltip(self.tip(what.to_string(), &[action]))
+                .slow_tooltip(self.tip(what.to_string(), &[action]))
                 .on_click(cx.listener(move |odeion, _, _, cx| {
                     odeion.show(track.clone(), artist);
                     cx.notify();
@@ -5518,6 +5654,40 @@ impl Odeion {
     fn store_playlists(&mut self) {
         if let Err(e) = self.playlists.store(&playlists_file()) {
             self.message = Some((format!("couldn't save the playlists: {e}"), true));
+        }
+    }
+
+    /// Sorts playlist `i` once, saving the order: by artist as the library is (its
+    /// tracks are kept in that order), or by title.
+    fn sort_playlist(&mut self, i: usize, by: crate::playlists::SortBy) {
+        let keep = self.selected_path();
+        let (by_path, tracks) = (&self.by_path, &self.tracks);
+        let moved = match by {
+            crate::playlists::SortBy::Artist => self.playlists.sort_by(i, |p| by_path.get(p).copied()),
+            crate::playlists::SortBy::Title => self.playlists.sort_by(i, |p| {
+                by_path.get(p).map(|&t| (library::fold(&tracks[t].title), library::fold(&tracks[t].artist)))
+            }),
+        };
+        if moved {
+            self.store_playlists();
+            if self.playlist_view == Some(i) {
+                self.reindex(keep);
+            }
+        }
+    }
+
+    /// Puts a song dragged in the open playlist in the place it was dropped on.
+    fn drop_song(&mut self, song: &std::path::Path, onto: &std::path::Path) {
+        let Some(i) = self.playlist_view else { return };
+        if self.playlists.place(i, song, onto) {
+            self.store_playlists();
+            self.reindex(Some(song.to_path_buf()));
+        }
+    }
+
+    fn store_favorites(&mut self) {
+        if let Err(e) = self.favorites.store(&favorites_file()) {
+            self.message = Some((format!("couldn't save the favourites: {e}"), true));
         }
     }
 
@@ -5816,7 +5986,7 @@ impl Odeion {
                 .cursor_pointer()
                 .hover(|d| d.bg(rgb(t.hover)))
                 .child(ui::icon(icon, 14., t.text))
-                .tooltip(self.tip(what, &[]))
+                .slow_tooltip(self.tip(what, &[]))
                 .on_click(cx.listener(move |odeion, _, _, cx| {
                     act(odeion);
                     cx.notify();
@@ -6068,7 +6238,7 @@ impl Odeion {
                 .cursor_pointer()
                 .hover(|d| d.bg(rgb(t.hover)))
                 .child(ui::icon(icon, 14., t.text))
-                .tooltip(self.tip(what, &[]))
+                .slow_tooltip(self.tip(what, &[]))
                 .on_click(cx.listener(move |odeion, _, _, cx| {
                     act(odeion);
                     cx.notify();
@@ -6244,7 +6414,7 @@ impl Odeion {
                                     .text_color(rgb(if eq.on { t.accent_text } else { t.text_dim }))
                                     .hover(|d| d.bg(rgb(t.hover)))
                                     .child(if eq.on { "on" } else { "off" })
-                                    .tooltip(self.tip("EQ on or off (e)", &[]))
+                                    .slow_tooltip(self.tip("EQ on or off (e)", &[]))
                                     .on_click(cx.listener(|odeion, _, _, cx| {
                                         odeion.change_eq(true, |eq| eq.on = !eq.on);
                                         cx.notify();
@@ -6498,7 +6668,7 @@ impl Odeion {
                 .hover(|d| d.bg(rgb(t.hover)))
                 .child(ui::icon(icon, 14., if lit { t.accent } else { t.text_dim }))
                 .when(open, |d| d.child(div().truncate().child(label)))
-                .tooltip(self.tip(
+                .slow_tooltip(self.tip(
                     match to {
                         Place::Library => "The full list",
                         Place::Favourites => "The favourites; right-click to play or shuffle them",
@@ -6546,7 +6716,7 @@ impl Odeion {
                 .when(!self.queue.is_empty(), |d| {
                     d.child(div().font_family(MONO).text_xs().text_color(rgb(t.accent_text)).child(self.queue.len().to_string()))
                 })
-                .tooltip(self.tip("The queue", &[Action::QueueFocus]))
+                .slow_tooltip(self.tip("The queue", &[Action::QueueFocus]))
                 .on_click(cx.listener(|odeion, _, _, cx| {
                     odeion.sidebar = true;
                     cx.notify();
@@ -6581,7 +6751,7 @@ impl Odeion {
                         .cursor_pointer()
                         .hover(|d| d.bg(rgb(t.hover)))
                         .child(ui::icon("list-music", 14., if self.playlist_view.is_some() { t.accent } else { t.text_dim }))
-                        .tooltip(self.tip("Playlists", &[]))
+                        .slow_tooltip(self.tip("Playlists", &[]))
                         .on_click(cx.listener(|odeion, _, _, cx| {
                             odeion.sidebar = true;
                             cx.notify();
@@ -6616,7 +6786,7 @@ impl Odeion {
                     .child(ui::icon("list-music", 14., if on { t.accent } else { t.text_dim }))
                     .child(div().flex_1().min_w_0().truncate().child(p.name.clone()))
                     .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(count.to_string()))
-                    .tooltip(self.tip("Open it; right-click to play, rename or delete it", &[]))
+                    .slow_tooltip(self.tip("Open it; right-click to play, rename or delete it", &[]))
                     .on_click(cx.listener(move |odeion, _, _, cx| {
                         odeion.open_playlist(i);
                         cx.notify();
@@ -6646,7 +6816,7 @@ impl Odeion {
                         .cursor_pointer()
                         .hover(|d| d.bg(rgb(t.hover)))
                         .child(ui::icon(icon, 13., t.text))
-                        .tooltip(self.tip(what, &[]))
+                        .slow_tooltip(self.tip(what, &[]))
                         .on_click(cx.listener(move |odeion, _, _, cx| {
                             cx.stop_propagation();
                             act(odeion, i);
@@ -6668,7 +6838,7 @@ impl Odeion {
                         .map(|d| selected_cues(d, on))
                         .when(!on, |d| d.hover(|d| d.bg(rgb(t.hover))))
                         // Its buttons show only under the pointer, so the tooltip says so.
-                        .tooltip(self.tip("Click to play it now; to the top and remove at its right; right-click for more", &[]))
+                        .slow_tooltip(self.tip("Click to play it now; to the top and remove at its right; right-click for more", &[]))
                         .on_click(cx.listener(move |odeion, _, _, cx| {
                             odeion.play_queued(i);
                             cx.notify();
@@ -6946,7 +7116,7 @@ impl Odeion {
                             .font_family(MONO)
                             .text_xs()
                             .text_color(rgb(t.danger))
-                            .tooltip(self.tip(format!("Can't read it: {why}"), &[]))
+                            .slow_tooltip(self.tip(format!("Can't read it: {why}"), &[]))
                             .child("can't read"),
                         None => div()
                             .id(("songs", i))
@@ -6971,7 +7141,7 @@ impl Odeion {
                             .items_center()
                             .justify_center()
                             .rounded_sm()
-                            .tooltip(self.tip("Remove this folder", &[]))
+                            .slow_tooltip(self.tip("Remove this folder", &[]))
                             .hover(|d| d.bg(rgb(t.hover)))
                             .child(ui::icon("x", 14., t.text_dim))
                             .on_click(cx.listener(move |odeion, _, _, cx| {
@@ -7464,7 +7634,7 @@ impl Odeion {
                 .hover(|d| d.bg(rgb(t.hover)))
                 .child(ui::icon(icon, 14., t.accent))
                 .child(div().text_sm().text_color(rgb(t.accent_text)).child(label))
-                .tooltip(self.tip(tip, keys))
+                .slow_tooltip(self.tip(tip, keys))
                 .on_click(cx.listener(move |odeion, _, _, cx| {
                     match button {
                         empty::Button::AddFolder => odeion.pick_folders(cx),
@@ -7550,6 +7720,28 @@ impl Render for Odeion {
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
+            // The mouse's back button (and the swipe some mice send for it) does what Esc
+            // does: out of a menu, sheet or search, back from an album, artist or
+            // playlist, out of practice. Heard on the window, since menus and sheets
+            // cover the views that would hear it.
+            .child({
+                let odeion = cx.entity().downgrade();
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                            if phase.bubble()
+                                && e.button == MouseButton::Navigate(gpui::NavigationDirection::Back)
+                                && let Ok(keystroke) = gpui::Keystroke::parse("escape")
+                            {
+                                let esc = KeyDownEvent { keystroke, is_held: false, prefer_character_input: false };
+                                let _ = odeion.update(cx, |odeion, cx| odeion.key(&esc, window, cx));
+                            }
+                        })
+                    },
+                )
+                .absolute()
+            })
             // The menu bar's entries that need the window; the rest are in `main.rs`.
             .on_action(cx.listener(|odeion, _: &OpenSettings, _, cx| {
                 odeion.help = false;

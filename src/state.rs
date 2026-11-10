@@ -247,13 +247,15 @@ impl Favorites {
         Favorites(load_json(file))
     }
 
-    pub fn save(&self, file: &Path) {
+    /// Saves through a temp file and a rename, so a crash can't leave half a file.
+    pub fn store(&self, file: &Path) -> std::io::Result<()> {
         if let Some(dir) = file.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
-        if let Ok(json) = serde_json::to_vec(&self.0) {
-            let _ = std::fs::write(file, json);
-        }
+        let json = serde_json::to_vec(&self.0).map_err(std::io::Error::other)?;
+        let tmp = file.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, file)
     }
 }
 
@@ -287,6 +289,18 @@ mod tests {
         assert!(f.contains(Path::new("/a")));
         assert!(!f.toggle(Path::new("/a")));
         assert_eq!(f, Favorites::default());
+    }
+
+    #[test]
+    fn favourites_survive_a_save_through_a_temp_file() {
+        let dir = std::env::temp_dir().join(format!("odeion-favourites-{}", std::process::id()));
+        let file = dir.join("favorites.json");
+        let mut f = Favorites::default();
+        f.toggle(Path::new("/a"));
+        f.store(&file).unwrap();
+        assert_eq!(Favorites::load(&file), f);
+        assert!(!file.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
