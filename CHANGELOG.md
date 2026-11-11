@@ -5,6 +5,8 @@ release's notes on GitHub.
 
 ## Unreleased
 
+## 0.5.0 (2026-11-11)
+
 **New**
 
 - Check for Updates installs a new version itself: it downloads it in the background,
