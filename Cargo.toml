@@ -1,6 +1,6 @@
 [package]
 name = "odeion"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "PolyForm-Noncommercial-1.0.0"
 
@@ -11,6 +11,7 @@ gpui_platform ={ package = "gpui-pre-platform", version = "=0.3.9", features = [
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lofty = "0.25.4"
 minisign-verify = "0.3.0"
+mp3lame-encoder = "0.3.0"
 raw-window-handle = "0.6"
 rodio = { version = "0.22.2", features = ["symphonia-aiff"] }
 rustfft = "6"
@@ -20,6 +21,7 @@ signalsmith-stretch = "0.1"
 souvlaki = "0.8"
 symphonia = { version = "=0.5.5", features = ["mp3", "flac", "pcm", "vorbis", "ogg", "wav", "aiff", "isomp4", "aac", "alac"] }
 ureq = "3.5.1"
+vorbis_rs = "0.5.6"
 
 [build-dependencies]
 embed-resource = "3"

@@ -47,6 +47,8 @@ came to play it.</sub></p>
   lines them up. Mute or solo with one key.
 - Beats found from the recording, so loops snap to them even on records that drift.
 - Name sections and drop a marker. Every song comes back as you left it.
+- Export a loop or a section as MP3 or Ogg, slowed and shifted as you play it or as
+  recorded, with the stems as you hear them.
 
 ![A song with its stems](docs/screenshots/stems.png)
 
@@ -113,6 +115,10 @@ Odeion stands on these projects:
 - [Signalsmith Stretch](https://signalsmith-audio.co.uk/code/stretch/) for changing
   speed and pitch.
 - [Lofty](https://github.com/Serial-ATA/lofty-rs) for tags and covers.
+- [LAME](https://lame.sourceforge.io) for exporting MP3, through
+  [mp3lame-encoder](https://github.com/DoumanAsh/mp3lame-encoder), and
+  [libvorbis](https://xiph.org/vorbis/) with the aoTuV patches for exporting Ogg, through
+  [vorbis-rs](https://github.com/ComunidadAylas/vorbis-rs).
 - [RustFFT](https://github.com/ejmahler/RustFFT) for the spectra behind beat finding.
 - [souvlaki](https://github.com/Sinono3/souvlaki) for media keys and Now Playing.
 - [ureq](https://github.com/algesten/ureq) for checking for updates, and
@@ -142,4 +148,6 @@ Odeion stands on these projects:
 [PolyForm Noncommercial 1.0.0](LICENSE): free to use, change and share for any
 noncommercial purpose (personal use, study, teaching, hobby projects, charities). Selling
 Odeion or using it in a commercial product needs the author's permission. The bundled
-fonts and icons keep their own licences, beside them in `assets/`.
+fonts and icons keep their own licences, beside them in `assets/`. LAME, built into
+Odeion for MP3, is under the [LGPL](https://www.gnu.org/licenses/lgpl-3.0.html): this
+source lets you build Odeion with another version of it.

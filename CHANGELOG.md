@@ -5,6 +5,16 @@ release's notes on GitHub.
 
 ## Unreleased
 
+## 0.6.0 (2026-11-11)
+
+**New**
+
+- Export a section or the loop as an MP3 or Ogg file, one pass of it: right-click the
+  section (or the loop bar), choose whether it keeps your speed and pitch and, with
+  stems, whether it's the mix as you hear it, then where to save it.
+
+  ![Export in a section's menu](https://raw.githubusercontent.com/timvancann/odeion/v0.6.0/docs/screenshots/export.png)
+
 ## 0.5.0 (2026-11-11)
 
 **New**

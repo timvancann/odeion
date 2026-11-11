@@ -300,6 +300,15 @@ struct Shaping {
     moved: bool,
 }
 
+/// The export sheet: what it saves (the loop or a section, by name) and the highlighted
+/// row. The choices themselves are in settings.
+struct ExportSheet {
+    start: Duration,
+    end: Duration,
+    part: String,
+    at: usize,
+}
+
 /// Adding songs to a playlist: which songs (one, or a list's from a menu), the
 /// highlighted row, and the name typed for a new playlist.
 struct AddTo {
@@ -413,6 +422,8 @@ pub struct Odeion {
     training: Option<u64>,
     /// The trainer's settings sheet, when open: the highlighted setting.
     trainer_sheet: Option<usize>,
+    /// The export sheet, open on a loop or a section.
+    export_sheet: Option<ExportSheet>,
     /// The EQ sheet, with its highlighted column: the preamp (0) or a band.
     eq_sheet: Option<usize>,
     /// A name being typed to save the EQ as a preset.
@@ -661,6 +672,7 @@ impl Odeion {
             speed: Default::default(),
             training: None,
             trainer_sheet: None,
+            export_sheet: None,
             eq_sheet: None,
             eq_naming: None,
             eq_drag: None,
@@ -2797,6 +2809,23 @@ impl Odeion {
             self.eq_key(at, k, press, typed);
             return cx.notify();
         }
+        if let Some(sheet) = &self.export_sheet {
+            let (rows, at) = (self.export_rows(), sheet.at);
+            match k.key.as_str() {
+                "escape" => self.export_sheet = None,
+                "enter" => self.start_export(cx),
+                "up" | "k" => self.export_at(at.saturating_sub(1)),
+                "down" | "j" => self.export_at((at + 1).min(rows.len().saturating_sub(1))),
+                "left" | "right" | "h" | "l" | "space" => {
+                    if let Some(&row) = rows.get(at) {
+                        let on = self.settings.export.get(row);
+                        self.settings.export.set(row, !on);
+                    }
+                }
+                _ => {}
+            }
+            return cx.notify();
+        }
         if let Some(at) = self.trainer_sheet {
             let field = crate::trainer::FIELDS[at];
             match k.key.as_str() {
@@ -3188,6 +3217,7 @@ impl Odeion {
                     self.loop_region(i);
                 }
             }
+            Action::Export => self.open_export(None),
             Action::Practice => {
                 self.practice = !self.practice;
                 self.searching &= !self.practice;
@@ -3288,6 +3318,88 @@ impl Odeion {
         }
     }
 
+    /// Opens the export sheet on section `i`, or on the loop.
+    fn open_export(&mut self, section: Option<usize>) {
+        let part = match section {
+            Some(i) => self.recording().and_then(|r| self.regions.of(&r).get(i).cloned()).map(|r| (r.start, r.end, r.name)),
+            None => {
+                let looping = self.audio.looping;
+                looping.end.map(|end| {
+                    let start = looping.start.unwrap_or_default();
+                    (start, end, format!("loop {}", ui::clock(start).replace(':', ".")))
+                })
+            }
+        };
+        match part {
+            Some((start, end, part)) => self.export_sheet = Some(ExportSheet { start, end, part, at: 0 }),
+            None => self.message = Some(("no loop to export".into(), false)),
+        }
+    }
+
+    /// The export sheet's rows for what plays now (`export::rows`).
+    fn export_rows(&self) -> Vec<crate::export::Row> {
+        crate::export::rows(self.speed.now() != 100, self.speed.pitch() != 0, self.audio.files.len() > 1)
+    }
+
+    fn export_at(&mut self, at: usize) {
+        if let Some(sheet) = &mut self.export_sheet {
+            sheet.at = at;
+        }
+    }
+
+    /// Exports what the sheet is open on, as it says: asks where to save it, then
+    /// renders and encodes on a thread while the song plays on, saying when it's done.
+    fn start_export(&mut self, cx: &mut Context<Self>) {
+        use crate::export::{Job, file_name};
+        let Some(sheet) = self.export_sheet.take() else { return };
+        self.save_settings();
+        let rows = self.export_rows();
+        let choices = self.settings.export;
+        let on = |row| rows.contains(&row) && choices.get(row);
+        let files = self.audio.files.clone();
+        let gains = if on(crate::export::Row::Stems) { self.gains() } else { vec![1.0; files.len()] };
+        let job = Job {
+            files,
+            gains,
+            start: sheet.start,
+            end: sheet.end,
+            speed: if on(crate::export::Row::Speed) { self.speed.factor() } else { 1.0 },
+            semitones: if on(crate::export::Row::Pitch) { self.speed.pitch() as f32 / 100.0 } else { 0.0 },
+            format: choices.format,
+        };
+        let song = self.now.as_ref().map(|n| n.title.clone()).unwrap_or_default();
+        let name = file_name(&song, &sheet.part, job.format);
+        let home = std::env::home_dir().unwrap_or_default();
+        let folder = self.settings.export_folder.clone().filter(|f| f.is_dir()).unwrap_or_else(|| home.join("Downloads"));
+        let picked = cx.prompt_for_new_path(&folder, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut path))) = picked.await else { return };
+            // The file is what the sheet said, whatever the name typed ends in.
+            let extension = job.format.extension();
+            if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case(extension)) {
+                let mut name = path.file_name().unwrap_or_default().to_os_string();
+                name.push(format!(".{extension}"));
+                path.set_file_name(name);
+            }
+            let saved = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let _ = this.update(cx, |odeion, cx| {
+                odeion.settings.export_folder = path.parent().map(std::path::Path::to_path_buf);
+                odeion.save_settings();
+                odeion.message = Some((format!("exporting {saved}…"), false));
+                cx.notify();
+            });
+            let done = cx.background_executor().spawn(async move { crate::export::export(&job, &path) }).await;
+            let _ = this.update(cx, |odeion, cx| {
+                odeion.message = Some(match done {
+                    Ok(()) => (format!("exported {saved}"), false),
+                    Err(e) => (format!("couldn't export {saved}: {e}"), true),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn remove_region(&mut self, i: usize) {
         let Some(recording) = self.recording() else { return };
         if let Some(name) = self.regions.remove(&recording, i) {
@@ -3322,6 +3434,7 @@ impl Odeion {
             // Moves the marker there; it never clears from a menu.
             (Target::Moment(at), Action::Marker) => self.set_marker(Some(self.snap(at))),
             (Target::Section(i), Action::LoopRegion) => self.loop_region(i),
+            (Target::Section(i), Action::Export) => self.open_export(Some(i)),
             // Asks first, beside the section lane.
             (Target::Section(i), Action::RemoveRegion) => self.ask_delete_section(Some(i)),
             (Target::Section(i), Action::SaveRegion) => {
@@ -6987,6 +7100,113 @@ impl Odeion {
             )
     }
 
+    /// The export sheet: a choice per row that applies (speed and pitch while they differ
+    /// from the recording, stems for a stem set, the format), each a pair to pick from;
+    /// Export asks where to save it.
+    fn render_export_sheet(&self, sheet: &ExportSheet, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::export::{Format, Row};
+        let t = t();
+        let choices = self.settings.export;
+        let rows: Vec<_> = self.export_rows().into_iter().enumerate().map(|(i, row)| {
+            let (off, on) = match row {
+                Row::Speed => ("As recorded".to_string(), format!("{}%, as you play it", self.speed.now())),
+                Row::Pitch => ("As recorded".to_string(), crate::speed::pitch_label(self.speed.pitch())),
+                Row::Stems => ("All at full level".to_string(), "As you hear them".to_string()),
+                Row::Format => (Format::Mp3.name().to_string(), Format::Ogg.name().to_string()),
+            };
+            let picked = choices.get(row);
+            let option = |label: String, value: bool| {
+                let lit = picked == value;
+                div()
+                    .id(("export-option", i * 2 + value as usize))
+                    .h(px(28.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .text_sm()
+                    .map(|d| lit_cues(d, lit))
+                    .when(!lit, |d| d.cursor_pointer().hover(|d| d.bg(rgb(t.hover))))
+                    .text_color(rgb(if lit { t.accent_text } else { t.text_dim }))
+                    .child(label)
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        odeion.export_at(i);
+                        odeion.settings.export.set(row, value);
+                        cx.notify();
+                    }))
+            };
+            div()
+                .h(px(40.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .map(|d| selected_cues(d, i == sheet.at))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .when(i == sheet.at, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                        .text_color(rgb(t.text))
+                        .child(row.label()),
+                )
+                .child(option(off, false))
+                .child(option(on, true))
+        }).collect();
+        let what = format!("{} to {}, once", ui::clock(sheet.start), ui::clock(sheet.end));
+        overlay("export-sheet")
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                odeion.export_sheet = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("export")
+                    .w(px(480.))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(rgb(t.surface))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    // A click inside the sheet is not a click outside it.
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        self.sheet_header(
+                            "audio-waveform",
+                            &format!("Export {}", sheet.part),
+                            self.button("export-close", "x", "Close", &[], false, cx, |odeion, _, _| odeion.export_sheet = None),
+                        )
+                        .pb_1(),
+                    )
+                    .child(div().pb_3().text_sm().text_color(rgb(t.text_dim)).child(what))
+                    .children(rows)
+                    .child(
+                        div()
+                            .pt_4()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .font_family(MONO)
+                                    .text_xs()
+                                    .text_color(rgb(t.text_dim))
+                                    .child(if self.vim() { "j k pick   h l change" } else { "↑ ↓ pick   ← → change" }),
+                            )
+                            .child(self.choice("export-cancel", "Cancel", "Esc", t.text, cx, |odeion| odeion.export_sheet = None))
+                            .child(
+                                self.choice("export-go", "Export…", "Enter", t.accent_text, cx, |_| {})
+                                    .on_click(cx.listener(|odeion, _, _, cx| odeion.start_export(cx))),
+                            ),
+                    ),
+            )
+    }
+
     /// The dialog naming the loop as a region (`r`), or renaming a section from its menu:
     /// typing goes to the name, Enter saves (an empty name saves one saying where it is),
     /// Esc or a click outside cancels.
@@ -8386,6 +8606,7 @@ impl Render for Odeion {
             .children(self.naming.clone().map(|name| self.render_naming(name, cx)))
             .children(self.prefs.as_ref().map(|p| self.render_prefs(p, cx)))
             .children(self.trainer_sheet.map(|at| self.render_trainer_sheet(at, cx)))
+            .children(self.export_sheet.as_ref().map(|sheet| self.render_export_sheet(sheet, cx)))
             .children(self.eq_sheet.map(|at| self.render_eq_sheet(at, cx)))
             .children(self.add_to.as_ref().map(|p| self.render_picker(p, cx)))
             .children(self.render_menu(cx))

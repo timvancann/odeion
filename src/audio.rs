@@ -267,7 +267,7 @@ impl<S: Source> Source for Mix<S> {
 /// up to 1.8, and the hardware would clip them into crackle. Below 0.9 nothing changes;
 /// above it peaks bend smoothly toward 1 and never pass it. Only those rare peaks are
 /// touched, so the level stays as it was.
-fn soft_limit(x: f32) -> f32 {
+pub(crate) fn soft_limit(x: f32) -> f32 {
     const KNEE: f32 = 0.9;
     let size = x.abs();
     if size <= KNEE {

@@ -78,6 +78,12 @@ and draws:
 - `eq.rs`: the global EQ (ten Winamp bands and a preamp, ±12 dB), its presets
   (built in and saved, in `settings.json`) and the peaking filters' maths. It plays
   as `audio::Equalized`, last in the sound after the stretcher.
+- `export.rs`: a section or the loop saved as an audio file, one pass (Tim, 2026-11-11,
+  a request from YouTube; close to editing, but light, so in): rendered from the files
+  apart from the player, as recorded or at the speed and pitch played (Signalsmith's
+  `exact`), all stems at full level or as heard, without the EQ and volume, to MP3
+  (LAME, LGPL, built in; the README says so) or Ogg Vorbis. The sheet's choices are kept
+  in settings, as is the folder last saved to (Downloads at first).
 - `speed.rs`: the speed in whole percent, 25 to 110, and the pitch in cents, up to an
   octave either way; both kept by a song while it plays as recorded.
 - `trainer.rs`: the speed trainer: from, to, step, every N repeats, turned into a
@@ -245,12 +251,12 @@ add a key to both or they fail.
 - **Right-click menus** (`menu.rs`) wherever a Mac user would look for one: a
   waveform or the progress bar (loop starts or ends here, marker here, all at the
   moment clicked; inside the loop also save it as a section and clear it; on the
-  marker's flag, play from it and clear it), a section (loop it, rename, delete), a
+  marker's flag, play from it and clear it), a section (loop it, export, rename, delete), a
   song row (favourite, album, artist, queue, add to a playlist, add a variation, and
   in a playlist remove and move; the row is highlighted), a queued song (play now, to
   the top, remove, album, artist, add to a playlist), the now-playing card (the
   playing song's entries, then its loop and marker while it has them), the loop bar
-  (on or off, replay, save, clear; without a loop, its edges at the playhead), a
+  (on or off, replay, save, export, clear; without a loop, its edges at the playhead), a
   playlist in the sidebar or the search results (open, play, shuffle, queue all,
   sort by artist or title, rename, delete), Favourites in the sidebar, an artist's row in
   the grouped list (or an album's, in an artist's view), and

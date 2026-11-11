@@ -143,6 +143,9 @@ pub struct Settings {
     /// The global EQ, and the presets the user saved.
     pub eq: crate::eq::Eq,
     pub eq_presets: Vec<crate::eq::Preset>,
+    /// What the export sheet was left saying, and the folder last exported to.
+    pub export: crate::export::Choices,
+    pub export_folder: Option<PathBuf>,
 }
 
 /// How the list shows songs: artist, title and album in columns (a repeated artist
@@ -181,6 +184,8 @@ impl Default for Settings {
             list: ListView::Columns,
             eq: Default::default(),
             eq_presets: Vec::new(),
+            export: Default::default(),
+            export_folder: None,
         }
     }
 }
@@ -341,6 +346,8 @@ mod tests {
             list: ListView::Grouped,
             eq: crate::eq::Eq { on: true, preamp: -2, bands: [3, 2, 0, 0, 0, 0, 0, 1, 2, 3] },
             eq_presets: vec![crate::eq::Preset { name: "Desk".into(), preamp: 0, bands: [1; 10] }],
+            export: crate::export::Choices { speed: false, format: crate::export::Format::Ogg, ..Default::default() },
+            export_folder: Some("/exports".into()),
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s);

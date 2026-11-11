@@ -5,6 +5,7 @@ mod audio;
 mod beats;
 mod empty;
 mod eq;
+mod export;
 mod keys;
 mod library;
 mod menu;

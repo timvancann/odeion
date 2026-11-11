@@ -109,6 +109,9 @@ pub enum Action {
     Follow,
     /// Delete the region in play.
     RemoveRegion,
+    /// Save the loop as an audio file; from a section's menu, that section. A menu
+    /// entry, no key.
+    Export,
     /// The playing song's next recording: the song, then each variation.
     Variation,
     /// Pick files to add as a variation of the playing song.

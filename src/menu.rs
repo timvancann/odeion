@@ -114,6 +114,7 @@ impl Menu {
                 (if on { "Loop off" } else { "Loop on" }, Action::LoopSwitch),
                 (replay, Action::FromLoopStart),
                 ("Save the loop as a section…", Action::SaveRegion),
+                ("Export the loop…", Action::Export),
                 ("Clear the loop", Action::LoopClear),
             ],
             false => {
@@ -235,6 +236,7 @@ impl Menu {
             Target::Section(i),
             vec![
                 ("Loop it", Action::LoopRegion),
+                ("Export…", Action::Export),
                 ("Rename", Action::SaveRegion),
                 ("Delete", Action::RemoveRegion),
             ],
