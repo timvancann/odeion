@@ -149,3 +149,32 @@ jobs:
           Compress-Archive -Path target/release/odeion.exe -DestinationPath "Odeion-$version-Windows.zip"
           Copy-Item "Odeion-$version-Windows.zip" Odeion-Windows.zip
           gh release upload "$env:GITHUB_REF_NAME" "Odeion-$version-Windows.zip" Odeion-Windows.zip
+
+  # Signs both zips for Odeion's own updater (update.rs installs nothing its public key
+  # doesn't verify) and adds the signatures to the release. The trusted comment names the
+  # file and version, so an old release can't be passed off as a new one. The only job
+  # with MINISIGN_KEY; without it the release can still be downloaded by hand.
+  sign:
+    needs: [release, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sign the zips
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+        run: |
+          if [ -z "$MINISIGN_KEY" ]; then
+            echo "::warning::No MINISIGN_KEY secret: Odeion can't install this release by itself. See docs/releasing.md."
+            exit 0
+          fi
+          sudo apt-get update -q && sudo apt-get install -y -q minisign
+          version="${GITHUB_REF_NAME#v}"
+          key="$RUNNER_TEMP/minisign.key"
+          printf '%s\n' "$MINISIGN_KEY" > "$key"
+          gh release download "$GITHUB_REF_NAME" -p Odeion-macOS.zip -p Odeion-Windows.zip
+          for zip in Odeion-macOS.zip Odeion-Windows.zip; do
+            minisign -S -s "$key" -m "$zip" -t "$zip $version"
+          done
+          rm "$key"
+          gh release upload "$GITHUB_REF_NAME" Odeion-macOS.zip.minisig Odeion-Windows.zip.minisig

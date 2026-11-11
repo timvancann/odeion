@@ -150,6 +150,44 @@ pub fn frame(length: Duration) -> Duration {
     Duration::from_secs_f64((length.as_secs_f64() * 1.3).max(0.5))
 }
 
+/// The view after a jump to the section from `start` to `end`: its span and where it
+/// starts, the section centred and about two thirds of it (Tim, 2026-11-11), kept inside
+/// the song.
+pub fn section_view(start: Duration, end: Duration, song: Duration) -> (Duration, Duration) {
+    let most = song.max(Duration::from_millis(500));
+    let span = end.saturating_sub(start).mul_f64(1.5).clamp(Duration::from_millis(500), most);
+    let middle = (start + end).as_secs_f64() / 2.0;
+    (span, inside(middle - span.as_secs_f64() / 2.0, span.as_secs_f64(), song).0)
+}
+
+/// The view held at `from` shows `at`.
+pub fn shows(from: Duration, span: Duration, song: Duration, at: Duration) -> bool {
+    let (from, to) = moved(from, span, song);
+    from <= at && at <= to
+}
+
+/// A view held on a section after a jump, as the playhead moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Held {
+    /// Not yet seen the playhead: right after the seek it may still read where it was.
+    Waiting,
+    /// The playhead has shown in it.
+    Seen,
+    /// The playhead has left it: follow again.
+    Left,
+}
+
+impl Held {
+    /// What the hold is after the playhead read `shown` in the view (or not).
+    pub fn next(self, shown: bool) -> Held {
+        match (self, shown) {
+            (Held::Waiting, true) => Held::Seen,
+            (Held::Seen, false) | (Held::Left, _) => Held::Left,
+            (held, _) => held,
+        }
+    }
+}
+
 /// What ⌘0 shows: the loop framed with room, or without a loop the whole song. Gives
 /// the span and, when following the playhead wouldn't show the loop (looping off, or
 /// the playhead outside it), where the view has to move to.
@@ -315,6 +353,32 @@ mod tests {
         // Looping switched off: following wouldn't show it either.
         let off = Loop { off: true, ..looping };
         assert!(zoom_fit(s(45.), off, song).1.is_some());
+    }
+
+    #[test]
+    fn a_section_jumped_to_is_centred_in_two_thirds_of_the_view() {
+        let song = s(200.);
+        let (span, from) = section_view(s(90.), s(110.), song);
+        assert!((span.as_secs_f64() - 30.).abs() < 1e-9);
+        assert!((from.as_secs_f64() - 85.).abs() < 1e-9);
+        // At the song's start or end it stays inside the song, the section still whole.
+        for start in [0., 1., 180.] {
+            let (span, from) = section_view(s(start), s(start + 20.), song);
+            assert!(shows(from, span, song, s(start)) && shows(from, span, song, s(start + 20.)), "section at {start}");
+        }
+        // Played past its end, the view no longer shows the playhead.
+        assert!(!shows(from, span, song, s(116.)));
+        // The hold waits for the playhead to show (a seek may still read the old spot),
+        // then lets go when it leaves.
+        let held = Held::Waiting.next(shows(from, span, song, s(10.)));
+        assert_eq!(held, Held::Waiting);
+        let held = held.next(shows(from, span, song, s(90.)));
+        assert_eq!(held, Held::Seen);
+        assert_eq!(held.next(shows(from, span, song, s(110.))), Held::Seen);
+        assert_eq!(held.next(shows(from, span, song, s(116.))), Held::Left);
+        // Never smaller than half a second, nor past the song.
+        assert_eq!(section_view(s(10.), s(10.1), song).0, s(0.5));
+        assert_eq!(section_view(s(10.), s(190.), song), (song, Duration::ZERO));
     }
 
     /// A mono 16-bit WAV of `seconds` silence with one full-scale click at `click`.

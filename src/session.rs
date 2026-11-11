@@ -34,6 +34,8 @@ pub struct Session {
     pub queue: Queue,
     /// The sidebar was collapsed to its icons. It's open the first time.
     pub sidebar_collapsed: bool,
+    /// The practice view's list of sections was folded away. It's open the first time.
+    pub sections_collapsed: bool,
 }
 
 impl Session {
@@ -72,6 +74,7 @@ mod tests {
             span: Some(Duration::from_secs(8)),
             queue: Queue::default(),
             sidebar_collapsed: true,
+            sections_collapsed: true,
         };
         let mut session = session;
         session.queue.add(Path::new("/m/next.mp3"));

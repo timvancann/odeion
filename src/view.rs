@@ -52,6 +52,8 @@ const SCROLLBAR_LINGERS: Duration = Duration::from_secs(1);
 const QUIT_AGAIN: Duration = Duration::from_secs(10);
 /// The note on the card while Check for Updates waits for GitHub.
 const CHECKING: &str = "checking for updates…";
+/// The note on the card while an update downloads.
+const DOWNLOADING: &str = "downloading the update…";
 const ROW: f32 = 44.;
 /// The transparent title bar's height, where the traffic lights sit.
 const TITLEBAR: f32 = 40.;
@@ -183,13 +185,25 @@ impl Render for SongGhost {
 /// was only passing over the buttons.
 const TIP_DELAY: Duration = Duration::from_millis(1000);
 
-/// Tooltips after Odeion's `TIP_DELAY`.
+/// The same for what the pointer rests on while practising (the waveforms, the
+/// sections, the stems' lanes): a second put one up every time it stopped there (Tim,
+/// 2026-11-11).
+const SURFACE_TIP_DELAY: Duration = Duration::from_millis(2500);
+
+/// Tooltips after Odeion's `TIP_DELAY`, or `SURFACE_TIP_DELAY`.
 trait SlowTooltip: StatefulInteractiveElement {
     fn slow_tooltip(self, build: impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static) -> Self
     where
         Self: Sized,
     {
         self.tooltip(build).tooltip_show_delay(TIP_DELAY)
+    }
+
+    fn slower_tooltip(self, build: impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static) -> Self
+    where
+        Self: Sized,
+    {
+        self.tooltip(build).tooltip_show_delay(SURFACE_TIP_DELAY)
     }
 }
 
@@ -273,14 +287,16 @@ struct Sweep {
     alt: bool,
 }
 
-/// A press on a section's edge in the section lane: which section, its start (or end),
-/// the x pressed, and whether it has moved far enough to be a drag. One that never
-/// moves is a click, and plays the section, so a narrow one under its grips still can be.
+/// A press on a section's edge in the lane over the detail waveform: which section, its
+/// start (or end), the x pressed, whether it was a double press, and whether it has moved
+/// far enough to be a drag. One that never moves is a click on the section (a jump, or a
+/// loop when double), so a narrow one under its grips still can be.
 #[derive(Clone, Copy)]
 struct Shaping {
     i: usize,
     start: bool,
     x: Pixels,
+    double: bool,
     moved: bool,
 }
 
@@ -414,8 +430,6 @@ pub struct Odeion {
     shaping: Option<Shaping>,
     /// The section whose delete button or menu entry asked "for good?".
     deleting_section: Option<Region>,
-    /// The section lane, where it was last drawn, spanning the whole song.
-    lane: Strip,
     /// Files being made a variation of a song, in the background.
     adding: Option<(PathBuf, Receiver<Result<Variation, String>>)>,
     wave_error: Option<String>,
@@ -424,6 +438,9 @@ pub struct Odeion {
     /// Where the detail view starts once dragged away on the overview; it stays there
     /// until Follow (or a jump: a section, `o`, another song). None follows the playhead.
     panned: Option<Duration>,
+    /// Some while the held view is the one a jump to a section centred on it: it follows
+    /// the playhead again once that has left it (`wave::Held`).
+    section_held: Option<wave::Held>,
     /// A press in the overview's box: a drag moves the view, a click seeks on release.
     panning: Option<Pan>,
     /// A press on the detail waveform: a drag draws a loop, a click seeks on release.
@@ -451,6 +468,8 @@ pub struct Odeion {
     queue: Queue,
     /// The sidebar is open; collapsed, only its icons show.
     sidebar: bool,
+    /// The practice view's list of sections is folded away to a button.
+    sections_collapsed: bool,
     /// The highlighted song in the queue, while the keyboard is in it (`Mode::Queue`).
     queue_at: Option<usize>,
     playlists: Playlists,
@@ -502,8 +521,11 @@ pub struct Odeion {
     /// When a quit was held back because saving failed: another within `QUIT_AGAIN`
     /// quits anyway, a later one is held again.
     quit_held: Option<std::time::Instant>,
-    /// Check for Updates is waiting for GitHub.
+    /// Check for Updates is waiting for GitHub, or an update is downloading.
     checking: bool,
+    /// An update put in place of this copy (`update::install`): its version and where,
+    /// for the title bar's Restart to Update.
+    updated: Option<(String, PathBuf)>,
 }
 
 fn cache_file() -> PathBuf {
@@ -646,13 +668,13 @@ impl Odeion {
             marks: HashMap::new(),
             shaping: None,
             deleting_section: None,
-            lane: Strip::default(),
             resume: Resume::load(&resume_file()),
             kept: std::time::Instant::now(),
             adding: None,
             wave_error: None,
             span: SPAN,
             panned: None,
+            section_held: None,
             panning: None,
             sweeping: None,
             smooth: Default::default(),
@@ -670,6 +692,7 @@ impl Odeion {
             playlist: Playlist::default(),
             queue: Queue::default(),
             sidebar: true,
+            sections_collapsed: false,
             queue_at: None,
             playlists: Playlists::load(&playlists_file()),
             playlist_view: None,
@@ -697,6 +720,7 @@ impl Odeion {
             kept_at: Duration::ZERO,
             quit_held: None,
             checking: false,
+            updated: None,
         };
         odeion.apply_theme(cx);
         odeion.message = odeion.audio.error.clone().map(|e| (e, true));
@@ -777,13 +801,17 @@ impl Odeion {
         .detach();
     }
 
+    /// Clears the card's note `note`, never a message that came after it.
+    fn clear_note(&mut self, note: &str) {
+        if self.message.as_ref().is_some_and(|(m, _)| m == note) {
+            self.message = None;
+        }
+    }
+
     fn show_update(&mut self, found: Result<crate::update::Found, String>, window: &mut Window, cx: &mut Context<Self>) {
         use crate::update::Found;
         self.checking = false;
-        // Clears only its own note, never a message that came after it.
-        if self.message.as_ref().is_some_and(|(m, _)| m == CHECKING) {
-            self.message = None;
-        }
+        self.clear_note(CHECKING);
         cx.notify();
         match found {
             Ok(Found::Latest(latest)) => {
@@ -795,20 +823,112 @@ impl Odeion {
                 };
                 let _ = window.prompt(PromptLevel::Info, "You're on the latest version", Some(&detail), &["OK"], cx);
             }
+            Ok(Found::Newer(release)) if self.updated.as_ref().is_some_and(|(v, _)| *v == release.version) => {
+                let title = format!("Odeion {} is installed", release.version);
+                let detail = "Restart Odeion to use it.";
+                let answer = window.prompt(PromptLevel::Info, &title, Some(detail), &["Restart", "Later"], cx);
+                cx.spawn(async move |this, cx| {
+                    if answer.await == Ok(0) {
+                        let _ = this.update(cx, |odeion, cx| odeion.restart_to_update(cx));
+                    }
+                })
+                .detach();
+            }
             Ok(Found::Newer(release)) => {
                 let title = format!("Odeion {} is out", release.version);
-                let detail = format!("You have {}.", env!("CARGO_PKG_VERSION"));
-                let answer =
-                    window.prompt(PromptLevel::Info, &title, Some(&detail), &["Download", "Later"], cx);
-                cx.spawn(async move |_, cx| {
-                    if answer.await == Ok(0) {
-                        cx.update(|cx| cx.open_url(&release.download));
+                let current = env!("CARGO_PKG_VERSION");
+                // Installed in place when it can be, else downloaded by hand, saying why.
+                let at = match (&release.signature, crate::update::installed()) {
+                    (Some(_), Ok(at)) => Ok(at),
+                    (None, _) => Err("This release can't install itself: download it instead.".to_string()),
+                    (_, Err(why)) => Err(why),
+                };
+                let (detail, choices) = match &at {
+                    Ok(_) => (
+                        format!("You have {current}. Odeion downloads it and puts it in place; restart to use it."),
+                        ["Install", "Later"],
+                    ),
+                    Err(why) => (format!("You have {current}. {why}"), ["Download", "Later"]),
+                };
+                let answer = window.prompt(PromptLevel::Info, &title, Some(&detail), &choices, cx);
+                cx.spawn_in(window, async move |this, cx| {
+                    if answer.await != Ok(0) {
+                        return;
                     }
+                    let _ = this.update_in(cx, |odeion, window, cx| match at {
+                        Ok(at) => odeion.install_update(release, at, window, cx),
+                        Err(_) => cx.open_url(&release.download),
+                    });
                 })
                 .detach();
             }
             Err(why) => {
                 let _ = window.prompt(PromptLevel::Warning, "Couldn't check for updates", Some(&why), &["OK"], cx);
+            }
+        }
+    }
+
+    /// Downloads `release` and puts it in place of the copy at `at` in the background
+    /// (`update::install`); then the title bar offers Restart to Update. A failure says
+    /// why and offers the download by hand.
+    fn install_update(
+        &mut self,
+        release: crate::update::Release,
+        at: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.checking {
+            return;
+        }
+        self.checking = true;
+        self.message = Some((DOWNLOADING.into(), false));
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let (done, release, at) = cx
+                .background_executor()
+                .spawn(async move { (crate::update::install(&release, &at), release, at) })
+                .await;
+            let failed = this
+                .update(cx, |odeion, cx| {
+                    odeion.checking = false;
+                    odeion.clear_note(DOWNLOADING);
+                    cx.notify();
+                    match done {
+                        Ok(version) => {
+                            odeion.message = Some((format!("Odeion {version} is installed: restart to use it"), false));
+                            odeion.updated = Some((version, at));
+                            None
+                        }
+                        Err(why) => Some(why),
+                    }
+                })
+                .ok()
+                .flatten();
+            if let Some(why) = failed {
+                let answer =
+                    cx.prompt(PromptLevel::Warning, "Couldn't install the update", Some(&why), &["Download", "OK"]);
+                if answer.await == Ok(0) {
+                    let _ = cx.update(|_, cx| cx.open_url(&release.download));
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Saves, then opens the copy an update put in place and quits this one.
+    fn restart_to_update(&mut self, cx: &mut Context<Self>) {
+        let Some((_, at)) = self.updated.clone() else { return };
+        // A save that fails holds the restart back, as it does a quit.
+        if !self.save_before_going("restart again to restart anyway") {
+            cx.notify();
+            return;
+        }
+        match crate::update::reopen(&at) {
+            Ok(()) => cx.quit(),
+            Err(e) => {
+                self.message = Some((format!("couldn't reopen Odeion ({e}); open it again to use the update"), true));
+                cx.notify();
             }
         }
     }
@@ -849,11 +969,7 @@ impl Odeion {
         // the same binary again.
         let exe = std::env::current_exe().unwrap_or_default();
         let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
-        let reopened = match bundle {
-            Some(app) => std::process::Command::new("open").arg("-n").arg(app).spawn(),
-            None => std::process::Command::new(&exe).spawn(),
-        };
-        match reopened {
+        match crate::update::reopen(bundle.unwrap_or(&exe)) {
             Ok(_) => cx.quit(),
             Err(e) => {
                 self.message = Some((format!("couldn't reopen Odeion ({e}); open it again to use the folder"), true));
@@ -1499,6 +1615,7 @@ impl Odeion {
             span: Some(self.span),
             queue: self.queue.clone(),
             sidebar_collapsed: !self.sidebar,
+            sections_collapsed: self.sections_collapsed,
         }
     }
 
@@ -1543,6 +1660,7 @@ impl Odeion {
         self.grid = session.grid;
         self.queue = session.queue.clone();
         self.sidebar = !session.sidebar_collapsed;
+        self.sections_collapsed = session.sections_collapsed;
         self.queue.retain(|p| self.by_path.contains_key(p));
         if let Some(span) = session.span {
             self.span = span;
@@ -1614,6 +1732,12 @@ impl Odeion {
     /// is held back with the error showing, so it isn't lost as the window goes; quitting
     /// again quits.
     fn save_for_quit(&mut self) -> bool {
+        self.save_before_going("quit again to quit anyway")
+    }
+
+    /// `save_for_quit` for any way out (quitting, restarting to update), `again` saying
+    /// how to go anyway.
+    fn save_before_going(&mut self, again: &str) -> bool {
         self.keep_spot();
         let saved = self.store_resume() & self.save_session();
         if saved || self.quit_held.is_some_and(|at| at.elapsed() < QUIT_AGAIN) {
@@ -1621,7 +1745,7 @@ impl Odeion {
         }
         self.quit_held = Some(std::time::Instant::now());
         if let Some((note, _)) = &self.message {
-            self.message = Some((format!("{note}; quit again to quit anyway"), true));
+            self.message = Some((format!("{note}; {again}"), true));
         }
         false
     }
@@ -1978,6 +2102,34 @@ impl Odeion {
                 cx.stop_propagation();
                 click(odeion);
                 cx.notify();
+            }))
+    }
+
+    /// The title bar's Restart to Update, once an update is in place, as in Zed.
+    fn restart_button(&self, version: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = t();
+        div()
+            .id("restart-to-update")
+            .flex_none()
+            .h(px(28.))
+            .px_2()
+            .mr_1()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .cursor_pointer()
+            .bg(rgb(t.raised))
+            .border_1()
+            .border_color(rgb(t.border))
+            .hover(|d| d.bg(rgb(t.hover)))
+            .text_sm()
+            .text_color(rgb(t.accent_text))
+            .child("Restart to update")
+            .slow_tooltip(self.tip(format!("Odeion {version} is installed: this reopens Odeion with it"), &[]))
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                // Not also a click on the title bar.
+                cx.stop_propagation();
+                odeion.restart_to_update(cx);
             }))
     }
 
@@ -2945,9 +3097,9 @@ impl Odeion {
             }
             Action::Region(forward) => {
                 let Some(recording) = self.recording() else { return };
-                let from = crate::regions::Regions::step_from(self.audio.looping, self.audio.position());
+                let from = self.regions.step_from(&recording, self.audio.looping, self.audio.position(), forward);
                 if let Some(region) = self.regions.step(&recording, from, forward).cloned() {
-                    self.play_region(&region);
+                    self.jump_to_region(&region);
                 }
             }
             Action::SectionStart => {
@@ -2962,6 +3114,7 @@ impl Odeion {
             }
             // Follow on or off: off holds the view where it is now.
             Action::Follow => {
+                self.section_held = None;
                 self.panned = match self.panned {
                     Some(_) => None,
                     None => Some(self.detail.0.get().1),
@@ -3055,6 +3208,7 @@ impl Odeion {
             Action::ZoomFit => {
                 let Some(song) = song else { return };
                 (self.span, self.panned) = wave::zoom_fit(self.audio.position(), self.audio.looping, song);
+                self.section_held = None;
             }
         }
     }
@@ -3352,6 +3506,41 @@ impl Odeion {
             crate::audio::Loop { start: Some(region.start), end: Some(region.end), off: false };
         self.frame_loop();
         self.audio.play_from(region.start);
+    }
+
+    /// To a section's start, playing or paused as it was (Tim, 2026-11-11: a click on a
+    /// section is mostly to go there; a double-click loops it). The view holds the
+    /// section centred, about two thirds of it, until the playhead leaves it. The loop
+    /// stays, switched off when the section starts outside it (`Loop::jumped`).
+    fn jump_to_region(&mut self, region: &Region) {
+        (self.panned, self.section_held) = (None, None);
+        if self.audio.looping.jumped(region.start) {
+            let again = match self.first_key(Action::LoopSwitch, keys::Mode::Practice) {
+                Some(key) => format!("{key} brings it back"),
+                None => "the loop button brings it back".into(),
+            };
+            self.message = Some((format!("{}: loop off, {again}", region.name), false));
+        }
+        // A loop still on stays framed (`wave::fit`), so only a section without one is.
+        if let Some(song) = self.audio.duration.filter(|_| !self.audio.looping.looping()) {
+            let (span, from) = wave::section_view(region.start, region.end, song);
+            (self.span, self.panned, self.section_held) = (span, Some(from), Some(wave::Held::Waiting));
+        }
+        if self.audio.ended() {
+            self.audio.play_from(region.start);
+        } else {
+            self.audio.seek(region.start);
+        }
+    }
+
+    /// Section `i` of the playing recording: a click jumps to it, a double-click loops it.
+    fn pick_region(&mut self, i: usize, double: bool) {
+        let Some(recording) = self.recording() else { return };
+        let Some(region) = self.regions.of(&recording).get(i).cloned() else { return };
+        match double {
+            true => self.play_region(&region),
+            false => self.jump_to_region(&region),
+        }
     }
 
     /// The playing recording's marker.
@@ -3732,6 +3921,7 @@ impl Odeion {
         let from = self.panned.unwrap_or(from);
         // Content follows the fingers, as in a list: a swipe to the left goes on in time.
         self.panned = Some(wave::scrolled(from, -dx * per_px, self.span, song));
+        self.section_held = None;
     }
 
     /// A press on the detail waveform: on a loop edge or the marker it grabs it and
@@ -3772,6 +3962,7 @@ impl Odeion {
             && let Some((now, _)) = self.overview.time_at(x)
         {
             self.panned = Some(wave::pan(pan.from, pan.at, now, self.span, song));
+            self.section_held = None;
         }
         self.panning = Some(pan);
     }
@@ -3849,8 +4040,9 @@ impl Odeion {
             }
             shape.moved |= f32::from(event.position.x - shape.x).abs() > 3.;
             self.shaping = Some(shape);
+            // The lane sits flush over the detail, as wide, so the detail's scale is its.
             let (true, Some(recording), Some((at, _))) =
-                (shape.moved, self.recording(), self.lane.time_at(event.position.x))
+                (shape.moved, self.recording(), self.detail.time_at(event.position.x))
             else {
                 return;
             };
@@ -3881,12 +4073,12 @@ impl Odeion {
 
     /// Lets go of a dragged edge: a section's is saved; the loop's and the marker just
     /// stay where they landed, the playhead carrying on (o plays from them). A section's
-    /// edge pressed without moving was a click on the section, and plays it.
+    /// edge pressed without moving was a click on the section: a jump, or a loop.
     fn drop_edge(&mut self, cx: &mut Context<Self>) {
         if let Some(shape) = self.shaping.take() {
             match shape.moved {
                 true => self.store_regions(),
-                false => self.loop_region(shape.i),
+                false => self.pick_region(shape.i, shape.double),
             }
             cx.notify();
         }
@@ -4509,7 +4701,7 @@ impl Odeion {
 
         let progress = div()
             .id("progress")
-            .slow_tooltip(self.tip("Click to jump; drag a loop edge or the marker; shift-click ends the loop; right-click for more", &[]))
+            .slower_tooltip(self.tip("Click to jump, drag a loop edge or the marker", &[]))
             .children(duration.map(|d| edge_grips(looping, self.marker(), Duration::ZERO, d)).into_iter().flatten())
             .relative()
             .h(px(16.))
@@ -4966,6 +5158,7 @@ impl Odeion {
             .map(|(_, w)| w.clone());
         let song = self.audio.duration.or(wave.as_ref().map(|w| w.length()));
         let detail_dragged = self.sweeping.is_some()
+            || self.shaping.is_some()
             || self.dragging.as_ref().is_some_and(|(_, strip)| Rc::ptr_eq(&strip.0, &self.detail.0));
         // A loop being drawn shows as the loop until it's let go.
         let looping = self.sweeping.and_then(|s| self.swept(s)).unwrap_or(looping);
@@ -5008,6 +5201,12 @@ impl Odeion {
         }
         let toolbar = self.practice_toolbar(about, cx);
         let lane = self.region_lane(song.unwrap_or(self.span), cx);
+        let detail_lane = self.detail_lane(from, to, cx);
+        let panel = self.section_panel(cx);
+        let edges: Vec<Duration> = self
+            .recording()
+            .map(|r| self.regions.of(&r).iter().flat_map(|s| [s.start, s.end]).collect())
+            .unwrap_or_default();
         let loop_bar = self.loop_bar(cx);
         let lanes = self.stem_lanes(song.unwrap_or(self.span), at, cx);
         // The overview's box, what the detail shows, is grabbed to move that view.
@@ -5032,12 +5231,8 @@ impl Odeion {
             let overview = view.boxed.is_some();
             div()
                 .id(id)
-                .slow_tooltip(self.tip(
-                    if overview {
-                        "Drag the box to look elsewhere (Follow comes back); click to jump; scroll up or down to zoom, sideways to move along; right-click for more"
-                    } else {
-                        "Click to jump; drag across to loop that stretch; drag a loop edge or the marker; shift-click ends the loop; scroll up or down to zoom, sideways to move along; right-click for more"
-                    },
+                .slower_tooltip(self.tip(
+                    if overview { "Drag the box to look elsewhere, click to jump" } else { "Click to jump, drag across to loop" },
                     &[],
                 ))
                 .children(boxed(&view))
@@ -5088,11 +5283,12 @@ impl Odeion {
             beats: None,
             grid: self.grid,
             marker: self.marker(),
+            sections: Rc::default(),
         };
-        div()
+        let column = div()
             .id("practice")
             .flex_1()
-            .min_h_0()
+            .min_w_0()
             // Files dropped here become a variation of the playing song.
             .rounded_lg()
             .border_1()
@@ -5110,8 +5306,10 @@ impl Odeion {
             .child(toolbar)
             .children(lane)
             .child(strip("overview", &self.overview, Painting { boxed: Some((from, to)), ..common.clone() }).h(px(40.)))
+            // Flush on the detail, as wide: section edges drag on the detail's scale.
             .child(
-                strip("detail", &self.detail, Painting { from, to, contour: false, beats, ..common })
+                div().flex_1().min_h_0().flex().flex_col().gap(px(2.)).children(detail_lane).child(
+                strip("detail", &self.detail, Painting { from, to, contour: false, beats, sections: Rc::new(edges), ..common })
                     .flex_1()
                     .children(status.map(|s| {
                         div()
@@ -5124,9 +5322,114 @@ impl Odeion {
                             .text_color(rgb(t.text_dim))
                             .child(s)
                     })),
-            )
+            ))
             .child(loop_bar)
-            .children(lanes)
+            .children(lanes);
+        div().flex_1().min_h_0().flex().gap_3().child(column).children(panel)
+    }
+
+    /// Beside the practice view, a jump list of the recording's sections in order: name
+    /// and where it starts. A click jumps to one, a double-click loops it, a right-click
+    /// opens its menu. It folds away to a button. Nothing when there are none.
+    fn section_panel(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let t = t();
+        let recording = self.recording()?;
+        let list = self.regions.of(&recording).to_vec();
+        if list.is_empty() {
+            return None;
+        }
+        let fold = |odeion: &mut Odeion, _: &gpui::ClickEvent, _: &mut Context<Odeion>| {
+            odeion.sections_collapsed = !odeion.sections_collapsed;
+        };
+        // Folded, the button sits where the open panel's chevron does.
+        if self.sections_collapsed {
+            return Some(
+                div()
+                    .flex_none()
+                    .p_2()
+                    .rounded_lg()
+                    .bg(rgb(t.surface))
+                    .child(self.button("sections-open", "chevron-left", "Show the sections", &[], false, cx, fold))
+                    .into_any_element(),
+            );
+        }
+        // The whole header folds it away.
+        let header = div()
+            .id("sections-fold")
+            .flex_none()
+            .h(px(28.))
+            .pl_2()
+            .flex()
+            .items_center()
+            .justify_between()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|d| d.bg(rgb(t.hover)))
+            .child(div().text_xs().text_color(rgb(t.text_dim)).child("Sections"))
+            .child(div().w(px(32.)).flex().justify_center().child(ui::icon("chevron-right", 16., t.text)))
+            .slow_tooltip(self.tip("Fold the sections away", &[]))
+            .on_click(cx.listener(move |odeion, e, _, cx| {
+                fold(odeion, e, cx);
+                cx.notify();
+            }));
+        let rows = list.into_iter().enumerate().map(|(i, region)| {
+            div()
+                .id(("section-row", i))
+                .flex_none()
+                .h(px(36.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(t.hover)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(rgb(t.text))
+                        .child(region.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(MONO)
+                        .text_xs()
+                        .text_color(rgb(t.text_dim))
+                        .child(ui::clock(region.start)),
+                )
+                .on_click(cx.listener(move |odeion, e: &gpui::ClickEvent, _, cx| {
+                    odeion.pick_region(i, e.click_count() >= 2);
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
+                        odeion.menu = Some((Menu::section(i), e.position));
+                        cx.notify();
+                    }),
+                )
+        });
+        Some(
+            div()
+                .id("sections")
+                .w(px(240.))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_lg()
+                .bg(rgb(t.surface))
+                .overflow_y_scroll()
+                .child(header)
+                .children(rows)
+                .child(div().px_2().pt_1().text_xs().text_color(rgb(t.text_dim)).child("Click jumps, double-click loops"))
+                .into_any_element(),
+        )
     }
 
     /// A stem set's stems, a lane each: number, name, mute and solo buttons, and the
@@ -5229,7 +5532,7 @@ impl Odeion {
                     let (down, right) = (strip.clone(), strip.clone());
                     div()
                         .id(("stem-wave", i))
-                        .slow_tooltip(self.tip("Click to jump", &[]))
+                        .slower_tooltip(self.tip("Click to jump", &[]))
                         .children(edge_grips(self.audio.looping, self.marker(), Duration::ZERO, song))
                         .flex_1()
                         .h_full()
@@ -5261,6 +5564,7 @@ impl Odeion {
                                     beats: None,
                                     grid: false,
                                     marker: self.marker(),
+                                    sections: Rc::default(),
                                 },
                             )
                             .absolute()
@@ -5271,32 +5575,63 @@ impl Odeion {
         Some(div().flex().flex_col().gap_1().children(lanes).into_any_element())
     }
 
-    /// The playing song's regions as named blocks along the song, the loop's own
-    /// highlighted. A click plays one. Nothing when the song has none.
-    fn region_lane(&self, song: Duration, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    /// A section as a named block in a lane, lit while it is the one in play: a click
+    /// jumps to it, a double-click loops it, a right-click opens its menu. `left` and
+    /// `wide` place it as fractions of the lane.
+    fn section_block(&self, id: (&'static str, usize), name: &str, left: f32, wide: f32, lit: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = t();
+        let i = id.1;
+        div()
+            .id(id)
+            // Only the name: the block may be too narrow to show it.
+            .slower_tooltip(self.tip(name.to_string(), &[]))
+            .absolute()
+            .top_0()
+            .h_full()
+            .left(relative(left))
+            .w(relative(wide))
+            .px_1()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .rounded_sm()
+            .bg(tint(t.section, if lit { t.section_fill_lit } else { t.section_fill }))
+            .border_l_1()
+            .border_r_1()
+            .border_color(rgb(t.section))
+            .cursor_pointer()
+            .text_xs()
+            .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+            .text_color(rgb(if lit { t.text } else { t.text_dim }))
+            .child(div().truncate().child(name.to_string()))
+            .on_click(cx.listener(move |odeion, e: &gpui::ClickEvent, _, cx| {
+                odeion.pick_region(i, e.click_count() >= 2);
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
+                    odeion.menu = Some((Menu::section(i), e.position));
+                    cx.notify();
+                }),
+            )
+    }
+
+    /// The sections over the detail waveform, at its scale: where each starts and ends
+    /// in the stretch shown, for setting a loop inside one. Their edges drag here
+    /// (snapping to beats on the grid, ⌥ freely), by grips inside each section. Nothing
+    /// when the recording has none.
+    fn detail_lane(&self, from: Duration, to: Duration, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let recording = self.recording()?;
         let list = self.regions.of(&recording).to_vec();
-        let asking = self
-            .deleting_section
-            .as_ref()
-            .and_then(|asked| list.iter().position(|r| r == asked).map(|i| (i, asked.name.clone())));
+        let span = to.saturating_sub(from).as_secs_f64();
+        if list.is_empty() || span <= 0. {
+            return None;
+        }
         let current = self.regions.current(&recording, self.audio.looping, self.audio.position());
-        let length = song.as_secs_f64().max(1e-3);
-        let empty = list.is_empty();
-        let strip = self.lane.clone();
-        let lane = div()
-            .flex_1()
-            .relative()
-            .h(px(26.))
-            .child(canvas(move |bounds, _, _| strip.set(bounds, Duration::ZERO, song), |_, _, _, _| {}).absolute().size_full())
-            .when(empty, |d| {
-                d.flex().items_center().px_2().text_xs().text_color(rgb(t.text_dim)).child("No sections yet: set a loop, then save it with r")
-            });
-        // A section's edge, grabbed to drag it (snapping to beats on the grid, ⌥ freely):
-        // a grip inside the section, wide enough to hit. A press that doesn't move plays
-        // the section, so one narrower than its grips still plays on a click.
-        let handle = |i: usize, start: bool| {
+        // A grip inside the section at an edge that's in view, wide enough to hit. A
+        // press that doesn't move is a click on the section.
+        let handle = |i: usize, start: bool, cx: &mut Context<Self>| {
             div()
                 .absolute()
                 .top_0()
@@ -5309,52 +5644,51 @@ impl Odeion {
                     MouseButton::Left,
                     cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        odeion.shaping = Some(Shaping { i, start, x: e.position.x, moved: false });
+                        let double = e.click_count >= 2;
+                        odeion.shaping = Some(Shaping { i, start, x: e.position.x, double, moved: false });
                         cx.notify();
                     }),
                 )
         };
-        let lane = lane.children(list.into_iter().enumerate().map(|(i, region)| {
-            let lit = current == Some(i);
+        let mut blocks = Vec::new();
+        for (i, region) in list.iter().enumerate().filter(|(_, r)| r.end > from && r.start < to) {
+            // Cut to the stretch shown; a cut edge has no grip.
+            let (a, b) = (region.start.max(from), region.end.min(to));
+            let left = ((a - from).as_secs_f64() / span) as f32;
+            let wide = ((b - a).as_secs_f64() / span) as f32;
+            let mut block = self.section_block(("detail-region", i), &region.name, left, wide, current == Some(i), cx);
+            if region.start >= from {
+                block = block.child(handle(i, true, cx));
+            }
+            if region.end <= to {
+                block = block.child(handle(i, false, cx));
+            }
+            blocks.push(block);
+        }
+        Some(div().relative().h(px(22.)).overflow_hidden().children(blocks).into_any_element())
+    }
+
+    /// The playing song's sections as named blocks along the whole song, the one in play
+    /// lit, with saving and deleting beside them. They're moved on the detail's lane:
+    /// here they'd be too narrow to grab (Tim, 2026-11-11).
+    fn region_lane(&self, song: Duration, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let t = t();
+        let recording = self.recording()?;
+        let list = self.regions.of(&recording).to_vec();
+        let asking = self
+            .deleting_section
+            .as_ref()
+            .and_then(|asked| list.iter().position(|r| r == asked).map(|i| (i, asked.name.clone())));
+        let current = self.regions.current(&recording, self.audio.looping, self.audio.position());
+        let length = song.as_secs_f64().max(1e-3);
+        let empty = list.is_empty();
+        let lane = div().flex_1().relative().h(px(26.)).when(empty, |d| {
+            d.flex().items_center().px_2().text_xs().text_color(rgb(t.text_dim)).child("No sections yet: set a loop, then save it with r")
+        });
+        let lane = lane.children(list.iter().enumerate().map(|(i, region)| {
             let left = (region.start.as_secs_f64() / length) as f32;
             let wide = ((region.end - region.start).as_secs_f64() / length) as f32;
-            let name = region.name.clone();
-            div()
-                .id(("region", i))
-                .slow_tooltip(self.tip(format!("Loop {}; drag its edges to change it; right-click for more", region.name), &[Action::Region(false), Action::Region(true)]))
-                .absolute()
-                .top_0()
-                .h_full()
-                .left(relative(left))
-                .w(relative(wide))
-                .px_1()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .rounded_sm()
-                .bg(tint(t.section, if lit { t.section_fill_lit } else { t.section_fill }))
-                // Both edges, since both drag.
-                .border_l_1()
-                .border_r_1()
-                .border_color(rgb(t.section))
-                .cursor_pointer()
-                .text_xs()
-                .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                .text_color(rgb(if lit { t.text } else { t.text_dim }))
-                .child(div().truncate().child(name))
-                .child(handle(i, true))
-                .child(handle(i, false))
-                .on_click(cx.listener(move |odeion, _, _, cx| {
-                    odeion.play_region(&region);
-                    cx.notify();
-                }))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
-                        odeion.menu = Some((Menu::section(i), e.position));
-                        cx.notify();
-                    }),
-                )
+            self.section_block(("region", i), &region.name, left, wide, current == Some(i), cx)
         }));
         // A click on delete (or the menu's Delete) asks once more, as a playlist's does;
         // dd is two presses already.
@@ -5554,7 +5888,7 @@ impl Odeion {
                     cx.notify();
                 }),
             )
-            .child(self.big("section-prev", "region-prev", "Previous section", "Loop the previous section", Action::Region(false), false, cx))
+            .child(self.big("section-prev", "region-prev", "Previous section", "Jump to the previous section", Action::Region(false), false, cx))
             .child(self.big(
                 "section-start",
                 "rotate-ccw",
@@ -5568,7 +5902,7 @@ impl Odeion {
                 self.big("transport", if playing { "pause" } else { "play" }, if playing { "Pause" } else { "Play" }, "Play or pause", Action::Toggle, playing, cx)
                     .min_w(px(112.)),
             )
-            .child(self.big("section-next", "region-next", "Next section", "Loop the next section", Action::Region(true), false, cx))
+            .child(self.big("section-next", "region-next", "Next section", "Jump to the next section", Action::Region(true), false, cx))
             .child(self.big("bar-loop", "repeat", "Loop", "Loop on or off, keeping its edges", Action::LoopSwitch, looping.looping(), cx))
             .child(self.big("loop-play", "loop-play", replay, "Play from the marker, or the loop start", Action::FromLoopStart, false, cx))
             .child(
@@ -7473,6 +7807,9 @@ struct Painting {
     grid: bool,
     /// Where `o` plays from, drawn as a flag.
     marker: Option<Duration>,
+    /// The sections' edges, drawn faintly through the detail, so where one starts and
+    /// ends shows on the waveform itself.
+    sections: Rc<Vec<Duration>>,
 }
 
 fn tint(color: u32, alpha: u8) -> gpui::Rgba {
@@ -7610,6 +7947,10 @@ fn paint_wave(strip: Strip, p: Painting) -> gpui::Canvas<()> {
                     let bar = rect(x.max(0.), mid - half, 1., (half * 2.).max(1.));
                     window.paint_quad(fill(bar, tint(color, 0xff)));
                 }
+            }
+            for &edge in p.sections.iter().filter(|&&e| e >= p.from && e <= p.to) {
+                let x = x_of(edge);
+                soft(window, x, x + 1., 0., h, tint(t.section, 0x90));
             }
             // Each edge as soon as it is set, a start on its own too: a bracket, with ticks
             // at the top and bottom pointing into the loop. Three vertical lines, three
@@ -7832,6 +8173,15 @@ impl Render for Odeion {
         if let Some(end) = looping.end.filter(|_| looping.looping() && self.dragging.is_none()) {
             self.span = wave::fit(self.span, end - looping.start.unwrap_or_default());
         }
+        // A view a section jump centred follows again once the playhead has left it.
+        if let (Some(held), Some(from), Some(song)) = (self.section_held, self.panned, self.audio.duration)
+            && self.dragging.is_none()
+        {
+            match held.next(wave::shows(from, self.span, song, self.audio.position())) {
+                wave::Held::Left => (self.panned, self.section_held) = (None, None),
+                held => self.section_held = Some(held),
+            }
+        }
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
@@ -7936,6 +8286,9 @@ impl Render for Odeion {
                             .justify_center()
                             .child(self.mode_switch(cx)),
                     )
+                    .when_some(self.updated.as_ref().map(|(v, _)| v.clone()), |d, version| {
+                        d.child(self.restart_button(&version, cx))
+                    })
                     .when(!self.practice, |d| d.child(self.list_switch(cx)))
                     .child(self.tool("eq", "sliders-vertical", "EQ", Action::EqSheet, !self.settings.eq.flat(), cx))
                     .child(self.tool("keys", "keyboard", "Every key", Action::Help, self.help, cx))

@@ -5,6 +5,27 @@ release's notes on GitHub.
 
 ## Unreleased
 
+**New**
+
+- Check for Updates installs a new version itself: it downloads it in the background,
+  checks it's genuine, puts it in place, and the title bar offers Restart to update.
+  Getting this version is a download by hand one last time; the ones after it install
+  themselves.
+- The big waveform shows the sections above it, with their edges through the waveform,
+  so a loop is easy to set inside one. Section edges are dragged there.
+- A list of the song's sections beside the practice view to jump to them. It folds
+  away to a button.
+
+**Changed**
+
+- A click on a section jumps to it, and `n` `N` and the previous and next buttons do the
+  same, showing the section centred in the waveform, about two thirds of it, until the
+  playhead leaves it; a double-click loops it. A loop you made stays: when the section is outside
+  it, looping switches off and the loop button brings it back.
+- Sections can no longer be resized in the lane over the whole song, where small ones
+  were too narrow to grab.
+- Tooltips over the waveforms and sections are shorter and wait longer.
+
 ## 0.4.0 (2026-11-10)
 
 **New**

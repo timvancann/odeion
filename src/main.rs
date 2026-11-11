@@ -57,6 +57,8 @@ fn main() {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join("crash.log"), report);
     }));
+    // What an update left beside this copy (on Windows, the old odeion.exe).
+    update::tidy();
     gpui_platform::application()
         .with_assets(ui::Assets)
         // On macOS GPUI keeps running without a window; odeion has no menu bar or other

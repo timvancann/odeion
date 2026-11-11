@@ -21,8 +21,26 @@ Windows and adds `Odeion-0.2.0-Windows.zip` and `Odeion-Windows.zip`. A tag that
 anything is built. The release notes are the changelog's section for the version, then
 how to install; without a section the run warns and the notes only say how to install.
 
+A last job signs `Odeion-macOS.zip` and `Odeion-Windows.zip` for Odeion's updater and
+adds `Odeion-macOS.zip.minisig` and `Odeion-Windows.zip.minisig`, a few minutes after
+the release appears. Until then Check for Updates offers the download by hand.
+
 A tag on a mistake can go again: delete the release and the tag on GitHub
 (`gh release delete v0.2.0 --cleanup-tag`), fix, tag again.
+
+## The update key
+
+Check for Updates installs a release itself only when its zip is signed with Odeion's
+release key, a [minisign](https://jedisct1.github.io/minisign/) key without a password.
+Its public half is `PUBLIC_KEY` in `src/update.rs`, its secret half the repository
+secret `MINISIGN_KEY` (the whole key file). Keep a copy of the key file in a password
+manager: GitHub never shows a secret again.
+
+A lost or leaked key is replaced: `minisign -G -W -p odeion.pub -s odeion.key`, the
+new public key (the second line of `odeion.pub`) into `PUBLIC_KEY`,
+`gh secret set MINISIGN_KEY < odeion.key`, and the key file into the password manager.
+Copies from before the change refuse updates signed with the new key, so their users
+download the next release by hand once.
 
 ## Signing
 

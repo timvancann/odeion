@@ -51,6 +51,16 @@ impl Loop {
         self.active() && !self.off
     }
 
+    /// The loop after a jump to `at` (a section's start): switched off, its edges kept,
+    /// when `at` is outside it, since the audio would wrap straight back to its start
+    /// from past its end. Whether it was switched off.
+    pub fn jumped(&mut self, at: Duration) -> bool {
+        let outside = self.end.is_some_and(|end| at < self.start.unwrap_or_default() || at >= end);
+        let switched = self.looping() && outside;
+        self.off |= switched;
+        switched
+    }
+
     /// Looping on or off, keeping the edges.
     pub fn switch(&mut self) {
         self.off = !self.off;
@@ -1083,6 +1093,29 @@ mod tests {
         // Inside the loop, or with looping off: untouched.
         assert_eq!(looping.drawn(s(45.0), true), s(45.0));
         assert_eq!(Loop { off: true, ..looping }.drawn(s(50.1), true), s(50.1));
+    }
+
+    #[test]
+    fn a_jump_out_of_the_loop_switches_it_off_keeping_its_edges() {
+        let s = Duration::from_secs_f64;
+        let on = Loop { start: Some(s(40.0)), end: Some(s(50.0)), off: false };
+        // Inside it, the loop carries on.
+        let mut inside = on;
+        assert!(!inside.jumped(s(45.0)));
+        assert_eq!(inside, on);
+        assert!(!inside.jumped(s(40.0)));
+        // Before or past it: off, the edges where they were, for \ to bring back.
+        for at in [s(10.0), s(50.0), s(80.0)] {
+            let mut out = on;
+            assert!(out.jumped(at));
+            assert_eq!(out, Loop { off: true, ..on });
+        }
+        // Already off, or no loop: nothing to switch.
+        let mut off = Loop { off: true, ..on };
+        assert!(!off.jumped(s(80.0)));
+        let mut none = Loop::default();
+        assert!(!none.jumped(s(80.0)));
+        assert_eq!(none, Loop::default());
     }
 
     #[test]

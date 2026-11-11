@@ -85,7 +85,8 @@ On first start Odeion asks for the folder your music is in. Add more in settings
 Your music stays where it is: Odeion never writes next to your songs. Its cache, loops,
 sections, playlists and settings live in `~/Library/Application Support/odeion/`, or in
 another folder you choose in settings. Odeion only goes online when you choose Check for
-Updates in its menu, to ask GitHub for the latest release.
+Updates in its menu, to ask GitHub for the latest release, and when you then choose
+Install, to download it. It installs only a release signed with its own key.
 
 ## Inspiration
 
@@ -114,7 +115,9 @@ Odeion stands on these projects:
 - [Lofty](https://github.com/Serial-ATA/lofty-rs) for tags and covers.
 - [RustFFT](https://github.com/ejmahler/RustFFT) for the spectra behind beat finding.
 - [souvlaki](https://github.com/Sinono3/souvlaki) for media keys and Now Playing.
-- [ureq](https://github.com/algesten/ureq) for checking for updates.
+- [ureq](https://github.com/algesten/ureq) for checking for updates, and
+  [minisign-verify](https://github.com/jedisct1/rust-minisign-verify) for checking
+  they're genuine. Installing them in place follows Zed's updater.
 - Beat finding follows Böck and Widmer's SuperFlux onset detector and Dan Ellis's
   dynamic-programming beat tracker.
 - The EQ's filters use Robert Bristow-Johnson's Audio EQ Cookbook.

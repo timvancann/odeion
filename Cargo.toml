@@ -10,6 +10,7 @@ gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui_platform ={ package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "runtime_shaders"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lofty = "0.25.4"
+minisign-verify = "0.3.0"
 raw-window-handle = "0.6"
 rodio = { version = "0.22.2", features = ["symphonia-aiff"] }
 rustfft = "6"

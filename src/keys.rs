@@ -743,7 +743,7 @@ pub const SHEET: &[Group] = &[
             ("\\ ⌥⌘L", "", "l", "loop on or off, keeping its edges"),
             ("| ⌫", "", "", "clear the loop"),
             ("r", "", "", "save it as a section, or rename its section"),
-            ("n N", "", "", "loop the next or previous section"),
+            ("n N", "", "", "jump to the next or previous section"),
             ("", "dd", "", "delete the section in play"),
         ],
     },

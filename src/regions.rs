@@ -122,14 +122,17 @@ impl Regions {
         Some(name)
     }
 
-    /// Where stepping to the next or previous section counts from: the loop's start
-    /// while the playhead is in the loop, else the playhead. A loop left behind (the
-    /// playhead moved before or past it) doesn't count, or next skipped a section.
-    pub fn step_from(looping: Loop, at: Duration) -> Duration {
-        match (looping.start.unwrap_or_default(), looping.end) {
-            (start, Some(end)) if start <= at + SAME && at <= end + SAME => start,
-            _ => at,
-        }
+    /// Where stepping to the next or previous section counts from. Next: the playhead,
+    /// so a jump to a section inside a bigger loop goes on to the one after it. Previous:
+    /// the loop's start while the playhead is in the loop with no section starting
+    /// between them, so a section looped goes to the one before rather than to its own
+    /// start; with a section starting in between (a bigger loop) the playhead, as without
+    /// a loop. A loop left behind (the playhead moved before or past it) doesn't count.
+    pub fn step_from(&self, song: &Path, looping: Loop, at: Duration, forward: bool) -> Duration {
+        let (start, Some(end)) = (looping.start.unwrap_or_default(), looping.end) else { return at };
+        let in_loop = start <= at + SAME && at <= end + SAME;
+        let between = self.of(song).iter().any(|r| r.start > start + SAME && r.start <= at);
+        if !forward && in_loop && !between { start } else { at }
     }
 
     /// The next region after `from` (see `step_from`), or the one before it.
@@ -221,13 +224,25 @@ mod tests {
             r.save(song, region(name, a, b));
         }
         // The loop is still A, the playhead back before it: next is A, not B.
-        let from = Regions::step_from(looped(10.0, 20.0), s(4.0));
+        let from = r.step_from(song, looped(10.0, 20.0), s(4.0), true);
         assert_eq!(r.step(song, from, true).unwrap().name, "A");
-        // In the loop, it counts from the loop's start, wherever the playhead is.
-        let from = Regions::step_from(looped(10.0, 20.0), s(19.0));
+        // In the loop: next is the one after the playhead, previous the one before the
+        // loop's start, not A's own start.
+        let from = r.step_from(song, looped(10.0, 20.0), s(19.0), true);
         assert_eq!(r.step(song, from, true).unwrap().name, "B");
+        let from = r.step_from(song, looped(10.0, 20.0), s(19.0), false);
         assert!(r.step(song, from, false).is_none());
-        assert_eq!(Regions::step_from(Loop::default(), s(25.0)), s(25.0));
+        assert_eq!(r.step_from(song, Loop::default(), s(25.0), false), s(25.0));
+        // Jumped to B inside a bigger loop around both: next isn't B again.
+        r.save(song, region("C", 30.0, 40.0));
+        let from = r.step_from(song, looped(5.0, 35.0), s(20.0), true);
+        assert_eq!(r.step(song, from, true).unwrap().name, "C");
+        // And previous goes to A, not before the loop's start: just after B's start...
+        let from = r.step_from(song, looped(5.0, 35.0), s(20.0), false);
+        assert_eq!(r.step(song, from, false).unwrap().name, "A");
+        // ...and partway into B it starts B again first, as without a loop.
+        let from = r.step_from(song, looped(5.0, 35.0), s(25.0), false);
+        assert_eq!(r.step(song, from, false).unwrap().name, "B");
     }
 
     #[test]

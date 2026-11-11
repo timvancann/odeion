@@ -14,8 +14,9 @@ exactly, the version rsdisk and `gpui-component` 0.7.3 use; renamed to `gpui` in
 `Cargo.toml` so code says `gpui::`). Jasmijn's desktop app, whose patterns this copies,
 moves to the same version. Odeion is made on and for macOS, with a Windows build in
 trial (CI builds `odeion.exe`; Ctrl stands in for ⌘), no accounts, and no network except
-one request when the user chooses Check for Updates (`update.rs`, Tim 2026-11-08):
-never on its own, nothing about the user sent.
+one request when the user chooses Check for Updates (`update.rs`, Tim 2026-11-08), and
+the download when they then choose Install (Tim, 2026-11-10): never on its own, nothing
+about the user sent.
 
 **Odeion is going public** (Tim, 2026-10-09), source-available under the PolyForm
 Noncommercial 1.0.0 licence (Tim, 2026-11-07, replacing the GPL-3.0: free for
@@ -333,12 +334,22 @@ add a key to both or they fail.
   Off, everything is as before; songs without a steady beat should stay off.
 - **Sections and the loop are separate things** (Tim, 2026-10-05: they were too tied
   together). A section is a named, saved stretch of the song; the loop is the one
-  unnamed stretch that repeats. Playing a section (a click, `n` `N`) sets the loop to
-  it, and from then on they're apart: the loop can shrink inside the section or move
-  off it without changing it. Sections change only by dragging their edges in the
-  section lane (snapping on the grid, ⌥ freely), by 24 px grips inside each section; a
-  press on a grip that doesn't move plays the section, so a narrow one still plays on
-  a click. `r` saves the loop as a section in a
+  unnamed stretch that repeats. A click on a section (in either lane or the list), `n`
+  `N` and the big previous and next buttons jump to its start, the view held on the
+  section, centred and about two thirds of it, until the playhead leaves it, then
+  following again (`wave::section_view`, `Odeion::section_held`; not while a loop stays
+  on, which stays framed), playing or paused as before (Tim, 2026-11-11: he mostly goes to a section, and
+  looping it replaced the loop he'd made); a loop the section starts outside is
+  switched off, its edges kept, since the audio would wrap straight back
+  (`Loop::jumped`). A double-click (or the menu's Loop it) loops it and plays: then
+  they're apart, the loop can shrink inside the section or move off it without
+  changing it. Sections show three times: a lane over the whole song above the overview
+  (with save and delete; nothing drags there, small ones were too narrow to grab), a
+  lane flush over the detail at its scale with faint lines at each edge through the
+  waveform, where edges drag (snapping on the grid, ⌥ freely) by 24 px grips inside
+  each section (a press that doesn't move is a click), and a jump list beside the practice
+  view (name and start, nothing lit: Tim, 2026-11-11), which folds away to a button,
+  kept in the session. `r` saves the loop as a section in a
   dialog (Enter saves, an empty name saves one saying where it is, Esc cancels; when
   the loop is exactly a section it renames that one). Vim's `dd` deletes the section in play:
   the loop's, else the shortest one around the playhead, which is also the one lit.
@@ -411,7 +422,9 @@ add a key to both or they fail.
 - **Every action has a button too**, built with `Odeion::tool` (an icon, a tooltip and
   the action, done through `Odeion::act` exactly as its key would). Tooltips show after
   the pointer rests a second (`slow_tooltip`, `TIP_DELAY`; GPUI's 500 ms was too quick
-  for Tim), and list keys
+  for Tim), and on what the pointer rests on while practising (waveforms, progress bar,
+  sections, stem lanes) after 2.5 s, in a few words (`slower_tooltip`; Tim, 2026-11-11),
+  and list keys
   from `keys::keys_for`, which reads the ⌘? sheet through the real keymap, so they stay
   right if keys are ever remapped; never write a key into a tooltip by hand. A control
   that isn't an action (a sheet's ×, a menu opened by a click, a delete that asks
@@ -423,8 +436,15 @@ add a key to both or they fail.
 - The menu bar has one menu, Odeion (`main.rs`, `menu_bar`, Tim 2026-11-08): the
   version, Check for Updates… (asks GitHub's API for the latest release on a
   background thread, then a native dialog says "You're on the latest version" or offers
-  this system's zip with Download; `update.rs` compares versions, `view.rs` only asks and
-  shows), Settings…, Keyboard Shortcuts, Hide and Quit. Its entries
+  the new one; `update.rs` compares versions, `view.rs` only asks and shows). A signed
+  release is offered with Install, as Zed updates itself (Tim, 2026-11-10): the zip
+  downloads in the background, must pass its minisign signature for this file and a
+  newer version (`update::verify`, against `PUBLIC_KEY`), is unpacked beside the
+  installed copy and swapped in for it by renames while Odeion plays on, and the title
+  bar shows Restart to Update. Without a signature, from source, or from a copy macOS
+  runs translocated, it offers Download (the browser) and says why. Windows renames the
+  running `odeion.exe` aside; `update::tidy` clears it at the next start. Then
+  Settings…, Keyboard Shortcuts, Hide and Quit. Its entries
   aren't bound to keys, so they show no shortcuts: ⌘Q, ⌘M (minimise), ⌃⌘F (full
   screen) and every other ⌘ shortcut are handled by hand, as before, and none collide
   with system menu items. ⌘H hides Odeion through `cx.hide()`.
@@ -482,7 +502,8 @@ universal Mac app as `Odeion-<version>.zip` and `Odeion-macOS.zip`, signed and n
 once the Apple secrets are set, and the Windows build (a trial) as
 `Odeion-<version>-Windows.zip` and `Odeion-Windows.zip`. The fixed names are what the
 README's download buttons (`releases/latest/download/…`) and Check for Updates
-(`update::DOWNLOAD`) use; `docs/releasing.md` has the steps. A panic writes `crash.log`
+(`update::DOWNLOAD`) use; a last job signs those two for the updater (the
+`MINISIGN_KEY` secret); `docs/releasing.md` has the steps and the key. A panic writes `crash.log`
 (with a backtrace) to the data folder, since a Windows release build and an app opened
 from the Dock have no console. The Windows build embeds `bundle/icon.ico` through
 `build.rs`; regenerate it from `bundle/icon.svg` (resvg at 16 to 256 px, joined with
