@@ -5,6 +5,17 @@ release's notes on GitHub.
 
 ## Unreleased
 
+**Fixed**
+
+- A loop no longer clicks each time it comes round: its end blends into its start over
+  5 ms.
+- Slowing down, or jumping around in a slowed-down song, no longer goes silent for a
+  moment first, and going back to full speed no longer skips.
+- An exported MP3 now starts on its first note and keeps its last 40 ms, so an exported
+  loop loops cleanly in other players too.
+- A folder called riff that belongs to another app is no longer taken for Odeion's old
+  data and moved.
+
 ## 0.6.0 (2026-11-11)
 
 **New**

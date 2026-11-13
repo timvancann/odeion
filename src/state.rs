@@ -78,10 +78,12 @@ pub fn data_dir() -> PathBuf {
 /// `default`, becomes this one, once, when this one doesn't exist yet. Its note naming a
 /// chosen folder comes along, and covers are found again by `scan::load_cache`. Returns
 /// the folder to use: the old one still, if it couldn't be moved, rather than starting
-/// empty while everything sits beside it.
+/// empty while everything sits beside it. Many apps are called riff, so only a folder
+/// holding riff's library cache moves: another app's data stays where it is.
 pub fn move_from_riff(default: &Path) -> PathBuf {
     let old = default.with_file_name("riff");
-    if !default.exists() && old.is_dir() && std::fs::rename(&old, default).is_err() {
+    let ours = old.join("library.json").is_file();
+    if !default.exists() && ours && std::fs::rename(&old, default).is_err() {
         return old;
     }
     default.to_path_buf()
@@ -275,6 +277,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("settings.json"), b"{}").unwrap();
+        // Another app called riff, with no library cache: its folder is left alone.
+        assert_eq!(move_from_riff(&new), new);
+        assert!(old.join("settings.json").exists() && !new.exists());
+        std::fs::write(old.join("library.json"), b"[]").unwrap();
         assert_eq!(move_from_riff(&new), new);
         assert!(!old.exists());
         assert_eq!(std::fs::read(new.join("settings.json")).unwrap(), b"{}");

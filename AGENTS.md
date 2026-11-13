@@ -63,7 +63,9 @@ and draws:
 - `audio.rs`: playback via rodio, and the A/B `Loop` rules. The loop is kept inside
   the audio stream (`Looped`), to the sample, and that wrapper also keeps the playing
   position, since rodio's player can't see a jump made inside it. Checking from the
-  window every 40 ms let the music run up to 40 ms past the loop's end. Also the
+  window every 40 ms let the music run up to 40 ms past the loop's end. The jump back
+  blends what follows the loop's end into its start over 5 ms (`BLEND`): a straight
+  jump clicked on every repeat. Also the
   volume, the stems' levels (`stem_gains`) and the output device (`wanted`, followed
   by `Audio::follow_output`).
 - `playlist.rs`: next, previous and shuffle over the list a song was started from (the
@@ -127,7 +129,8 @@ and draws:
   chosen in settings, named by a `data-folder` note in the default folder and read once
   per run. The default is each system's usual place (`odeion` in Application Support,
   `%APPDATA%` or `~/.local/share`); the old `riff` folder beside it moves there once
-  (`move_from_riff`), and covers are found again beside a moved cache
+  (`move_from_riff`), only when it holds a `library.json` (many apps are called riff),
+  and covers are found again beside a moved cache
   (`scan::load_cache`). Every JSON file of Odeion's loads through `state::load_json`: one that can't
   be read is renamed `<name>.broken` before Odeion starts it afresh, and Odeion says so
   when it opens, so a save never overwrites what it held. Quitting (⌘Q or closing the
@@ -316,8 +319,12 @@ add a key to both or they fail.
   on either, or the card's chevron, gives presets 50 to 110% and the trainer's settings. Pitch is kept: Signalsmith
   Stretch at its full preset (Tim compared it with SoundTouch, "night and day"; the
   cheaper preset saves nothing worth it at 0.5% of a core). It sits after the loop and
-  the stem mix (`audio::Stretched`), so loops, stems and beats stay in song time; at
-  exactly 100% and no pitch shift samples pass straight through.
+  the stem mix (`audio::Stretched`), so loops, stems and beats stay in song time. A
+  song started or sought at exactly 100% and no pitch shift skips it: samples pass
+  straight through. Back at 100% mid-play the stretcher carries on until the next seek
+  or song, since leaving it there dropped the ~0.1 s it holds back. It starts primed
+  with what just played (`Stretched::prime`), on slowing down and on every seek while
+  slowed: started cold it went silent for 130 ms.
 - **Pitch**, per song, apart from the speed: a semitone on ↑ ↓ (Vim `k j`), 5 cents on
   ⇧↑ ⇧↓ (Vim `K J`), up to an
   octave either way, through the same stretcher (`set_transpose_factor_semitones`). The

@@ -5,6 +5,7 @@
 use rodio::cpal::traits::HostTrait;
 use rodio::source::SeekError;
 use rodio::{ChannelCount, Decoder, DeviceSinkBuilder, DeviceTrait, MixerDeviceSink, Player, SampleRate, Source};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -281,9 +282,13 @@ const BLOCK: usize = 512;
 
 /// The song slowed down or sped up without changing pitch, and its pitch moved without
 /// changing speed (Signalsmith Stretch, a phase vocoder, at its full-quality preset:
-/// half a percent of a core). At exactly 100% and no pitch shift it stays out of the
-/// way: samples pass through untouched, with no delay. It comes after the loop, so
-/// loops keep to the sample in the song's time.
+/// half a percent of a core). A song that starts or is sought at exactly 100% and no
+/// pitch shift skips it: samples pass through untouched, with no delay. It comes after
+/// the loop, so loops keep to the sample in the song's time.
+///
+/// Slowing down starts the stretcher at once, primed with what just played so nothing
+/// goes silent; back at 100% it carries on until the next seek or song, since leaving it
+/// mid-play dropped the ~0.1 s it holds back: a skip and a click.
 struct Stretched<S> {
     inner: S,
     shared: Arc<Shared>,
@@ -303,13 +308,19 @@ struct Stretched<S> {
     pad: usize,
     /// The pitch shift the stretcher has, in semitones.
     transposed: f32,
+    /// The samples that last passed straight through, to prime the stretcher with.
+    history: VecDeque<f32>,
+    /// How many `history` keeps: one of the stretcher's blocks and one interval (0.12 s
+    /// and 0.03 s at its full preset), what it wants for priming.
+    keep: usize,
 }
 
 impl<S: Source> Stretched<S> {
     fn new(inner: S, shared: Arc<Shared>) -> Self {
         let channels = inner.channels().get() as usize;
-        let stretch =
-            signalsmith_stretch::Stretch::preset_default(channels as u32, inner.sample_rate().get());
+        let rate = inner.sample_rate().get();
+        let stretch = signalsmith_stretch::Stretch::preset_default(channels as u32, rate);
+        let keep = (rate as f64 * 0.15) as usize * channels;
         Stretched {
             inner,
             shared,
@@ -323,15 +334,73 @@ impl<S: Source> Stretched<S> {
             phase: 0,
             pad: 0,
             transposed: 0.0,
+            history: VecDeque::with_capacity(keep),
+            keep,
         }
     }
 
-    /// Starts afresh: after a seek, or when slowing down begins.
+    /// Empties the stretcher.
     fn restart(&mut self) {
         self.stretch.reset();
         self.out.clear();
         self.at = 0;
         self.carry = 0.0;
+    }
+
+    /// The speed and the pitch shift in semitones.
+    fn settings(&self) -> (f64, f32) {
+        let speed = f32::from_bits(self.shared.speed.load(Ordering::Relaxed)) as f64;
+        (speed, f32::from_bits(self.shared.pitch.load(Ordering::Relaxed)))
+    }
+
+    /// Whether the song plays as recorded: exactly 100% and no pitch shift.
+    fn full(&self) -> bool {
+        let (speed, pitch) = self.settings();
+        (speed - 1.0).abs() < 1e-4 && pitch == 0.0
+    }
+
+    /// Reads up to `frames` frames from the song into `input`, a last partial frame padded
+    /// so the stretcher gets whole frames.
+    fn fill(&mut self, frames: usize) {
+        self.input.clear();
+        self.input.extend(self.inner.by_ref().take(frames * self.channels));
+        let whole = self.input.len().div_ceil(self.channels) * self.channels;
+        self.input.resize(whole, 0.0);
+    }
+
+    /// Starts the stretcher at the song's next sample: mid-play, where samples were
+    /// passing straight through, or after a seek. Started cold it made 130 ms of silence
+    /// first. As in Signalsmith's own `exact`: it is given the input up to its input
+    /// latency past that sample (what just played, then a read ahead) as pre-roll, and the
+    /// first output-latency's worth of what it then makes is folded back and dropped.
+    fn prime(&mut self, speed: f64, pitch: f32) {
+        self.restart();
+        self.stretch.set_transpose_factor_semitones(pitch, None);
+        self.transposed = pitch;
+        self.fill(self.stretch.input_latency());
+        // Whole frames only: after a seek mid-frame the history starts on a right.
+        let part = self.history.len() % self.channels;
+        let mut preroll: Vec<f32> = self.history.drain(..).skip(part).collect();
+        preroll.extend_from_slice(&self.input);
+        self.stretch.seek(&preroll, speed);
+        let skip = self.stretch.output_latency();
+        let wanted = (skip + BLOCK) as f64 * speed;
+        self.fill(wanted.floor() as usize);
+        self.carry = wanted - wanted.floor();
+        if self.input.is_empty() {
+            return;
+        }
+        let n = self.channels;
+        self.out.resize((skip + BLOCK) * n, 0.0);
+        self.stretch.process(&self.input, &mut self.out);
+        for i in 0..skip.min(BLOCK) {
+            for c in 0..n {
+                self.out[(skip + i) * n + c] -= self.out[(skip - 1 - i) * n + c];
+            }
+        }
+        self.out.drain(..skip * n);
+        let held = self.stretch.input_latency() as f64 + skip as f64 * speed;
+        self.shared.delay.store(held as u64, Ordering::Relaxed);
     }
 }
 
@@ -344,20 +413,23 @@ impl<S: Source> Iterator for Stretched<S> {
             self.phase = (self.phase + 1) % self.channels;
             return Some(0.0);
         }
-        let speed = f32::from_bits(self.shared.speed.load(Ordering::Relaxed)) as f64;
-        let pitch = f32::from_bits(self.shared.pitch.load(Ordering::Relaxed));
-        let full = (speed - 1.0).abs() < 1e-4 && pitch == 0.0;
+        let (speed, pitch) = self.settings();
         // Only between frames: the stretcher reads whole frames, so switching mid-frame
         // would swap left and right from then on.
-        if self.phase == 0 && full == self.stretching {
-            self.stretching = !full;
-            self.restart();
-            if full {
-                // Back to full speed: what the stretcher held back is dropped.
-                self.shared.delay.store(0, Ordering::Relaxed);
-            }
+        if self.phase == 0 && !self.stretching && !self.full() {
+            self.stretching = true;
+            self.prime(speed, pitch);
         }
-        let v = if self.stretching { self.stretched(speed, pitch) } else { self.inner.next() }?;
+        let v = if self.stretching {
+            self.stretched(speed, pitch)?
+        } else {
+            let v = self.inner.next()?;
+            if self.history.len() == self.keep {
+                self.history.pop_front();
+            }
+            self.history.push_back(v);
+            v
+        };
         self.phase = (self.phase + 1) % self.channels;
         Some(v)
     }
@@ -374,19 +446,10 @@ impl<S: Source> Stretched<S> {
             let wanted = BLOCK as f64 * speed + self.carry;
             let frames = wanted.floor() as usize;
             self.carry = wanted - frames as f64;
-            self.input.clear();
-            for _ in 0..frames * self.channels {
-                match self.inner.next() {
-                    Some(v) => self.input.push(v),
-                    None => break,
-                }
-            }
+            self.fill(frames);
             if self.input.is_empty() {
                 return None;
             }
-            // A last, partial frame is padded so the stretcher gets whole frames.
-            let whole = self.input.len().div_ceil(self.channels) * self.channels;
-            self.input.resize(whole, 0.0);
             self.out.resize(BLOCK * self.channels, 0.0);
             self.stretch.process(&self.input, &mut self.out);
             self.at = 0;
@@ -418,12 +481,22 @@ impl<S: Source> Source for Stretched<S> {
 
     fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
         self.inner.try_seek(at)?;
+        self.history.clear();
         if self.stretching {
-            self.restart();
             // rodio's player seeks every 441 samples of 44.1 kHz stereo, so it can cut
-            // between a frame's left and right. The stretcher starts on a left: the rest of
-            // the cut frame is silence, or left and right would swap from here on.
+            // between a frame's left and right. The stretcher read whole frames, so the
+            // song starts again on a left: the rest of the cut frame is silence, or left
+            // and right would swap from here on.
             self.pad = (self.channels - self.phase) % self.channels;
+            if self.full() {
+                // Back at 100% since the stretcher started: from here samples pass through.
+                self.stretching = false;
+                self.restart();
+                self.shared.delay.store(0, Ordering::Relaxed);
+            } else {
+                let (speed, pitch) = self.settings();
+                self.prime(speed, pitch);
+            }
         }
         Ok(())
     }
@@ -670,7 +743,8 @@ impl Default for Shared {
 
 /// The song as the player hears it, looping at the exact sample. Checking for the loop's
 /// end from the window, every 40 ms, let it play up to 40 ms past it. It also keeps the
-/// position itself: the player can't see a jump made in here.
+/// position itself: the player can't see a jump made in here. The jump is blended over
+/// `BLEND`: what follows the loop's end fades out as the loop's start fades in.
 struct Looped<S> {
     inner: S,
     shared: Arc<Shared>,
@@ -678,12 +752,22 @@ struct Looped<S> {
     rate: u32,
     /// Which sample of the current frame comes next.
     sample: u16,
+    /// What follows the loop's end, read just before jumping back, and how much of it
+    /// has played.
+    tail: Vec<rodio::Sample>,
+    at: usize,
+    /// Whether the jump back worked; if not, the tail plays as it is.
+    blend: bool,
 }
+
+/// How long the loop's end blends into its start. Jumping straight back clicked on every
+/// repeat unless both edges fell where the wave crossed zero.
+const BLEND: Duration = Duration::from_millis(5);
 
 impl<S: Source> Looped<S> {
     fn new(inner: S, shared: Arc<Shared>) -> Self {
         let (channels, rate) = (inner.channels().get(), inner.sample_rate().get());
-        Looped { inner, shared, channels, rate, sample: 0 }
+        Looped { inner, shared, channels, rate, sample: 0, tail: Vec::new(), at: 0, blend: false }
     }
 
     fn frames(&self, at: Duration) -> u64 {
@@ -695,18 +779,38 @@ impl<S: Source> Iterator for Looped<S> {
     type Item = rodio::Sample;
 
     fn next(&mut self) -> Option<rodio::Sample> {
-        if self.sample == 0 {
+        if self.sample == 0 && self.at >= self.tail.len() {
             let end = self.shared.end.load(Ordering::Relaxed);
             if end != NONE && self.shared.played.load(Ordering::Relaxed) >= end {
                 let start = self.shared.start.load(Ordering::Relaxed);
                 let to = Duration::from_secs_f64(start as f64 / self.rate as f64);
-                if self.inner.try_seek(to).is_ok() {
+                let n = ((self.rate as f64 * BLEND.as_secs_f64()) as usize).max(1) * self.channels as usize;
+                self.tail.clear();
+                self.tail.extend(self.inner.by_ref().take(n));
+                // At the song's end the loop's start fades in from silence.
+                self.tail.resize(n, 0.0);
+                self.at = 0;
+                self.blend = self.inner.try_seek(to).is_ok();
+                if self.blend {
                     self.shared.played.store(start, Ordering::Relaxed);
                     self.shared.wraps.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
-        let sample = self.inner.next()?;
+        let sample = if self.at < self.tail.len() {
+            let old = self.tail[self.at];
+            let mixed = if self.blend {
+                let channels = self.channels as usize;
+                let w = (self.at / channels + 1) as f32 / (self.tail.len() / channels + 1) as f32;
+                old + (self.inner.next().unwrap_or(0.0) - old) * w
+            } else {
+                old
+            };
+            self.at += 1;
+            mixed
+        } else {
+            self.inner.next()?
+        };
         self.sample += 1;
         if self.sample == self.channels {
             self.sample = 0;
@@ -737,6 +841,8 @@ impl<S: Source> Source for Looped<S> {
     fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
         self.inner.try_seek(at)?;
         self.sample = 0;
+        self.tail.clear();
+        self.at = 0;
         self.shared.played.store(self.frames(at), Ordering::Relaxed);
         Ok(())
     }
@@ -1316,13 +1422,27 @@ mod tests {
         shared.end.store(110, Ordering::Relaxed);
         let mut song = Looped::new(Counting { at: 0, frames: 1000 }, shared.clone());
         let frames: Vec<rodio::Sample> = song.by_ref().take(2 * 125).step_by(2).collect();
-        // Frames 0..110, then 100.. again: never frame 110 itself.
+        // Frames 0..110, then 100.. again, the first 5 ms (5 frames at 1 kHz) blended
+        // with what follows frame 110, fading from it to the loop's start.
         assert_eq!(frames[109], 109.0);
-        assert_eq!(frames[110], 100.0);
-        assert!(!frames.contains(&110.0));
-        // 125 frames: 0..110, then 100..110 once more, then 100..105.
+        for k in 0..5 {
+            let (after, start) = ((110 + k) as f32, (100 + k) as f32);
+            let blended = after + (start - after) * (k + 1) as f32 / 6.0;
+            assert!((frames[110 + k] - blended).abs() < 1e-3, "frame {}: {}", 110 + k, frames[110 + k]);
+        }
+        // Then the loop plays on as it is, up to its end once more.
+        for k in 5..10 {
+            assert_eq!(frames[110 + k], (100 + k) as f32);
+        }
+        // The second time round blends the same way: 125 frames are 0..110, then 100..110
+        // once more, then 100..105.
+        for k in 0..5 {
+            let (after, start) = ((110 + k) as f32, (100 + k) as f32);
+            let blended = after + (start - after) * (k + 1) as f32 / 6.0;
+            assert!((frames[120 + k] - blended).abs() < 1e-3, "frame {}: {}", 120 + k, frames[120 + k]);
+        }
         assert_eq!(shared.played.load(Ordering::Relaxed), 105);
-        assert_eq!(frames[124], 104.0);
+        assert_eq!(shared.wraps.load(Ordering::Relaxed), 2);
         // Seeking from outside keeps the position honest too.
         song.try_seek(Duration::from_millis(500)).unwrap();
         assert_eq!(shared.played.load(Ordering::Relaxed), 500);
@@ -1486,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn going_back_to_full_speed_mid_frame_keeps_left_and_right() {
+    fn going_back_to_full_speed_at_a_seek_mid_frame_keeps_left_and_right() {
         let shared = Arc::new(Shared::default());
         shared.speed.store(0.5f32.to_bits(), Ordering::Relaxed);
         // Left 0.5, right -0.5.
@@ -1494,14 +1614,67 @@ mod tests {
         let stereo =
             rodio::buffer::SamplesBuffer::new(ChannelCount::new(2).unwrap(), SampleRate::new(1000).unwrap(), samples);
         let mut song = Stretched::new(stereo, shared.clone());
-        // Stop on a left sample, then go back to full speed.
+        // Stop on a left sample, go back to full speed, and seek.
         let heard = song.by_ref().take(3001).count();
         shared.speed.store(1.0f32.to_bits(), Ordering::Relaxed);
-        for (i, v) in song.take(100).enumerate() {
-            if (heard + i) % 2 == 1 && shared.delay.load(Ordering::Relaxed) == 0 {
-                assert_eq!(v, -0.5, "sample {} is the wrong channel", heard + i);
-            }
+        song.try_seek(Duration::from_secs(1)).unwrap();
+        assert_eq!(shared.delay.load(Ordering::Relaxed), 0);
+        for (i, v) in song.take(100).enumerate().filter(|&(_, v)| v != 0.0) {
+            let want = if (heard + i) % 2 == 0 { 0.5 } else { -0.5 };
+            assert_eq!(v, want, "sample {} is the wrong channel", heard + i);
         }
+    }
+
+    /// Seconds of a 440 Hz tone at 0.5 in both channels of 44.1 kHz stereo.
+    fn tone(seconds: f32) -> rodio::buffer::SamplesBuffer {
+        let samples: Vec<rodio::Sample> = (0..(44_100.0 * seconds) as usize * 2)
+            .map(|i| 0.5 * ((i / 2) as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin())
+            .collect();
+        rodio::buffer::SamplesBuffer::new(ChannelCount::new(2).unwrap(), SampleRate::new(44_100).unwrap(), samples)
+    }
+
+    /// The quietest 5 ms of stereo `samples`, as the RMS of its left channel. The tone's
+    /// is 0.35.
+    fn quietest(samples: &[rodio::Sample]) -> f32 {
+        let lefts: Vec<f32> = samples.iter().step_by(2).copied().collect();
+        lefts.chunks_exact(220).map(|w| (w.iter().map(|v| v * v).sum::<f32>() / 220.0).sqrt()).fold(1.0, f32::min)
+    }
+
+    #[test]
+    fn slowing_down_or_seeking_while_slowed_goes_on_without_a_gap() {
+        // Started cold, the stretcher made 130 ms of silence each time.
+        let shared = Arc::new(Shared::default());
+        let mut song = Stretched::new(tone(3.0), shared.clone());
+        song.by_ref().take(44_100).count();
+        shared.speed.store(0.8f32.to_bits(), Ordering::Relaxed);
+        let slowed: Vec<_> = song.by_ref().take(2 * 13_230).collect();
+        assert!(quietest(&slowed) > 0.25, "slowing down: {}", quietest(&slowed));
+        assert!(shared.delay.load(Ordering::Relaxed) > 0);
+        song.try_seek(Duration::from_secs(2)).unwrap();
+        let sought: Vec<_> = song.by_ref().take(2 * 13_230).collect();
+        // Sounding at once. After a seek there is nothing before the new spot to prime
+        // with, so the stretcher's first 5 ms ramp up (0.24 against the tone's 0.35):
+        // cold, it was silent for 130 ms.
+        assert!(quietest(&sought[..440]) > 0.15, "a seek while slowed: {}", quietest(&sought[..440]));
+        assert!(quietest(&sought[440..]) > 0.25, "a seek while slowed: {}", quietest(&sought[440..]));
+    }
+
+    #[test]
+    fn back_at_full_speed_the_stretcher_carries_on_until_a_seek() {
+        // Leaving it mid-play dropped the 0.1 s it held back: a skip and a click.
+        let shared = Arc::new(Shared::default());
+        shared.speed.store(0.8f32.to_bits(), Ordering::Relaxed);
+        let mut song = Stretched::new(tone(3.0), shared.clone());
+        song.by_ref().take(44_100).count();
+        shared.speed.store(1.0f32.to_bits(), Ordering::Relaxed);
+        let full: Vec<_> = song.by_ref().take(2 * 13_230).collect();
+        assert!(quietest(&full) > 0.25, "{}", quietest(&full));
+        assert!(shared.delay.load(Ordering::Relaxed) > 0);
+        // From a seek on, samples pass straight through again.
+        song.try_seek(Duration::from_secs(1)).unwrap();
+        assert_eq!(shared.delay.load(Ordering::Relaxed), 0);
+        let straight: Vec<_> = tone(3.0).skip(2 * 44_100).take(10).collect();
+        assert_eq!(song.take(10).collect::<Vec<_>>(), straight);
     }
 
     /// Seconds of stereo at 44.1 kHz: a tone on the left, silence on the right.

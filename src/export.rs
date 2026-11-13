@@ -198,7 +198,7 @@ pub fn encode(audio: &Rendered, format: Format) -> Result<Vec<u8>, String> {
 const CHUNK: usize = 4096;
 
 fn mp3(audio: &Rendered) -> Result<Vec<u8>, String> {
-    use mp3lame_encoder::{Bitrate, Builder, FlushNoGap, InterleavedPcm, MonoPcm, Quality};
+    use mp3lame_encoder::{Bitrate, Builder, FlushGap, InterleavedPcm, MonoPcm, Quality};
     let failed = |e: &dyn std::fmt::Display| format!("the MP3 encoder failed: {e}");
     if audio.channels > 2 {
         return Err("MP3 holds at most two channels".into());
@@ -211,7 +211,8 @@ fn mp3(audio: &Rendered) -> Result<Vec<u8>, String> {
         builder.set_output_sample_rate(NonZeroU32::new(44_100)).map_err(|e| failed(&e))?;
     }
     builder.set_brate(Bitrate::Kbps256).map_err(|e| failed(&e))?;
-    builder.set_quality(Quality::Good).map_err(|e| failed(&e))?;
+    // LAME's -q2: slower than its default, unnoticed on a section or a loop.
+    builder.set_quality(Quality::NearBest).map_err(|e| failed(&e))?;
     let mut encoder = builder.build().map_err(|e| failed(&e))?;
     let mut out = Vec::new();
     let channels = audio.channels as usize;
@@ -224,7 +225,18 @@ fn mp3(audio: &Rendered) -> Result<Vec<u8>, String> {
         done.map_err(|e| failed(&e))?;
     }
     out.reserve(7200);
-    encoder.flush_to_vec::<FlushNoGap>(&mut out).map_err(|e| failed(&e))?;
+    // FlushGap encodes what's still buffered: FlushNoGap left the last ~40 ms out.
+    encoder.flush_to_vec::<FlushGap>(&mut out).map_err(|e| failed(&e))?;
+    // The first frame is a placeholder for the LAME tag, which tells players the encoder's
+    // delay and padding to leave out. Unfilled, it played as silence and the sound began
+    // about 50 ms late, so an exported loop didn't loop cleanly elsewhere.
+    if encoder.lame_tag_size() > 0 {
+        let mut tag = Vec::with_capacity(encoder.lame_tag_size());
+        match encoder.lame_tag_encode_to_vec(&mut tag) {
+            Some(size) if size.get() <= out.len() => out[..size.get()].copy_from_slice(&tag),
+            _ => return Err("the MP3 encoder couldn't write its LAME tag".into()),
+        }
+    }
     Ok(out)
 }
 
@@ -363,6 +375,25 @@ mod tests {
             assert!((seconds - 2.0).abs() < 0.1, "{} gave {seconds} s", format.name());
         }
         let _ = std::fs::remove_file(song);
+    }
+
+    #[test]
+    fn an_mp3_starts_and_ends_where_the_pass_does() {
+        // Without the LAME tag the sound began about 50 ms late, and without flushing what
+        // LAME still held the last 40 ms were missing: a loop exported this way didn't loop.
+        let song = tone("gapless", 4.0, 0.5);
+        let audio = render(&job(vec![song.clone()], vec![], 1.0, 0.0)).unwrap();
+        let to = std::env::temp_dir().join(format!("odeion-export-{}-gapless.mp3", std::process::id()));
+        std::fs::write(&to, encode(&audio, Format::Mp3).unwrap()).unwrap();
+        let (mono, rate) = crate::beats::mono(&to).unwrap();
+        assert_eq!(rate, 44_100);
+        let first = mono.iter().position(|v| v.abs() > 0.1).unwrap();
+        let last = mono.iter().rposition(|v| v.abs() > 0.1).unwrap();
+        // Within a millisecond of each end of the two seconds.
+        assert!(first < 44, "the sound starts {first} frames late");
+        assert!(last > 2 * 44_100 - 44, "the sound stops {} frames early", 2 * 44_100 - last);
+        assert!(mono.len().abs_diff(2 * 44_100) < 44, "{} frames", mono.len());
+        let _ = (std::fs::remove_file(song), std::fs::remove_file(to));
     }
 
     #[test]
