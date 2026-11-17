@@ -397,6 +397,8 @@ pub struct Odeion {
     muted: Vec<bool>,
     /// Each stem set's levels, by its first file, like `loops`.
     levels: HashMap<PathBuf, Vec<f32>>,
+    /// Each stem set's muted stems, by its first file, once one was muted or unmuted.
+    mutes: HashMap<PathBuf, Vec<bool>>,
     /// A level being dragged, where its slider was drawn, and for a stem the x pressed
     /// and its level then: a stem's level moves with the drag, so a click leaves it.
     sliding: Option<(Slider, Rc<Cell<Bounds<Pixels>>>, Option<(Pixels, f32)>)>,
@@ -659,6 +661,7 @@ impl Odeion {
             stem_waves: Vec::new(),
             muted: Vec::new(),
             levels: HashMap::new(),
+            mutes: HashMap::new(),
             sliding: None,
             solo: None,
             beats: None,
@@ -1550,6 +1553,10 @@ impl Odeion {
 
     fn move_selection(&mut self, by: isize) {
         self.glide = None;
+        // An empty list (a search finding nothing, an empty playlist) has nowhere to go.
+        if self.rows.is_empty() {
+            return;
+        }
         let target = (self.selected as isize + by).clamp(0, self.rows.len() as isize - 1);
         let step = if by < 0 { -1 } else { 1 };
         if let Some(row) = self
@@ -1564,9 +1571,8 @@ impl Odeion {
         }
     }
 
-    /// Plays a song where it was left: its recording, slow-down and loops, and, when
-    /// picked by hand (`pick`), its playhead. A song that follows on in a list starts
-    /// from the top.
+    /// Plays a song as it was left: its recording, slow-down and loops, and, when Odeion
+    /// reopens on it (`pick`), its playhead. Played any other way it starts from the top.
     fn play(&mut self, track: Track, pick: bool) {
         self.keep_spot();
         (self.shaping, self.dragging, self.panning, self.panned) = (None, None, None, None);
@@ -1579,6 +1585,7 @@ impl Odeion {
         self.loops.extend(spot.loops.clone());
         self.marks.extend(spot.marks.clone());
         self.levels.extend(spot.levels.clone());
+        self.mutes.extend(spot.muted.clone());
         self.speed = spot.pace();
         self.training = None;
         self.audio.set_speed(self.speed.factor());
@@ -1726,6 +1733,13 @@ impl Odeion {
             .filter_map(|r| self.levels.get(r).map(|l| (r.clone(), l.clone())))
             .filter(|(_, l)| l.iter().any(|l| *l != 1.0))
             .collect();
+        let muted = self
+            .variations
+            .of(&now.path)
+            .iter()
+            .filter_map(|v| v.files.first())
+            .filter_map(|r| self.mutes.get(r).map(|m| (r.clone(), m.clone())))
+            .collect();
         let spot = Spot {
             variation: self.variation,
             pace: Some(self.speed),
@@ -1733,6 +1747,7 @@ impl Odeion {
             loops,
             marks,
             levels,
+            muted,
             ..Spot::default()
         };
         self.resume.keep(&now.path, spot);
@@ -2412,23 +2427,24 @@ impl Odeion {
             return;
         }
         let into = if target == 0 { Some(0.0) } else { list[target - 1].offset };
-        let (files, gains, label) = match target {
-            0 => (vec![now.path.clone()], vec![1.0], "the song".to_string()),
+        let (files, muted, label) = match target {
+            0 => (vec![now.path.clone()], Vec::new(), "the song".to_string()),
             n => {
                 let v = &list[n - 1];
-                (v.files.clone(), variations::default_gains(v), v.label.clone())
+                let kept = v.files.first().and_then(|r| self.mutes.get(r)).map(Vec::as_slice);
+                (v.files.clone(), variations::muted(v, kept), v.label.clone())
             }
         };
         self.variation = target;
         // A drag belongs to the recording it started on, as does a delete asked about.
         (self.shaping, self.dragging, self.deleting_section) = (None, None, None);
         let looping = self.recording().and_then(|r| self.loops.get(&r).copied()).unwrap_or_default();
-        // A stem muted from the start (the metronome) shows as muted; one recording has
+        // Stems muted as they were left (at first only the metronome); one recording has
         // no stems to mute.
-        self.muted = if files.len() > 1 { gains.iter().map(|g| *g == 0.0).collect() } else { Vec::new() };
+        self.muted = if files.len() > 1 { muted } else { Vec::new() };
         self.solo = None;
         // Each stem at the level it was left at.
-        let gains = if files.len() > 1 { self.gains() } else { gains };
+        let gains = if files.len() > 1 { self.gains() } else { vec![1.0] };
         self.audio.switch(&files, &gains, at, looping);
         if looping.active() {
             self.frame_loop();
@@ -2526,7 +2542,7 @@ impl Odeion {
             return;
         };
         self.playlist = Playlist::new(self.run_around(self.selected), &track.path, self.seed());
-        self.play(track, true);
+        self.play(track, false);
     }
 
     /// The songs in the run of rows between the section headers around `row`: the list
@@ -2580,7 +2596,7 @@ impl Odeion {
         }
         if let Some(track) = self.track_at(&path) {
             self.playlist.play_queued(&path);
-            self.play(track, true);
+            self.play(track, false);
         }
     }
 
@@ -3190,6 +3206,12 @@ impl Odeion {
             Action::Mute(n) if n < self.muted.len() => {
                 self.muted[n] = !self.muted[n];
                 self.audio.set_gains(&self.gains());
+                // Kept with the song, as a level is.
+                if let Some(recording) = self.recording() {
+                    self.mutes.insert(recording, self.muted.clone());
+                }
+                self.keep_spot();
+                self.store_resume();
             }
             Action::Solo(n) if n < self.muted.len() => {
                 self.solo = if self.solo == Some(n) { None } else { Some(n) };
@@ -4392,9 +4414,13 @@ impl Odeion {
                     .rounded_md()
                     .map(|d| selected_cues(d, selected))
                     .when(!selected, |d| d.hover(|d| d.bg(rgb(t().hover))))
-                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                    // A click highlights the song, a double-click plays it, as Enter does.
+                    .on_click(cx.listener(move |odeion, e: &gpui::ClickEvent, _, cx| {
                         odeion.selected = ix;
-                        odeion.play_selected();
+                        // Exactly two: a third click would start it from the top again.
+                        if e.click_count() == 2 {
+                            odeion.play_selected();
+                        }
                         cx.notify();
                     }))
                     // Right-click highlights the song and opens its menu.

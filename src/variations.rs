@@ -108,6 +108,15 @@ pub fn default_gains(variation: &Variation) -> Vec<f32> {
         .collect()
 }
 
+/// Which of a stem set's stems start muted: as they were left (`kept`), else only a
+/// click track. Kept mutes for a different number of stems are passed over.
+pub fn muted(variation: &Variation, kept: Option<&[bool]>) -> Vec<bool> {
+    match kept {
+        Some(kept) if kept.len() == variation.stems.len() => kept.to_vec(),
+        _ => default_gains(variation).iter().map(|g| *g == 0.0).collect(),
+    }
+}
+
 /// The audio files among what was dropped or picked: files as they are, folders by the
 /// audio files directly in them (a stem export's `peaks/` and the like are left out).
 pub fn audio_files(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -261,6 +270,21 @@ mod tests {
             stem_names(&[PathBuf::from("/r/I'm the One Backing Tack.mp3")]),
             ["I'm the One Backing Tack"]
         );
+    }
+
+    #[test]
+    fn stems_start_muted_as_they_were_left_else_only_the_click() {
+        let set = Variation {
+            label: "stems".into(),
+            files: vec!["/d/Bass.mp3".into(), "/d/Drums.mp3".into(), "/d/Metronome.mp3".into()],
+            stems: vec!["Bass".into(), "Drums".into(), "Metronome".into()],
+            offset: Some(0.0),
+        };
+        assert_eq!(muted(&set, None), [false, false, true]);
+        // Left with the bass muted and the metronome on, it comes back that way.
+        assert_eq!(muted(&set, Some(&[true, false, false])), [true, false, false]);
+        // Mutes kept for another number of stems don't apply.
+        assert_eq!(muted(&set, Some(&[true, false])), [false, false, true]);
     }
 
     #[test]

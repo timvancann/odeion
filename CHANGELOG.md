@@ -5,16 +5,37 @@ release's notes on GitHub.
 
 ## Unreleased
 
+## 0.7.0 (2026-11-17)
+
+Smoother practice: loops that no longer click, slow-down without the gap, and stems
+that come back exactly as you left them.
+
+**Changed**
+
+- A click on a song only highlights it; a double-click plays it, as Enter does.
+- A song you play starts from the top. Its loop, speed and stems still come back as you
+  left them, and Odeion still reopens where you stopped.
+- Stems you muted stay muted when you come back to the song, as their levels already
+  did.
+
 **Fixed**
 
 - A loop no longer clicks each time it comes round: its end blends into its start over
   5 ms.
 - Slowing down, or jumping around in a slowed-down song, no longer goes silent for a
   moment first, and going back to full speed no longer skips.
+- Above 100% speed the playhead moves smoothly instead of lagging and jumping.
+- A song whose stems you were playing comes back playing them, instead of paused.
 - An exported MP3 now starts on its first note and keeps its last 40 ms, so an exported
   loop loops cleanly in other players too.
+- Search finds names with accents however they're stored: "motorhead" finds a
+  Motörhead file name, "dvorak" finds Dvořák.
+- Moving up or down in an empty list (a search that finds nothing, an empty playlist)
+  no longer quits Odeion.
+- Odeion opens at the size you left it, also when it can't find the display it was on.
 - A folder called riff that belongs to another app is no longer taken for Odeion's old
   data and moved.
+- macOS lists Odeion under Music.
 
 ## 0.6.0 (2026-11-11)
 

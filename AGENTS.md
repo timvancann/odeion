@@ -108,7 +108,7 @@ and draws:
   place). One that doesn't clearly match gets a timeline of its own. Tim's backing track
   aligned at +1.907 s, his Moises stems at +0.047 s (encoder delay).
 - `resume.rs`: where each song was left (`resume.json`): its recording (song or
-  variation), speed, playhead and each recording's loop, marker and stem levels. Old
+  variation), speed, playhead and each recording's loop, marker, stem levels and mutes. Old
   entries' slow-down preset (an index) is read as its percentage.
 - `session.rs`: what Odeion showed when it closed (`session.json`): the playing song
   and the list it was started from (so it plays on through it when it ends; without it
@@ -307,8 +307,10 @@ add a key to both or they fail.
   edges are brackets (ticks pointing into the loop), the marker a flag, the playhead a
   plain line. Gold on the waveform means only played; the overview's box is neutral.
 - **Songs resume where they were left**: recording, slow-down and loops always; the
-  playhead only when Tim picks the song himself (a song following on in a list starts
-  at the top), and not when it was left within 5 s of the end. Slow-down is per song.
+  playhead only when Odeion reopens on the song, and not when it was left within 5 s of
+  the end. Played any other way (Enter, a double-click, the queue, following on in a
+  list) a song starts at the top (Tim, 2026-11-16). In the list a click only highlights
+  a song; a double-click plays it, as Enter does. Slow-down is per song.
   Kept on leaving a song, switching recording or speed, every 5 s of playing, ⌘Q and
   closing the window.
 - **Speed**, per song, in whole percent from 25 to 110: `,` `.` in practice step 5%
@@ -386,8 +388,8 @@ add a key to both or they fail.
   lane per stem. A metronome stem starts muted. Each stem has a level: drag across its
   number and name (filled to the level; the level moves with the drag, so a click
   alone leaves it) or scroll over them, or its right-click menu
-  (100, 50, 25%, solo, mute). Levels are kept per stem set with the song's resume spot;
-  mute and solo aren't kept.
+  (100, 50, 25%, solo, mute). Levels and mutes are kept per stem set with the song's
+  resume spot (mutes since Tim, 2026-11-16: practice forgot them); solo isn't kept.
 - **Playlists** (plan 03): `+` or ⌘N adds the highlighted song (the playing one in
   practice) through a picker (each playlist, a check where the song is already, and
   "New playlist…" named in place); the song menu has "Add to playlist…" too, and the

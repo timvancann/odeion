@@ -171,7 +171,7 @@ impl Smooth {
     pub fn at(&mut self, real: Duration, playing: bool, now: Duration, speed: f32) -> Duration {
         if playing && let Some((from, then)) = self.anchor {
             let gone = now.saturating_sub(then);
-            let guess = from + if speed < 1.0 { gone.mul_f64(speed as f64) } else { gone };
+            let guess = from + gone.mul_f64(speed as f64);
             if guess.abs_diff(real) <= SLACK {
                 return guess;
             }
@@ -941,7 +941,9 @@ impl Audio {
     /// Switches to other files (a variation) at `at`, with `looping`, playing or paused
     /// as before.
     pub fn switch(&mut self, files: &[PathBuf], gains_now: &[f32], at: Duration, looping: Loop) {
-        let paused = !self.playing();
+        // A song still opening is about to play (unless it was opened paused): its stems,
+        // switched to straight away, play too. They used to open paused.
+        let paused = if self.loading() { self.start_paused } else { !self.playing() };
         self.play(files, gains_now);
         self.looping = looping;
         self.start_at = Some(at);
@@ -1364,6 +1366,11 @@ mod tests {
         let mut p = Smooth::default();
         assert_eq!(p.at(s(10), true, ms(0), 0.5), s(10));
         assert_eq!(p.at(s(10), true, ms(40), 0.5), s(10) + ms(20));
+        // Sped up, it moves faster too: it used to lag and jump to catch up.
+        let mut p = Smooth::default();
+        assert_eq!(p.at(s(10), true, ms(0), 1.1), s(10));
+        let drawn = p.at(s(10), true, ms(40), 1.1);
+        assert!(drawn.abs_diff(s(10) + ms(44)) < Duration::from_micros(1), "{drawn:?}");
     }
 
     #[test]

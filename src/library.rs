@@ -120,11 +120,19 @@ pub fn fold(text: &str) -> String {
                 'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
                 'è' | 'é' | 'ê' | 'ë' => 'e',
                 'ì' | 'í' | 'î' | 'ï' => 'i',
-                'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' => 'o',
-                'ù' | 'ú' | 'û' | 'ü' => 'u',
+                'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ő' => 'o',
+                'ù' | 'ú' | 'û' | 'ü' | 'ů' | 'ű' => 'u',
                 'ý' | 'ÿ' => 'y',
-                'ñ' => 'n',
-                'ç' => 'c',
+                'ñ' | 'ń' | 'ň' => 'n',
+                'ç' | 'č' | 'ć' => 'c',
+                'ě' | 'ę' => 'e',
+                'ą' => 'a',
+                'ř' => 'r',
+                'š' | 'ś' => 's',
+                'ž' | 'ź' | 'ż' => 'z',
+                'ł' => 'l',
+                // An accent stored apart from its letter, as macOS file names keep them.
+                '\u{0300}'..='\u{036F}' => return None,
                 '’' | '‘' | '\'' | '`' => return None,
                 _ => c,
             })
@@ -510,6 +518,9 @@ mod tests {
     fn folds_case_accents_and_apostrophes() {
         assert_eq!(fold("Jamie’s Cryin’"), "jamies cryin");
         assert_eq!(fold("Motörhead"), "motorhead");
+        // The ö of a macOS file name: an o, then the dots on their own.
+        assert_eq!(fold("Mo\u{0308}torhead"), "motorhead");
+        assert_eq!(fold("Dvořák"), "dvorak");
     }
 
     #[test]

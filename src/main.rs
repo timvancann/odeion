@@ -68,18 +68,21 @@ fn main() {
         .run(|cx: &mut App| {
             ui::load_fonts(cx);
             menu_bar(cx);
-            // Where the window was left, if that display is still connected.
+            // Where the window was left, if that display is still connected; otherwise
+            // its size at least, centred.
             let settings = state::Settings::load(&view::settings_file());
-            let saved = settings.window.and_then(|w| {
-                let display = cx
-                    .displays()
-                    .into_iter()
-                    .find(|d| d.uuid().is_ok_and(|u| u.to_string() == w.display))?;
-                let bounds = Bounds::new(point(px(w.x), px(w.y)), size(px(w.width), px(w.height)));
-                Some((display.id(), bounds))
-            });
-            let (display_id, bounds) = match saved {
-                Some((id, bounds)) => (Some(id), bounds),
+            let (display_id, bounds) = match settings.window {
+                Some(w) => {
+                    let left = size(px(w.width), px(w.height));
+                    let display = cx
+                        .displays()
+                        .into_iter()
+                        .find(|d| d.uuid().is_ok_and(|u| u.to_string() == w.display));
+                    match display {
+                        Some(d) => (Some(d.id()), Bounds::new(point(px(w.x), px(w.y)), left)),
+                        None => (None, Bounds::centered(None, left, cx)),
+                    }
+                }
                 None => (None, Bounds::centered(None, size(px(1000.), px(860.)), cx)),
             };
             cx.open_window(
