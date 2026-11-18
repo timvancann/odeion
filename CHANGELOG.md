@@ -18,6 +18,15 @@ release's notes on GitHub.
 - Moving a song up or down in a playlist always moves it past the song you see next to
   it. With a song from the playlist gone from your library, it could swap places with
   that hidden song, so the move seemed to do nothing.
+- Jumping to another spot (`o`, a section, the arrow keys, a click on the waveform) no
+  longer clicks: the old spot blends into the new one over 5 ms, as a loop does.
+- Loud songs keep their peaks when slowed down, with the EQ on or exported: the limiter
+  that stops clipping now leaves everything alone up to 95% of full scale, where it
+  started at 90%.
+- In practice, ⌘D favourites the playing song, and ⌘A and ⇧⌘A leave practice for its
+  album and artist, instead of acting on a song highlighted in the hidden list.
+- The hints for a first song say to double-click it, as a single click only highlights.
+- Odeion for Windows no longer says "this Mac" while it looks for music.
 
 ## 0.8.0 (2026-11-24)
 

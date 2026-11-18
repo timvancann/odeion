@@ -15,15 +15,18 @@
    ```
 
 The Release workflow (`.github/workflows/release.yml`) then runs the tests, builds
-`Odeion.app` for Apple silicon and Intel in one, and publishes `Odeion-0.2.0.zip` (and
-the same as `Odeion-macOS.zip`) on the repo's Releases page; a second job then builds
-Windows and adds `Odeion-0.2.0-Windows.zip` and `Odeion-Windows.zip`. A tag that doesn't match `Cargo.toml` fails the run before
+`Odeion.app` for Apple silicon and Intel in one, and puts `Odeion-0.2.0.zip` (and
+the same as `Odeion-macOS.zip`) in a draft release on the repo's Releases page; a second
+job then builds Windows and adds `Odeion-0.2.0-Windows.zip` and `Odeion-Windows.zip`. A tag that doesn't match `Cargo.toml` fails the run before
 anything is built. The release notes are the changelog's section for the version, then
 how to install; without a section the run warns and the notes only say how to install.
 
-A last job signs `Odeion-macOS.zip` and `Odeion-Windows.zip` for Odeion's updater and
-adds `Odeion-macOS.zip.minisig` and `Odeion-Windows.zip.minisig`, a few minutes after
-the release appears. Until then Check for Updates offers the download by hand.
+A last job signs `Odeion-macOS.zip` and `Odeion-Windows.zip` for Odeion's updater, adds
+`Odeion-macOS.zip.minisig` and `Odeion-Windows.zip.minisig`, and only then publishes the
+release, so nobody sees it half done. Without the `MINISIGN_KEY` secret (a fork, say) it
+publishes without the signatures, with a warning: the zips still download by hand, but
+Check for Updates won't install them. A run that fails on the way leaves the draft on
+the Releases page: fix and tag again, or publish the draft by hand once it has every file.
 
 A tag on a mistake can go again: delete the release and the tag on GitHub
 (`gh release delete v0.2.0 --cleanup-tag`), fix, tag again.

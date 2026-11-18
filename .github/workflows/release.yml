@@ -1,7 +1,8 @@
 name: Release
 
 # Push a tag like v0.2.0 (the version in Cargo.toml) and this builds Odeion.app for Apple
-# silicon and Intel in one, and publishes it as a GitHub release. With the signing
+# silicon and Intel in one, adds the Windows build and the updater's signatures, and
+# publishes it all as a GitHub release (a draft until then). With the signing
 # secrets set (docs/releasing.md) the app is signed and notarized, so it opens like any
 # other; without them it is only ad-hoc signed and macOS asks once before opening it.
 
@@ -122,8 +123,11 @@ jobs:
           else
             notes="$changes"$'\n\n'"$mac"$'\n\n'"$windows"
           fi
+          # A draft until the sign job has added everything: published now, the README's
+          # Windows link and the updater's signatures were missing for minutes, and for
+          # good when a later job failed.
           gh release create "$GITHUB_REF_NAME" "$zip" Odeion-macOS.zip --title "Odeion $VERSION" \
-            --notes "$notes" --generate-notes
+            --notes "$notes" --generate-notes --draft
 
   # The Windows build (a trial), added to the release the job above made. No signing
   # secrets here; the build cache is read-only, written by ci.yml's windows job on main.
@@ -153,7 +157,8 @@ jobs:
   # Signs both zips for Odeion's own updater (update.rs installs nothing its public key
   # doesn't verify) and adds the signatures to the release. The trusted comment names the
   # file and version, so an old release can't be passed off as a new one. The only job
-  # with MINISIGN_KEY; without it the release can still be downloaded by hand.
+  # with MINISIGN_KEY; without it the release can still be downloaded by hand. Then it
+  # publishes the draft, signed or (without the key) not.
   sign:
     needs: [release, windows]
     runs-on: ubuntu-latest
@@ -178,3 +183,8 @@ jobs:
           done
           rm "$key"
           gh release upload "$GITHUB_REF_NAME" Odeion-macOS.zip.minisig Odeion-Windows.zip.minisig
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false

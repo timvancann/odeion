@@ -67,7 +67,8 @@ and draws:
   position, since rodio's player can't see a jump made inside it. Checking from the
   window every 40 ms let the music run up to 40 ms past the loop's end. The jump back
   blends what follows the loop's end into its start over 5 ms (`BLEND`): a straight
-  jump clicked on every repeat. Also the
+  jump clicked on every repeat. Every seek blends the same way, last in the sound
+  (`Equalized`), so slowed and equalized playback are covered too. Also the
   volume, the stems' levels (`stem_gains`) and the output device (`wanted`, followed
   by `Audio::follow_output`).
 - `playlist.rs`: next, previous and shuffle over the list a song was started from (the
@@ -250,7 +251,8 @@ add a key to both or they fail.
   and mostly shared; Vim keeps `h l` seek, `k j K J` pitch, `p` and `dd` there, the Mac
   keys have ↑ ↓ ⇧↑ ⇧↓ pitch and `l` for the loop.
 - **The ⌘ shortcuts always work, the same in both**: ⌘F search, ⌘P search on or off,
-  ⌘D favourite, ⌘A album, ⇧⌘A artist, ⌘S shuffle, ⌘L to the playing song (in
+  ⌘D favourite, ⌘A album, ⇧⌘A artist (in practice all three take the playing song, and
+  ⌘A ⇧⌘A leave practice for its album or artist, as the card's menu does), ⌘S shuffle, ⌘L to the playing song (in
   practice, Follow), ⌘← ⌘→ previous and next, ⌘H hides Odeion (`cx.hide()`), ⌘1 ⌘2
   library or practice, ⌘O add a variation, ⌘N add to a playlist, ⌘E or ⌥⌘E the EQ,
   ⌘B or ⌃⌘S the sidebar, ⌘, settings, ⌘? keys, ⌘Q. In the library and search, arrows

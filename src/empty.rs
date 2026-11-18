@@ -164,7 +164,7 @@ pub fn said(empty: Empty, a: &About) -> Said {
         Empty::Looking { backing: false } => Said {
             title: format!("Looking for music in {}…", and(a.folders)),
             detail: format!(
-                "{} Songs in a cloud folder (Google Drive, iCloud, Dropbox) that aren't on this Mac yet are downloaded to read their names and covers, which can take a while.",
+                "{} Songs in a cloud folder (Google Drive, iCloud, Dropbox) that aren't on this computer yet are downloaded to read their names and covers, which can take a while.",
                 match a.found {
                     0 => "Nothing found yet.".to_string(),
                     1 => "1 song found so far.".to_string(),
@@ -232,7 +232,7 @@ pub fn waveform(shown: bool, error: Option<&str>, song: bool, library: Option<&s
         (false, Some(e), _) => Some(format!("couldn't read this song's waveform: {e}")),
         (false, None, true) => Some("reading the waveform…".into()),
         (false, None, false) => Some(format!(
-            "Nothing playing: click Library{}, then click a song{} to play it",
+            "Nothing playing: click Library{}, then double-click a song{} to play it",
             or_press(library),
             or_press(play)
         )),
@@ -250,7 +250,7 @@ pub fn no_loop(start: Option<&str>, end: Option<&str>) -> String {
 /// The now-playing card before any song: how to start, get to practice and find every key.
 pub fn first_steps(play: Option<&str>, practice: Option<&str>, help: Option<&str>) -> String {
     format!(
-        "Click a song{} to play it, then click Practice{} to practise it. Every key: the keyboard button{}",
+        "Double-click a song{} to play it, then click Practice{} to practise it. Every key: the keyboard button{}",
         or_press(play),
         or_press(practice),
         help.map_or(String::new(), |k| format!(" or {k}"))
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(no_queue(None), "the queue is empty: point at a song and click its queue button");
         assert_eq!(
             first_steps(Some("Enter"), Some("p"), Some("⌘?")),
-            "Click a song or press Enter to play it, then click Practice or press p to practise it. Every key: the keyboard button or ⌘?"
+            "Double-click a song or press Enter to play it, then click Practice or press p to practise it. Every key: the keyboard button or ⌘?"
         );
     }
 
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(waveform(false, None, true, None, None).unwrap(), "reading the waveform…");
         assert_eq!(
             waveform(false, None, false, Some("Esc"), Some("Enter")).unwrap(),
-            "Nothing playing: click Library or press Esc, then click a song or press Enter to play it"
+            "Nothing playing: click Library or press Esc, then double-click a song or press Enter to play it"
         );
     }
 

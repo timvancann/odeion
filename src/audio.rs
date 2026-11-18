@@ -265,11 +265,13 @@ impl<S: Source> Source for Mix<S> {
 
 /// Keeps slowed audio inside full scale. Stretching re-aligns phases, and peaks that
 /// were apart can land together: on loud masters 0.02 to 0.06% of samples went over,
-/// up to 1.8, and the hardware would clip them into crackle. Below 0.9 nothing changes;
+/// up to 1.8, and the hardware would clip them into crackle. Below 0.95 nothing changes;
 /// above it peaks bend smoothly toward 1 and never pass it. Only those rare peaks are
-/// touched, so the level stays as it was.
+/// touched, so the level stays as it was. The knee was 0.9 at first, which bent a good
+/// share of every loud master; much above 0.95 the bend gets so sharp it is nearly a
+/// clip itself.
 pub(crate) fn soft_limit(x: f32) -> f32 {
-    const KNEE: f32 = 0.9;
+    const KNEE: f32 = 0.95;
     let size = x.abs();
     if size <= KNEE {
         return x;
@@ -505,6 +507,10 @@ impl<S: Source> Source for Stretched<S> {
 /// The global EQ, last in the sound (after the stretcher), so it colours what's heard.
 /// It reads the EQ from `Shared` once a block and passes samples straight through while
 /// it's flat. Boosts can push peaks over full scale, so its output is soft-limited.
+///
+/// Being last, it also blends every seek over `BLEND`, as `Looped` blends the loop's
+/// jump back: what would have played next fades out as the new spot fades in, whether
+/// slowed, equalized or neither. A straight jump clicked on `o`, sections and arrows.
 struct Equalized<S> {
     inner: S,
     shared: Arc<Shared>,
@@ -520,6 +526,11 @@ struct Equalized<S> {
     channel: usize,
     /// Samples until the EQ is read again.
     until: usize,
+    /// What would have played after the last seek, and how much of it has played.
+    tail: Vec<rodio::Sample>,
+    at: usize,
+    /// Whether the seek worked; if not, the tail plays as it is.
+    blend: bool,
 }
 
 impl<S: Source> Equalized<S> {
@@ -538,6 +549,9 @@ impl<S: Source> Equalized<S> {
             states: Vec::new(),
             channel: 0,
             until: 0,
+            tail: Vec::new(),
+            at: 0,
+            blend: false,
         }
     }
 
@@ -562,6 +576,22 @@ impl<S: Source> Iterator for Equalized<S> {
     type Item = rodio::Sample;
 
     fn next(&mut self) -> Option<rodio::Sample> {
+        if self.at < self.tail.len() {
+            let old = self.tail[self.at];
+            self.at += 1;
+            if !self.blend {
+                return Some(old);
+            }
+            let w = self.at as f32 / (self.tail.len() + 1) as f32;
+            return Some(old + (self.equalized().unwrap_or(0.0) - old) * w);
+        }
+        self.equalized()
+    }
+}
+
+impl<S: Source> Equalized<S> {
+    /// The song's next sample through the EQ.
+    fn equalized(&mut self) -> Option<rodio::Sample> {
         if self.until == 0 && self.channel == 0 {
             self.read_eq();
             self.until = BLOCK * self.channels;
@@ -600,10 +630,20 @@ impl<S: Source> Source for Equalized<S> {
     }
 
     fn try_seek(&mut self, at: Duration) -> Result<(), SeekError> {
+        // What would have played next, read through `next` so a blend still going on
+        // carries on into it. At the song's end the new spot fades in from silence.
+        let n = ((self.rate as f64 * BLEND.as_secs_f64()) as usize).max(1) * self.channels;
+        let mut tail = Vec::with_capacity(n);
+        tail.extend(self.by_ref().take(n));
+        tail.resize(n, 0.0);
+        self.tail = tail;
+        self.at = 0;
+        self.blend = false;
         self.inner.try_seek(at)?;
-        self.states.iter_mut().for_each(|s| *s = Default::default());
-        // The channel carries on: a seek can come between a frame's left and right, and
-        // what follows still starts where the frame left off.
+        self.blend = true;
+        // The filters keep their memory: the blend covers the jump, and emptied they
+        // clicked on their own. The channel carries on: a seek can come between a frame's
+        // left and right, and what follows still starts where the frame left off.
         self.until = 0;
         Ok(())
     }
@@ -1555,15 +1595,15 @@ mod tests {
 
     #[test]
     fn the_limiter_leaves_normal_levels_alone_and_keeps_peaks_under_full_scale() {
-        for x in [0.0, 0.3, -0.75, 0.9, -0.9] {
+        for x in [0.0, 0.3, -0.75, 0.93, -0.95] {
             assert_eq!(soft_limit(x), x);
         }
-        for x in [0.95f32, 1.0, 1.8, -1.8, 40.0] {
+        for x in [0.97f32, 1.0, 1.8, -1.8, 40.0] {
             let y = soft_limit(x);
-            assert!(y.abs() <= 1.0 && y.abs() > 0.9 && y.signum() == x.signum(), "{x} gave {y}");
+            assert!(y.abs() <= 1.0 && y.abs() > 0.95 && y.signum() == x.signum(), "{x} gave {y}");
         }
         // Smooth: bigger stays bigger.
-        assert!(soft_limit(1.2) < soft_limit(1.5));
+        assert!(soft_limit(0.98) < soft_limit(1.05));
     }
 
     #[test]
@@ -1584,6 +1624,22 @@ mod tests {
             let x = (i / 2) as f32 / 1200.;
             assert!((y - x * half).abs() < 1e-4, "sample {i}: {y} for {x}");
         }
+    }
+
+    #[test]
+    fn a_seek_blends_what_would_have_played_into_the_new_spot() {
+        let shared = Arc::new(Shared::default());
+        let mut song = Equalized::new(Counting { at: 0, frames: 1000 }, shared);
+        assert_eq!(song.by_ref().take(200).last(), Some(99.0));
+        song.try_seek(Duration::from_millis(500)).unwrap();
+        // 5 ms at 1 kHz in two channels: 10 samples fading from frames 100.. to 500..
+        let heard: Vec<rodio::Sample> = song.by_ref().take(12).collect();
+        for (i, y) in heard[..10].iter().enumerate() {
+            let (old, new) = ((100 + i / 2) as f32, (500 + i / 2) as f32);
+            let blended = old + (new - old) * (i + 1) as f32 / 11.0;
+            assert!((y - blended).abs() < 1e-3, "sample {i}: {y}, not {blended}");
+        }
+        assert_eq!(heard[10..], [505.0, 505.0]);
     }
 
     #[test]

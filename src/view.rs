@@ -3211,6 +3211,12 @@ impl Odeion {
                 self.next_song();
             }
             Action::Shuffle => self.toggle_shuffle(),
+            // In practice the list is hidden, so they mean the playing song, as ⌘N does.
+            Action::Favorite | Action::Album | Action::Artist if self.practice => {
+                if let Some(song) = self.now.as_ref().map(|n| n.path.clone()) {
+                    self.on_song(song, action);
+                }
+            }
             Action::Favorite => self.toggle_favorite(),
             Action::Album => self.toggle_album(),
             Action::Artist => self.toggle_artist(),
@@ -3653,13 +3659,20 @@ impl Odeion {
     /// highlighted one.
     fn song_action(&mut self, song: PathBuf, action: Action, cx: &mut Context<Self>) {
         match action {
+            Action::AddVariation => self.pick_variation(song, cx),
+            action => self.on_song(song, action),
+        }
+    }
+
+    /// `song_action` for the entries that need no window.
+    fn on_song(&mut self, song: PathBuf, action: Action) {
+        match action {
             Action::Album | Action::Artist => {
                 if let Some(track) = self.track_at(&song) {
                     self.show(track, action == Action::Artist);
                 }
             }
             Action::AddToPlaylist => self.add_to = Some(AddTo { songs: vec![song], at: 0, naming: None }),
-            Action::AddVariation => self.pick_variation(song, cx),
             Action::Favorite if !self.can_favorite(&song) => self.message = Some((NO_BACKING_FAVOURITES.into(), false)),
             Action::Favorite => {
                 self.favorites.toggle(&song);
