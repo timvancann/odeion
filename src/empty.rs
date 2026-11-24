@@ -11,8 +11,8 @@ use crate::ui::count;
 pub enum Empty {
     /// No music folder yet.
     NoFolder,
-    /// The first scan is still walking the folders.
-    Looking,
+    /// The first scan is still walking the folders; `backing` for the backing tracks'.
+    Looking { backing: bool },
     /// None of the listed folders could be opened.
     Unreadable,
     /// The scan found no songs.
@@ -21,6 +21,9 @@ pub enum Empty {
     NoMatch { scoped: bool },
     /// The open playlist has no songs.
     EmptyPlaylist,
+    /// The backing tracks are open and there are none: no folder for them yet, or none
+    /// found in it.
+    NoBacking { folders: bool },
 }
 
 /// What the list knows, to tell why it is empty.
@@ -29,6 +32,8 @@ pub struct List {
     pub rows: usize,
     pub tracks: usize,
     pub folders: usize,
+    /// The shown list's folders that couldn't be opened (music, or backing tracks in
+    /// their view).
     pub unreadable: usize,
     pub scanning: bool,
     /// Something is typed in the search.
@@ -37,6 +42,10 @@ pub struct List {
     pub scoped: bool,
     /// A playlist is open (not an album or artist).
     pub playlist: bool,
+    /// The backing tracks are open (not an album or artist).
+    pub backing: bool,
+    /// The backing-track folders listed.
+    pub backing_folders: usize,
 }
 
 /// Why the list is empty, or nothing when it isn't (or the reason is too rare to name).
@@ -44,7 +53,20 @@ pub fn why(l: List) -> Option<Empty> {
     if l.rows > 0 {
         return None;
     }
-    Some(if l.folders == 0 {
+    // Backing tracks need no music folder, so theirs comes first.
+    Some(if l.backing {
+        if l.backing_folders == 0 {
+            Empty::NoBacking { folders: false }
+        } else if l.query {
+            Empty::NoMatch { scoped: l.scoped }
+        } else if l.scanning {
+            Empty::Looking { backing: true }
+        } else if l.unreadable >= l.backing_folders {
+            Empty::Unreadable
+        } else {
+            Empty::NoBacking { folders: true }
+        }
+    } else if l.folders == 0 {
         Empty::NoFolder
     } else if l.query {
         Empty::NoMatch { scoped: l.scoped }
@@ -53,7 +75,7 @@ pub fn why(l: List) -> Option<Empty> {
     } else if l.tracks > 0 {
         return None;
     } else if l.scanning {
-        Empty::Looking
+        Empty::Looking { backing: false }
     } else if l.unreadable >= l.folders {
         Empty::Unreadable
     } else {
@@ -65,6 +87,7 @@ pub fn why(l: List) -> Option<Empty> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     AddFolder,
+    AddBacking,
     Settings,
     SearchEverything,
 }
@@ -88,7 +111,7 @@ pub struct Keys<'a> {
 /// What the list's message is about.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct About<'a> {
-    /// The listed folders, as shown.
+    /// The shown list's folders (music, or backing tracks in their view), as shown.
     pub folders: &'a [String],
     /// Those that couldn't be opened: name and why.
     pub unreadable: &'a [(String, String)],
@@ -132,7 +155,12 @@ pub fn said(empty: Empty, a: &About) -> Said {
             ),
             button: Some((Button::AddFolder, "Add music folder…")),
         },
-        Empty::Looking => Said {
+        Empty::Looking { backing: true } => Said {
+            title: format!("Looking for backing tracks in {}…", and(a.folders)),
+            detail: "Tracks in a cloud folder (Google Drive, iCloud, Dropbox) that aren't on this Mac yet are downloaded to read their names, which can take a while.".into(),
+            button: None,
+        },
+        Empty::Looking { backing: false } => Said {
             title: format!("Looking for music in {}…", and(a.folders)),
             detail: format!(
                 "{} Songs in a cloud folder (Google Drive, iCloud, Dropbox) that aren't on this Mac yet are downloaded to read their names and covers, which can take a while.",
@@ -178,6 +206,19 @@ pub fn said(empty: Empty, a: &About) -> Said {
                 a.keys.add_to_playlist.map_or(String::new(), |k| format!(", or highlight it and press {k}"))
             ),
             button: None,
+        },
+        Empty::NoBacking { folders: false } => Said {
+            title: "No backing tracks yet".into(),
+            detail: format!(
+                "For tracks that aren't songs, like jam tracks you bought or downloaded: click Add backing-track folder{}. They stay out of your library and show here.",
+                or_press(a.keys.play)
+            ),
+            button: Some((Button::AddBacking, "Add backing-track folder…")),
+        },
+        Empty::NoBacking { folders: true } => Said {
+            title: format!("No backing tracks found in {}", and(a.folders)),
+            detail: format!("Odeion plays {} files. To add another folder, {settings}.", and(a.formats)),
+            button: Some((Button::Settings, "Open settings")),
         },
     }
 }
@@ -268,7 +309,7 @@ mod tests {
     #[test]
     fn each_reason_for_an_empty_list_is_told_apart() {
         assert_eq!(why(List { folders: 0, scanning: true, ..list() }), Some(Empty::NoFolder));
-        assert_eq!(why(List { scanning: true, ..list() }), Some(Empty::Looking));
+        assert_eq!(why(List { scanning: true, ..list() }), Some(Empty::Looking { backing: false }));
         assert_eq!(why(list()), Some(Empty::NoSongs));
         assert_eq!(why(List { folders: 2, unreadable: 1, ..list() }), Some(Empty::NoSongs));
         assert_eq!(why(List { folders: 2, unreadable: 2, ..list() }), Some(Empty::Unreadable));
@@ -282,6 +323,34 @@ mod tests {
         assert_eq!(why(List { tracks: 9, ..list() }), None);
         // A rescan with the cached list showing isn't a first scan.
         assert_eq!(why(List { tracks: 9, scanning: true, rows: 9, ..list() }), None);
+        // The backing tracks say whether a folder is missing or empty, music or not.
+        assert_eq!(why(List { folders: 0, backing: true, ..list() }), Some(Empty::NoBacking { folders: false }));
+        let empty_folder = List { tracks: 9, backing: true, backing_folders: 1, ..list() };
+        assert_eq!(why(empty_folder), Some(Empty::NoBacking { folders: true }));
+        assert_eq!(why(List { query: true, scoped: true, ..empty_folder }), Some(Empty::NoMatch { scoped: true }));
+        // A search in them is theirs, with or without a music folder.
+        let searched = List { folders: 0, query: true, scoped: true, ..empty_folder };
+        assert_eq!(why(searched), Some(Empty::NoMatch { scoped: true }));
+        assert_eq!(why(List { backing_folders: 0, ..searched }), Some(Empty::NoBacking { folders: false }));
+        // While the scan looks, or when their folders can't be opened, they say so.
+        assert_eq!(why(List { scanning: true, ..empty_folder }), Some(Empty::Looking { backing: true }));
+        assert_eq!(why(List { unreadable: 1, ..empty_folder }), Some(Empty::Unreadable));
+        assert_eq!(why(List { backing_folders: 2, unreadable: 1, ..empty_folder }), Some(Empty::NoBacking { folders: true }));
+    }
+
+    #[test]
+    fn the_backing_tracks_say_how_to_get_some() {
+        let (backing, formats) = (["~/Jams".to_string()], ["MP3".to_string()]);
+        let a = about(&backing, &formats);
+        let no_folder = said(Empty::NoBacking { folders: false }, &a);
+        assert_eq!(no_folder.button, Some((Button::AddBacking, "Add backing-track folder…")));
+        assert!(no_folder.detail.contains("click Add backing-track folder or press Enter"));
+        let looking = said(Empty::Looking { backing: true }, &About { found: 1234, ..a });
+        assert_eq!(looking.title, "Looking for backing tracks in ~/Jams…");
+        assert!(!looking.detail.contains("1,234"));
+        let none = said(Empty::NoBacking { folders: true }, &a);
+        assert_eq!(none.title, "No backing tracks found in ~/Jams");
+        assert!(none.detail.starts_with("Odeion plays MP3 files."));
     }
 
     fn about<'a>(folders: &'a [String], formats: &'a [String]) -> About<'a> {
@@ -304,10 +373,10 @@ mod tests {
         assert_eq!(none.button, Some((Button::Settings, "Open settings")));
         assert!(said(Empty::NoFolder, &a).detail.contains("click Add music folder or press Enter"));
 
-        let looking = said(Empty::Looking, &About { found: 1234, ..a });
+        let looking = said(Empty::Looking { backing: false }, &About { found: 1234, ..a });
         assert_eq!(looking.title, "Looking for music in ~/Music and ~/Downloads…");
         assert!(looking.detail.starts_with("1,234 songs found so far."));
-        assert!(said(Empty::Looking, &a).detail.starts_with("Nothing found yet."));
+        assert!(said(Empty::Looking { backing: false }, &a).detail.starts_with("Nothing found yet."));
     }
 
     #[test]

@@ -69,6 +69,12 @@ pub enum Outcome {
     Choose(Action),
 }
 
+/// "Favourite" or "Not a favourite", or nothing for a backing track (`None`), which
+/// can't be one.
+fn favourite(favorite: Option<bool>) -> Option<(&'static str, Action)> {
+    favorite.map(|on| (if on { "Not a favourite" } else { "Favourite" }, Action::Favorite))
+}
+
 impl Menu {
     fn new(target: Target, entries: Vec<(&'static str, Action)>) -> Menu {
         Menu { target, entries, breaks: Vec::new(), row: 0 }
@@ -129,8 +135,9 @@ impl Menu {
     }
 
     /// On the now-playing card: the playing song's entries, then the loop's and the
-    /// marker's while there are any.
-    pub fn playing(favorite: bool, active: bool, on: bool, marker: bool) -> Menu {
+    /// marker's while there are any. `favorite` is none for a backing track, which can't
+    /// be a favourite.
+    pub fn playing(favorite: Option<bool>, active: bool, on: bool, marker: bool) -> Menu {
         let mut timing = Vec::new();
         if active {
             timing.push((if on { "Loop off" } else { "Loop on" }, Action::LoopSwitch));
@@ -146,13 +153,15 @@ impl Menu {
         }
         Menu::new(
             Target::Playing,
-            vec![
-                (if favorite { "Not a favourite" } else { "Favourite" }, Action::Favorite),
-                ("Only this album", Action::Album),
-                ("Only this artist", Action::Artist),
-                ("Add to playlist…", Action::AddToPlaylist),
-                ("Add a variation…", Action::AddVariation),
-            ],
+            favourite(favorite)
+                .into_iter()
+                .chain([
+                    ("Only this album", Action::Album),
+                    ("Only this artist", Action::Artist),
+                    ("Add to playlist…", Action::AddToPlaylist),
+                    ("Add a variation…", Action::AddVariation),
+                ])
+                .collect(),
         )
         .then(timing)
     }
@@ -244,8 +253,9 @@ impl Menu {
     }
 
     /// On the song in `row`. Album and artist say "back" when that view is already open;
-    /// in a playlist's view the song can leave it or move.
-    pub fn song(row: usize, favorite: bool, album: bool, artist: bool, in_playlist: bool) -> Menu {
+    /// in a playlist's view the song can leave it or move. `favorite` is none for a backing
+    /// track, which can't be a favourite.
+    pub fn song(row: usize, favorite: Option<bool>, album: bool, artist: bool, in_playlist: bool) -> Menu {
         let listed = [
             ("Remove from playlist", Action::PlaylistRemove),
             ("Move up", Action::PlaylistMove(true)),
@@ -253,11 +263,13 @@ impl Menu {
         ];
         Menu::new(
             Target::Song(row),
-            vec![
-                (if favorite { "Not a favourite" } else { "Favourite" }, Action::Favorite),
-                (if album { "Back from the album" } else { "Only this album" }, Action::Album),
-                (if artist { "Back from the artist" } else { "Only this artist" }, Action::Artist),
-            ],
+            favourite(favorite)
+                .into_iter()
+                .chain([
+                    (if album { "Back from the album" } else { "Only this album" }, Action::Album),
+                    (if artist { "Back from the artist" } else { "Only this artist" }, Action::Artist),
+                ])
+                .collect(),
         )
         .then([
             ("Queue", Action::Queue(false)),
@@ -366,7 +378,7 @@ mod tests {
         assert_eq!(Menu::playlist(4).target, Target::Playlist(4));
         assert_eq!(Menu::artist(9).target, Target::Artist(9));
         assert_eq!(Menu::section(2).target, Target::Section(2));
-        assert_eq!(Menu::song(7, false, false, false, false).target, Target::Song(7));
+        assert_eq!(Menu::song(7, Some(false), false, false, false).target, Target::Song(7));
         assert_eq!(Menu::queued(1).target, Target::Queued(1));
         // A stem's entries name the stem, so they work from anywhere.
         let stem = Menu::stem(3, false, false);
@@ -377,12 +389,16 @@ mod tests {
     #[test]
     fn song_menu_says_what_a_toggle_will_do() {
         let labels = |m: Menu| m.entries.iter().map(|e| e.0).collect::<Vec<_>>();
-        assert!(labels(Menu::song(0, false, false, false, false)).contains(&"Favourite"));
-        let open = labels(Menu::song(0, true, true, true, true));
+        assert!(labels(Menu::song(0, Some(false), false, false, false)).contains(&"Favourite"));
+        let open = labels(Menu::song(0, Some(true), true, true, true));
         assert!(open.contains(&"Remove from playlist"));
         assert!(open.contains(&"Not a favourite"));
         assert!(open.contains(&"Back from the album"));
         assert!(open.contains(&"Back from the artist"));
+        // A backing track can't be a favourite, so neither menu offers it.
+        let backing = labels(Menu::song(0, None, false, false, false));
+        assert!(!backing.contains(&"Favourite") && backing.contains(&"Only this album"));
+        assert!(!Menu::playing(None, false, false, false).entries.iter().any(|e| e.1 == Action::Favorite));
     }
 
     fn labels(m: &Menu) -> Vec<&'static str> {
@@ -392,14 +408,14 @@ mod tests {
     #[test]
     fn groups_are_set_apart_and_empty_ones_leave_no_line() {
         // Favourite, album and artist; the queue and playlists; the playlist's own.
-        assert_eq!(Menu::song(0, false, false, false, true).breaks, [3, 7]);
-        assert_eq!(Menu::song(0, false, false, false, false).breaks, [3]);
+        assert_eq!(Menu::song(0, Some(false), false, false, true).breaks, [3, 7]);
+        assert_eq!(Menu::song(0, Some(false), false, false, false).breaks, [3]);
         assert!(Menu::waveform(Duration::ZERO, false).breaks.is_empty());
         let inside = Menu::waveform(Duration::ZERO, true);
         assert_eq!(inside.breaks, [3]);
         assert!(labels(&inside).contains(&"Clear the loop"));
         // Nothing to say about the loop or marker: no line under the song's entries.
-        assert!(Menu::playing(false, false, false, false).breaks.is_empty());
+        assert!(Menu::playing(Some(false), false, false, false).breaks.is_empty());
         // Moving by key goes across a line as if it weren't there.
         let mut menu = Menu::queued(0);
         (0..3).for_each(|_| _ = menu.key("j"));
@@ -421,14 +437,14 @@ mod tests {
 
     #[test]
     fn the_now_playing_card_adds_the_loop_and_marker_only_when_there_are_any() {
-        let bare = Menu::playing(true, false, false, false);
+        let bare = Menu::playing(Some(true), false, false, false);
         assert_eq!(bare.target, Target::Playing);
         assert_eq!(bare.entries[0].0, "Not a favourite");
         assert_eq!(bare.entries.len(), 5);
-        let marked = labels(&Menu::playing(false, false, false, true));
+        let marked = labels(&Menu::playing(Some(false), false, false, true));
         assert!(marked.contains(&"Play from the marker") && marked.contains(&"Clear the marker"));
         assert!(!marked.contains(&"Clear the loop"));
-        let looped = labels(&Menu::playing(false, true, true, false));
+        let looped = labels(&Menu::playing(Some(false), true, true, false));
         assert!(looped.contains(&"Loop off") && looped.contains(&"Clear the loop"));
     }
 

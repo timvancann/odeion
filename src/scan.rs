@@ -28,12 +28,13 @@ pub type Found = (PathBuf, u64, u64);
 /// A listed folder that couldn't be opened, and why, in plain words.
 pub type Unreadable = (PathBuf, String);
 
-/// Every audio file under `root`, each counted in `counted` as it is found, so the
-/// first scan can say how far it got, and the paths it couldn't look into this time.
+/// Every audio file under `root`, each that `counts` (the songs, not the backing tracks)
+/// counted in `counted` as it is found, so the first scan can say how far it got, and
+/// the paths it couldn't look into this time.
 /// Hidden folders and Music.app's import inbox are skipped. A `root` that can't be
 /// opened is an error; a folder or file below it that can't is passed over, and listed
 /// so the songs known there aren't taken for deleted.
-pub fn walk(root: &Path, counted: &AtomicUsize) -> std::io::Result<(Vec<Found>, Vec<PathBuf>)> {
+pub fn walk(root: &Path, counted: &AtomicUsize, counts: &dyn Fn(&Path) -> bool) -> std::io::Result<(Vec<Found>, Vec<PathBuf>)> {
     std::fs::read_dir(root)?;
     let (mut found, mut missed) = (Vec::new(), Vec::new());
     let mut dirs = vec![root.to_path_buf()];
@@ -64,8 +65,10 @@ pub fn walk(root: &Path, counted: &AtomicUsize) -> std::io::Result<(Vec<Found>, 
                     .ok()
                     .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                     .map_or(0, |d| d.as_secs());
+                if counts(&path) {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                }
                 found.push((path, meta.len(), modified));
-                counted.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -85,12 +88,12 @@ pub struct Walked {
     pub missed: Vec<PathBuf>,
 }
 
-/// Walks each of `roots`.
-pub fn walk_all(roots: &[PathBuf], counted: &AtomicUsize) -> Walked {
+/// Walks each of `roots`, counting what `counts` (see `walk`).
+pub fn walk_all(roots: &[PathBuf], counted: &AtomicUsize, counts: &dyn Fn(&Path) -> bool) -> Walked {
     let mut seen = std::collections::HashSet::new();
     let mut walked = Walked::default();
     for root in roots {
-        match walk(root, counted) {
+        match walk(root, counted, counts) {
             Ok((files, missed)) => {
                 walked.found.extend(files.into_iter().filter(|f| seen.insert(f.0.clone())));
                 walked.missed.extend(missed);
@@ -147,6 +150,19 @@ fn root_of<'a>(roots: &'a [PathBuf], path: &Path) -> &'a Path {
         .filter(|r| path.starts_with(r))
         .max_by_key(|r| r.components().count())
         .map_or(Path::new(""), |r| r.as_path())
+}
+
+/// Whether a file is a backing track: the deepest listed folder holding it is one of
+/// `backing`'s rather than one of `music`'s, so a backing-track folder inside the music
+/// folder keeps its files out of the library, and a music folder inside it the reverse.
+pub fn is_backing(music: &[PathBuf], backing: &[PathBuf], path: &Path) -> bool {
+    let deepest = |roots: &[PathBuf]| {
+        roots.iter().filter(|r| path.starts_with(r)).map(|r| r.components().count()).max()
+    };
+    match (deepest(backing), deepest(music)) {
+        (Some(b), Some(m)) => b > m,
+        (b, _) => b.is_some(),
+    }
 }
 
 /// What a scan changed: songs that are new, and songs that are gone.
@@ -381,6 +397,20 @@ mod tests {
     }
 
     #[test]
+    fn backing_tracks_are_files_whose_deepest_folder_is_a_backing_one() {
+        let music: [PathBuf; 2] = ["/m".into(), "/b/Songs".into()];
+        let backing: [PathBuf; 2] = ["/m/Backing".into(), "/b".into()];
+        let is = |p: &str| is_backing(&music, &backing, Path::new(p));
+        assert!(!is("/m/Artist/song.mp3"));
+        // Inside the music folder, a backing-track folder keeps its files apart.
+        assert!(is("/m/Backing/Blues in A.mp3"));
+        assert!(is("/b/jam.mp3"));
+        // And a music folder inside a backing-track folder holds music.
+        assert!(!is("/b/Songs/song.mp3"));
+        assert!(!is_backing(&music, &[], Path::new("/m/Backing/x.mp3")));
+    }
+
+    #[test]
     fn covers_are_found_beside_a_moved_cache() {
         let dir = std::env::temp_dir().join(format!("odeion-covers-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("covers")).unwrap();
@@ -454,13 +484,17 @@ mod tests {
         std::fs::write(album.join("cover.jpg"), b"x").unwrap();
         std::fs::write(inbox.join("Other.mp3"), b"x").unwrap();
         let counted = AtomicUsize::new(0);
-        let (found, missed) = walk(&root, &counted).unwrap();
+        let (found, missed) = walk(&root, &counted, &|_| true).unwrap();
         let mut paths: Vec<PathBuf> = found.into_iter().map(|f| f.0).collect();
         paths.sort();
         assert_eq!(paths, [album.join("01 Song.MP3"), media.join("02 Tune.m4a")]);
         assert!(missed.is_empty());
         assert_eq!(counted.load(Ordering::Relaxed), 2);
-        let walked = walk_all(&[root.clone(), album.clone()], &AtomicUsize::new(0));
+        // Only what counts is counted (the songs, not the backing tracks); all is found.
+        let some = AtomicUsize::new(0);
+        assert_eq!(walk(&root, &some, &|p| p.starts_with(&album)).unwrap().0.len(), 2);
+        assert_eq!(some.load(Ordering::Relaxed), 1);
+        let walked = walk_all(&[root.clone(), album.clone()], &AtomicUsize::new(0), &|_| true);
         let mut nested: Vec<PathBuf> = walked.found.into_iter().map(|f| f.0).collect();
         nested.sort();
         assert_eq!(nested, paths);
@@ -477,7 +511,7 @@ mod tests {
         std::fs::create_dir_all(&shut).unwrap();
         std::fs::write(root.join("01 Song.mp3"), b"x").unwrap();
         std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let walked = walk_all(std::slice::from_ref(&root), &AtomicUsize::new(0));
+        let walked = walk_all(std::slice::from_ref(&root), &AtomicUsize::new(0), &|_| true);
         std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(walked.found.len(), 1);
         assert!(walked.unreadable.is_empty());
@@ -492,7 +526,7 @@ mod tests {
         std::fs::write(root.join("01 Song.mp3"), b"x").unwrap();
         let gone = root.join("Not here");
         let file = root.join("01 Song.mp3");
-        let walked = walk_all(&[gone.clone(), root.clone(), file.clone()], &AtomicUsize::new(0));
+        let walked = walk_all(&[gone.clone(), root.clone(), file.clone()], &AtomicUsize::new(0), &|_| true);
         assert_eq!(walked.found.len(), 1);
         assert_eq!(walked.missed, [gone.clone(), file.clone()]);
         assert_eq!(

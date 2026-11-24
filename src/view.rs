@@ -54,6 +54,10 @@ const QUIT_AGAIN: Duration = Duration::from_secs(10);
 const CHECKING: &str = "checking for updates…";
 /// The note on the card while an update downloads.
 const DOWNLOADING: &str = "downloading the update…";
+/// The backing tracks' place: the sidebar, its header, the search's scope.
+const BACKING: &str = "Backing tracks";
+/// Said when a backing track is made a favourite.
+const NO_BACKING_FAVOURITES: &str = "backing tracks can't be favourites; they're all under Backing tracks";
 const ROW: f32 = 44.;
 /// The transparent title bar's height, where the traffic lights sit.
 const TITLEBAR: f32 = 40.;
@@ -322,6 +326,7 @@ struct AddTo {
 enum Place {
     Library,
     Favourites,
+    Backing,
     Playing,
 }
 
@@ -488,6 +493,8 @@ pub struct Odeion {
     playlists: Playlists,
     /// The playlist shown in the list, by its place.
     playlist_view: Option<usize>,
+    /// The backing tracks are shown in the list, as a playlist would be.
+    backing_view: bool,
     /// How the open playlist is sorted, from its column headers: shown and played in
     /// that order. Each playlist opens in its own.
     playlist_sort: library::Sorting,
@@ -711,6 +718,7 @@ impl Odeion {
             queue_at: None,
             playlists: Playlists::load(&playlists_file()),
             playlist_view: None,
+            backing_view: false,
             playlist_sort: None,
             add_to: None,
             renaming_playlist: None,
@@ -756,13 +764,15 @@ impl Odeion {
 
     /// Walks the folders again in the background. The list stays as it was meanwhile.
     fn rescan(&mut self) {
-        let roots = self.settings.folders.clone();
+        let roots = self.settings.roots();
+        let (music, backing) = (self.settings.folders.clone(), self.settings.backing.clone());
         let cached = self.tracks.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let counted = Arc::new(AtomicUsize::new(0));
         (self.scan_found, self.scan_shown) = (counted.clone(), 0);
         std::thread::spawn(move || {
-            let walked = scan::walk_all(&roots, &counted);
+            // The first scan's count is of songs: the backing tracks stay out of it.
+            let walked = scan::walk_all(&roots, &counted, &|p| !scan::is_backing(&music, &backing, p));
             let (tracks, todo) = scan::merge(&roots, walked.found, cached, &walked.missed);
             let _ = tx.send((tracks, todo, walked.unreadable));
         });
@@ -788,10 +798,43 @@ impl Odeion {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(folders))) = picked.await {
                 let _ = this.update(cx, |odeion, cx| {
-                    if odeion.settings.add_folders(folders) {
-                        odeion.save_settings();
-                        odeion.rescan();
-                    }
+                    let (added, elsewhere) = odeion.settings.add_folders(folders);
+                    odeion.added_folders(added, &elsewhere, "backing tracks");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// After folders were picked: saves and scans when any were new, and names those left
+    /// out for being listed as the other kind (`as_what`: "music", "backing tracks").
+    fn added_folders(&mut self, added: bool, elsewhere: &[PathBuf], as_what: &str) {
+        if added {
+            self.save_settings();
+            self.rescan();
+        }
+        if !elsewhere.is_empty() {
+            let names: Vec<String> = elsewhere.iter().map(|f| tilde(f)).collect();
+            let is = if names.len() == 1 { "is" } else { "are" };
+            let said = format!("{} {is} already listed as {as_what}: a folder is music or backing tracks, not both", empty::and(&names));
+            self.message = Some((said, false));
+        }
+    }
+
+    /// Asks macOS for folders of backing tracks to add, then scans them.
+    fn pick_backing(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(folders))) = picked.await {
+                let _ = this.update(cx, |odeion, cx| {
+                    let (added, elsewhere) = odeion.settings.add_backing(folders);
+                    odeion.added_folders(added, &elsewhere, "music");
                     cx.notify();
                 });
             }
@@ -1001,6 +1044,32 @@ impl Odeion {
         }
     }
 
+    fn remove_backing(&mut self, i: usize) {
+        if i < self.settings.backing.len() {
+            self.settings.backing.remove(i);
+            self.save_settings();
+            self.rescan();
+        }
+    }
+
+    /// Removes the folder on settings row `row`, a music or a backing-track folder; any
+    /// other row is left alone.
+    fn remove_folder_row(&mut self, row: usize) {
+        let (music, backing) = (self.settings.folders.len(), self.settings.backing.len());
+        if row < music {
+            self.remove_folder(row);
+        } else if row > music && row <= music + backing {
+            self.remove_backing(row - music - 1);
+        }
+    }
+
+    /// The settings rows run: the music folders, "Add folder…", the backing-track folders,
+    /// "Add backing-track folder…", then from this row Appearance, the theme, the
+    /// keyboard, the output and the data folder.
+    fn prefs_rest(&self) -> usize {
+        self.settings.folders.len() + self.settings.backing.len() + 2
+    }
+
     /// Draws with the theme the settings choose: the editor theme when one is chosen and
     /// still installed, otherwise odeion's own for the Appearance (on Auto, as macOS is now).
     fn apply_theme(&self, cx: &gpui::App) {
@@ -1114,7 +1183,7 @@ impl Odeion {
     /// Keys while the ⌘, sheet is open. `typed` is what the key types in the theme filter.
     fn prefs_key(&mut self, k: &gpui::Keystroke, typed: Option<String>, cx: &gpui::App) {
         let (cmd, ctrl) = keys::command_keys(k.modifiers.platform, k.modifiers.control);
-        let vim = self.vim();
+        let (vim, rest) = (self.vim(), self.prefs_rest());
         let Some(prefs) = &mut self.prefs else { return };
         let vim = vim && prefs.picker.is_none() && !cmd && !ctrl;
         let up = k.key == "up" || (ctrl && k.key == "k") || (vim && k.key == "k");
@@ -1169,28 +1238,17 @@ impl Odeion {
             }
             return;
         }
-        let folders = self.settings.folders.len();
         let row = prefs.row;
         match k.key.as_str() {
             "escape" => self.close_prefs(),
             _ if up => prefs.row = row.saturating_sub(1),
-            _ if down => prefs.row = (row + 1).min(folders + 5 + custom_data_dir() as usize),
-            _ if dd && row < folders => {
-                self.remove_folder(row);
-                if let Some(prefs) = &mut self.prefs {
-                    prefs.row = row.min(self.settings.folders.len());
-                }
-            }
-            "backspace" if row < folders => {
-                self.remove_folder(row);
-                if let Some(prefs) = &mut self.prefs {
-                    prefs.row = row.min(self.settings.folders.len());
-                }
-            }
-            "enter" | "space" if row == folders + 1 => self.next_appearance(cx),
-            "enter" | "space" if row == folders + 2 => self.open_picker(cx),
-            "enter" | "space" if row == folders + 3 => self.toggle_keyboard(),
-            "enter" | "space" if row == folders + 4 => self.open_outputs(),
+            _ if down => prefs.row = (row + 1).min(rest + 4 + custom_data_dir() as usize),
+            // The row after a removed folder takes its place, or the Add row below.
+            _ if dd || k.key == "backspace" => self.remove_folder_row(row),
+            "enter" | "space" if row == rest => self.next_appearance(cx),
+            "enter" | "space" if row == rest + 1 => self.open_picker(cx),
+            "enter" | "space" if row == rest + 2 => self.toggle_keyboard(),
+            "enter" | "space" if row == rest + 3 => self.open_outputs(),
             _ => {}
         }
     }
@@ -1452,10 +1510,18 @@ impl Odeion {
         // among them.
         let open = if let Some(of) = &self.album {
             // The album's header sits above the list, see `render_album`.
-            Some(library::album(&self.tracks, of))
+            Some(self.same_kind(library::album(&self.tracks, of), of))
         } else if let Some(of) = &self.artist {
             // Likewise the artist's, see `render_artist`.
-            Some(library::artist(&self.tracks, of))
+            Some(self.same_kind(library::artist(&self.tracks, of), of))
+        } else if self.backing_view {
+            // The backing tracks, in library order; the header is `render_backing`.
+            // One linked to a song as its variation plays from the song, as in the library.
+            Some(
+                (0..self.tracks.len())
+                    .filter(|&i| self.is_backing(&self.tracks[i].path) && !self.variations.is_variation(&self.tracks[i].path))
+                    .collect(),
+            )
         } else {
             // In the playlist's order, or as its headers sort it; songs gone since a
             // rescan aren't listed.
@@ -1472,20 +1538,21 @@ impl Odeion {
             // An artist's songs in the grouped view sit under each album.
             if self.artist.is_some() && self.grouped() {
                 self.rows.extend(library::by_album(&self.tracks, &songs).into_iter().map(Row::from));
+            } else if self.backing_view && self.album.is_none() && self.artist.is_none() && self.grouped() {
+                // The backing tracks group as the full list does, under each artist (or
+                // the folder that stands for one).
+                let rows = self.list_rows(&songs);
+                self.rows.extend(rows);
             } else {
                 self.rows.extend(songs.into_iter().map(Row::Track));
             }
         } else if self.query.trim().is_empty() {
             // Library order, since the tracks are sorted.
-            let mut favorites: Vec<usize> = self
-                .favorites
-                .0
-                .iter()
-                .filter_map(|p| self.by_path.get(p).copied())
+            let favorites = self.favourite_songs();
+            // Backing tracks have a place of their own, never the library.
+            let songs: Vec<usize> = (0..self.tracks.len())
+                .filter(|&i| !self.variations.is_variation(&self.tracks[i].path) && !self.is_backing(&self.tracks[i].path))
                 .collect();
-            favorites.sort();
-            let songs: Vec<usize> =
-                (0..self.tracks.len()).filter(|&i| !self.variations.is_variation(&self.tracks[i].path)).collect();
             if !favorites.is_empty() {
                 self.rows.push(Row::Header("Favourites".into()));
                 let rows = self.list_rows(&favorites);
@@ -1499,19 +1566,62 @@ impl Odeion {
             let playlists: Vec<usize> = (0..self.playlists.all().len())
                 .filter(|&i| library::named(&self.playlists.all()[i].name, &self.query))
                 .collect();
+            // Backing tracks after the songs, under their own header.
+            let (backing, songs): (Vec<usize>, Vec<usize>) = library::search(&self.tracks, &self.query)
+                .into_iter()
+                .filter(|&i| !self.variations.is_variation(&self.tracks[i].path))
+                .partition(|&i| self.is_backing(&self.tracks[i].path));
             if !playlists.is_empty() {
                 self.rows.push(Row::Header("Playlists".into()));
                 self.rows.extend(playlists.into_iter().map(Row::Playlist));
+            }
+            if !songs.is_empty() && (!self.rows.is_empty() || !backing.is_empty()) {
                 self.rows.push(Row::Header("Songs".into()));
             }
-            self.rows.extend(
-                library::search(&self.tracks, &self.query)
-                    .into_iter()
-                    .filter(|&i| !self.variations.is_variation(&self.tracks[i].path))
-                    .map(Row::Track),
-            );
+            self.rows.extend(songs.into_iter().map(Row::Track));
+            if !backing.is_empty() {
+                self.rows.push(Row::Header("Backing tracks".into()));
+                self.rows.extend(backing.into_iter().map(Row::Track));
+            }
         }
         self.selected = self.first_track_row(0, 1).unwrap_or(0);
+    }
+
+    /// Whether the list shows the backing tracks (not an album or artist opened from them).
+    fn backing_shown(&self) -> bool {
+        self.backing_view && self.album.is_none() && self.artist.is_none()
+    }
+
+    /// Whether a file is a backing track, by the folders listed (`scan::is_backing`).
+    fn is_backing(&self, path: &std::path::Path) -> bool {
+        scan::is_backing(&self.settings.folders, &self.settings.backing, path)
+    }
+
+    /// Whether a file can be a favourite: songs can, backing tracks can't (they have a
+    /// place of their own, and the favourites head the library).
+    fn can_favorite(&self, path: &std::path::Path) -> bool {
+        !self.is_backing(path)
+    }
+
+    /// The favourites in library order, without backing tracks favourited before they
+    /// couldn't be.
+    fn favourite_songs(&self) -> Vec<usize> {
+        let mut favorites: Vec<usize> = self
+            .favorites
+            .0
+            .iter()
+            .filter_map(|p| self.by_path.get(p).copied())
+            .filter(|&i| self.can_favorite(&self.tracks[i].path))
+            .collect();
+        favorites.sort();
+        favorites
+    }
+
+    /// `songs` (an album's or artist's) of the same kind as `of`: a backing track's are
+    /// backing tracks, a song's are songs.
+    fn same_kind(&self, songs: Vec<usize>, of: &Track) -> Vec<usize> {
+        let backing = self.is_backing(&of.path);
+        songs.into_iter().filter(|&i| self.is_backing(&self.tracks[i].path) == backing).collect()
     }
 
     /// The full list's songs as rows: grouped under each artist when that's the view.
@@ -1630,6 +1740,7 @@ impl Odeion {
             album: self.album.as_ref().map(|t| t.path.clone()),
             artist: self.artist.as_ref().map(|t| t.path.clone()),
             playlist: self.playlist_view.and_then(|i| self.playlists.get(i)).map(|p| p.name.clone()),
+            backing: self.backing_view,
             grid: self.grid,
             span: Some(self.span),
             queue: self.queue.clone(),
@@ -1691,6 +1802,7 @@ impl Odeion {
         self.album = track(self, &session.album);
         self.artist = track(self, &session.artist).filter(|_| self.album.is_none());
         self.playlist_view = session.playlist.as_deref().and_then(|name| self.playlists.find(name));
+        self.backing_view = session.backing && self.playlist_view.is_none();
         self.practice = session.practice;
         self.reindex(session.selected.clone());
         self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
@@ -2010,8 +2122,12 @@ impl Odeion {
     /// An action from a click, done exactly as its key would do it.
     fn act(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {
-            // With no music yet, Enter adds the folder it's in, as the empty list offers.
-            Action::Play if self.settings.folders.is_empty() => self.pick_folders(cx),
+            // With no music yet, Enter adds the folder it's in, as the empty list offers;
+            // in the backing tracks with no folder for them, theirs.
+            Action::Play if self.backing_shown() && self.settings.backing.is_empty() && !self.practice => {
+                self.pick_backing(cx)
+            }
+            Action::Play if self.settings.folders.is_empty() && !self.backing_shown() => self.pick_folders(cx),
             Action::Settings => {
                 if self.prefs.is_some() {
                     self.close_prefs();
@@ -2616,6 +2732,7 @@ impl Odeion {
                     self.message = Some((empty::no_favourites(key), false));
                 }
             }
+            Place::Backing => self.open_backing(),
             Place::Playing => self.to_playing(),
         }
     }
@@ -2663,6 +2780,10 @@ impl Odeion {
 
     fn toggle_favorite(&mut self) {
         let Some(path) = self.selected_path() else { return };
+        if !self.can_favorite(&path) {
+            self.message = Some((NO_BACKING_FAVOURITES.into(), false));
+            return;
+        }
         self.favorites.toggle(&path);
         self.store_favorites();
         self.reindex(Some(path));
@@ -2798,14 +2919,16 @@ impl Odeion {
         if self.prefs.is_some() {
             // Opening a folder dialog or reopening odeion needs the context, so Enter on "add
             // folder" and the data folder's rows is here.
-            let add = self.settings.folders.len();
+            let (add, rest) = (self.settings.folders.len(), self.prefs_rest());
             let enter = matches!(k.key.as_str(), "enter" | "space");
             let row = self.prefs.as_ref().filter(|p| p.picker.is_none() && p.choosing.is_none()).map(|p| p.row);
             if enter && row == Some(add) {
                 self.pick_folders(cx);
-            } else if enter && row == Some(add + 5) {
+            } else if enter && row == Some(rest - 1) {
+                self.pick_backing(cx);
+            } else if enter && row == Some(rest + 4) {
                 self.pick_data_dir(cx);
-            } else if enter && row == Some(add + 6) {
+            } else if enter && row == Some(rest + 5) {
                 self.switch_data_dir(None, cx);
             } else {
                 self.prefs_key(k, typed, cx);
@@ -3529,6 +3652,7 @@ impl Odeion {
             }
             Action::AddToPlaylist => self.add_to = Some(AddTo { songs: vec![song], at: 0, naming: None }),
             Action::AddVariation => self.pick_variation(song, cx),
+            Action::Favorite if !self.can_favorite(&song) => self.message = Some((NO_BACKING_FAVOURITES.into(), false)),
             Action::Favorite => {
                 self.favorites.toggle(&song);
                 self.store_favorites();
@@ -3568,19 +3692,20 @@ impl Odeion {
                 .get(i)
                 .map(|p| p.songs.iter().filter(|s| self.by_path.contains_key(*s)).cloned().collect())
                 .unwrap_or_default(),
-            Target::Favourites => {
-                // In library order, as listed.
-                let mut favorites: Vec<usize> =
-                    self.favorites.0.iter().filter_map(|p| self.by_path.get(p).copied()).collect();
-                favorites.sort();
-                favorites.into_iter().map(path).collect()
-            }
+            // In library order, as listed.
+            Target::Favourites => self.favourite_songs().into_iter().map(path).collect(),
             Target::Artist(row) => match self.rows.get(row + 1) {
-                Some(&Row::Track(i)) => library::artist(&self.tracks, &self.tracks[i]).into_iter().map(path).collect(),
+                Some(&Row::Track(i)) => {
+                    let of = &self.tracks[i];
+                    self.same_kind(library::artist(&self.tracks, of), of).into_iter().map(path).collect()
+                }
                 _ => Vec::new(),
             },
             Target::AlbumRow(row) => match self.rows.get(row + 1) {
-                Some(&Row::Track(i)) => library::album(&self.tracks, &self.tracks[i]).into_iter().map(path).collect(),
+                Some(&Row::Track(i)) => {
+                    let of = &self.tracks[i];
+                    self.same_kind(library::album(&self.tracks, of), of).into_iter().map(path).collect()
+                }
                 _ => Vec::new(),
             },
             _ => self.rows.iter().filter_map(|r| if let Row::Track(i) = r { Some(path(*i)) } else { None }).collect(),
@@ -3741,6 +3866,7 @@ impl Odeion {
             && self.album.is_none()
             && self.artist.is_none()
             && self.playlist_view.is_none()
+            && !self.backing_view
             && self.query.trim().is_empty()
     }
 
@@ -3955,10 +4081,16 @@ impl Odeion {
     /// A new search over the whole library, leaving any album, artist or playlist.
     fn set_query(&mut self, query: String) {
         self.query_before = None;
-        if query != self.query || self.album.is_some() || self.artist.is_some() || self.playlist_view.is_some() {
+        if query != self.query
+            || self.album.is_some()
+            || self.artist.is_some()
+            || self.playlist_view.is_some()
+            || self.backing_view
+        {
             self.query = query;
             self.album = None;
             self.artist = None;
+            self.backing_view = false;
             self.leave_playlist();
             self.rebuild_rows();
             self.scroll.scroll_to_item(0, ScrollStrategy::Top);
@@ -3989,6 +4121,8 @@ impl Odeion {
             Some(of.album.clone())
         } else if let Some(of) = &self.artist {
             Some(of.artist.clone())
+        } else if self.backing_view {
+            Some(BACKING.to_string())
         } else {
             self.playlist_view.and_then(|i| self.playlists.get(i)).map(|p| p.name.clone())
         }
@@ -4372,6 +4506,8 @@ impl Odeion {
                 let selected = ix == self.selected;
                 let playing = self.now.as_ref().is_some_and(|n| n.path == track.path);
                 let favorite = self.favorites.contains(&track.path);
+                // A backing track can't be a favourite: no star, no menu entry.
+                let can_favorite = self.can_favorite(&track.path);
                 let in_group = self.grouped();
                 // The album view's header already names the album, and so does an album's
                 // row over its songs in an artist's grouped view.
@@ -4429,6 +4565,7 @@ impl Odeion {
                         let in_playlist = self.playlist_view.is_some() && !album && !artist;
                         cx.listener(move |odeion, e: &MouseDownEvent, _, cx| {
                             odeion.selected = ix;
+                            let favorite = can_favorite.then_some(favorite);
                             odeion.menu = Some((Menu::song(ix, favorite, album, artist, in_playlist), e.position));
                             cx.notify();
                         })
@@ -4633,8 +4770,10 @@ impl Odeion {
                                     })),
                             )
                             // A favourite's star always shows; others' when the row is
-                            // highlighted or under the pointer, to click.
-                            .child(
+                            // highlighted or under the pointer, to click. A backing track
+                            // has none, only its room, so the rows line up.
+                            .when(!can_favorite, |d| d.child(div().size(px(24.)).flex_none()))
+                            .when(can_favorite, |d| d.child(
                                 div()
                                     .id(("star", ix))
                                     .size(px(24.))
@@ -4662,7 +4801,7 @@ impl Odeion {
                                         odeion.selected = ix;
                                         odeion.act(Action::Favorite, cx);
                                     })),
-                            ),
+                            )),
                     )
                     .into_any_element()
             }
@@ -4671,7 +4810,8 @@ impl Odeion {
 
     fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let scope = self.scope().filter(|_| !self.practice);
-        let songs = format!("{} songs", ui::count(self.tracks.len()));
+        // The library's songs: the backing tracks aren't part of it.
+        let songs = format!("{} songs", ui::count(self.tracks.iter().filter(|t| !self.is_backing(&t.path)).count()));
         let read = self.tags_total.saturating_sub(self.tags_left);
         let status = if self.scanning.is_some() {
             "looking for music…".to_string()
@@ -4913,7 +5053,9 @@ impl Odeion {
                     })),
             );
 
-        let (favorite, marker) = (self.now.as_ref().is_some_and(|n| self.favorites.contains(&n.path)), self.marker().is_some());
+        // A backing track can't be a favourite (`None`).
+        let favorite = self.now.as_ref().map(|n| self.can_favorite(&n.path).then(|| self.favorites.contains(&n.path)));
+        let (favorite, marker) = (favorite.flatten(), self.marker().is_some());
         div()
             .flex()
             .flex_col()
@@ -6083,7 +6225,7 @@ impl Odeion {
     /// it's plain that only this album is listed.
     fn render_album(&self, of: &Track, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
-        let songs = library::album(&self.tracks, of);
+        let songs = self.same_kind(library::album(&self.tracks, of), of);
         let seconds = songs
             .iter()
             .map(|&i| self.tracks[i].seconds)
@@ -6218,6 +6360,15 @@ impl Odeion {
         (self.practice, self.searching, self.queue_at) = (false, false, None);
         self.set_query(String::new());
         (self.playlist_view, self.playlist_sort) = (Some(i), None);
+        self.rebuild_rows();
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+    }
+
+    /// Shows the backing tracks in the list, leaving practice, search and other views.
+    fn open_backing(&mut self) {
+        (self.practice, self.searching, self.queue_at) = (false, false, None);
+        self.set_query(String::new());
+        self.backing_view = true;
         self.rebuild_rows();
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
@@ -6638,6 +6789,48 @@ impl Odeion {
                         .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("Esc back")),
                 ),
         )
+    }
+
+    /// The backing tracks' header, over their list: how many, how long, and the folders
+    /// they come from.
+    fn render_backing(&self) -> impl IntoElement {
+        let t = t();
+        let songs: Vec<&Track> =
+            self.tracks.iter().filter(|t| self.is_backing(&t.path) && !self.variations.is_variation(&t.path)).collect();
+        let seconds = songs.iter().map(|t| t.seconds).sum::<Option<u64>>();
+        let folders: Vec<String> = self.settings.backing.iter().map(|f| tilde(f)).collect();
+        // Without a folder the list below says how to add one.
+        let from = (!folders.is_empty()).then(|| format!("From {}", empty::and(&folders)));
+        div()
+            .flex()
+            .items_end()
+            .gap_5()
+            .p_4()
+            .rounded_lg()
+            .bg(rgb(t.surface))
+            .child(
+                div()
+                    .size(px(88.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .bg(rgb(t.raised))
+                    .child(ui::icon("audio-lines", 36., t.accent)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().truncate().text_3xl().font_weight(gpui::FontWeight::MEDIUM).text_color(rgb(t.text)).child(BACKING))
+                    .child(div().truncate().text_sm().text_color(rgb(t.text_dim)).child(ui::album_stats(songs.len(), seconds)))
+                    .children(from.map(|from| div().truncate().text_xs().text_color(rgb(t.text_dim)).child(from))),
+            )
+            .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("Esc back"))
     }
 
     /// The open playlist's column headers, over its songs and lined up with their
@@ -7339,6 +7532,7 @@ impl Odeion {
         let t = t();
         let open = self.sidebar;
         let full = self.browsing();
+        let backing = self.backing_view && !self.practice && self.album.is_none() && self.artist.is_none();
         let place = |id: &'static str,
                      icon: &'static str,
                      label: &'static str,
@@ -7367,6 +7561,7 @@ impl Odeion {
                     match to {
                         Place::Library => "The full list",
                         Place::Favourites => "The favourites; right-click to play or shuffle them",
+                        Place::Backing => "Backing tracks, kept out of the library: their folders are in settings",
                         Place::Playing => "The playing song",
                     },
                     tip,
@@ -7431,6 +7626,7 @@ impl Odeion {
                     place("go-library", "music", "Library", full, Place::Library, &[Action::Clear], cx),
                     place("go-favourites", "star", "Favourites", false, Place::Favourites, &[], cx)
                         .on_mouse_down(MouseButton::Right, opens_menu(Menu::favourites, cx)),
+                    place("go-backing", "audio-lines", BACKING, backing, Place::Backing, &[], cx),
                     place("go-playing", "audio-waveform", "Playing", false, Place::Playing, &[Action::ToPlaying], cx),
                 ]))
                 .child(div().w_full().h(px(1.)).bg(rgb(t.border)))
@@ -7615,6 +7811,7 @@ impl Odeion {
                         place("go-favourites", "star", "Favourites", false, Place::Favourites, &[], cx)
                             .on_mouse_down(MouseButton::Right, opens_menu(Menu::favourites, cx)),
                     )
+                    .child(place("go-backing", "audio-lines", BACKING, backing, Place::Backing, &[], cx))
                     .when(self.now.is_some(), |d| {
                         d.child(place("go-playing", "audio-waveform", "Playing", false, Place::Playing, &[Action::ToPlaying], cx))
                     }),
@@ -7709,7 +7906,7 @@ impl Odeion {
 
     fn render_artist(&self, of: &Track, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
-        let songs = library::artist(&self.tracks, of);
+        let songs = self.same_kind(library::artist(&self.tracks, of), of);
         let seconds = songs.iter().map(|&i| self.tracks[i].seconds).sum::<Option<u64>>();
         // One cover per album, oldest first, as the rows below list them.
         let mut albums: Vec<&Track> = Vec::new();
@@ -7797,16 +7994,37 @@ impl Odeion {
         };
         let lit = |r: usize| prefs.picker.is_none() && prefs.row == r;
 
-        let counts = scan::per_root(folders, &self.tracks);
+        // The music folders, then the backing tracks' (a song counts for the deepest folder
+        // holding it, so a backing-track folder inside the music folder takes its own).
+        let roots = self.settings.roots();
+        let counts = scan::per_root(&roots, &self.tracks);
+        let add_row = |r: usize, id: usize, label: &str, backing: bool, cx: &mut Context<Self>| {
+            row(("add", id), lit(r), "plus", label.into()).on_click(cx.listener(move |odeion, _, _, cx| {
+                if backing {
+                    odeion.pick_backing(cx);
+                } else {
+                    odeion.pick_folders(cx);
+                }
+                cx.notify();
+            }))
+        };
         let mut body = div().flex().flex_col().child(title("Folders"));
-        for (i, folder) in folders.iter().enumerate() {
+        for (k, folder) in roots.iter().enumerate() {
+            let backing = k >= folders.len();
+            if k == folders.len() {
+                body = body
+                    .child(add_row(k, 0, "Add folder…", false, cx))
+                    .child(title("Backing tracks, kept out of the library"));
+            }
+            // Its settings row: the backing tracks' come after "Add folder…".
+            let i = if backing { k + 1 } else { k };
             // A folder the last scan couldn't open says so, and why on hover.
             let unreadable = self.unreadable.iter().find(|(p, _)| p == folder).map(|(_, why)| why.clone());
             body = body.child(
-                row(("folder", i), lit(i), "folder", tilde(folder))
+                row(("folder", k), lit(i), if backing { "audio-lines" } else { "folder" }, tilde(folder))
                     .child(match unreadable {
                         Some(why) => div()
-                            .id(("unreadable", i))
+                            .id(("unreadable", k))
                             .flex_none()
                             .font_family(MONO)
                             .text_xs()
@@ -7814,12 +8032,12 @@ impl Odeion {
                             .slow_tooltip(self.tip(format!("Can't read it: {why}"), &[]))
                             .child("can't read"),
                         None => div()
-                            .id(("songs", i))
+                            .id(("songs", k))
                             .flex_none()
                             .font_family(MONO)
                             .text_xs()
                             .text_color(rgb(t.text_dim))
-                            .child(format!("{} songs", ui::count(counts[i]))),
+                            .child(format!("{} {}", ui::count(counts[k]), if backing { "tracks" } else { "songs" })),
                     })
                     .on_click(cx.listener(move |odeion, _, _, cx| {
                         if let Some(prefs) = &mut odeion.prefs {
@@ -7829,7 +8047,7 @@ impl Odeion {
                     }))
                     .child(
                         div()
-                            .id(("remove", i))
+                            .id(("remove", k))
                             .size(px(HIT))
                             .flex_none()
                             .flex()
@@ -7841,24 +8059,23 @@ impl Odeion {
                             .child(ui::icon("x", 14., t.text_dim))
                             .on_click(cx.listener(move |odeion, _, _, cx| {
                                 cx.stop_propagation();
-                                odeion.remove_folder(i);
+                                odeion.remove_folder_row(i);
                                 cx.notify();
                             })),
                     ),
             );
         }
+        if self.settings.backing.is_empty() {
+            body = body
+                .child(add_row(folders.len(), 0, "Add folder…", false, cx))
+                .child(title("Backing tracks, kept out of the library"));
+        }
+        let rest = self.prefs_rest();
         body = body
-            .child(
-                row(("add", 0), lit(folders.len()), "plus", "Add folder…".into()).on_click(
-                    cx.listener(|odeion, _, _, cx| {
-                        odeion.pick_folders(cx);
-                        cx.notify();
-                    }),
-                ),
-            )
+            .child(add_row(rest - 1, 1, "Add backing-track folder…", true, cx))
             .child(title("Theme"))
             .child(
-                row(("appearance", 0), lit(folders.len() + 1), "palette", match theme::is_own(&self.settings.theme) {
+                row(("appearance", 0), lit(rest), "palette", match theme::is_own(&self.settings.theme) {
                     true => format!("Appearance: {}", self.settings.appearance.label()),
                     false => format!("Appearance: from the editor theme; Enter for Odeion's {}", self.settings.appearance.label()),
                 })
@@ -7874,7 +8091,7 @@ impl Odeion {
         };
         body = match &prefs.picker {
             None => body.child(
-                row(("theme", 0), lit(folders.len() + 2), "palette", theme_label)
+                row(("theme", 0), lit(rest + 1), "palette", theme_label)
                     .on_click(cx.listener(|odeion, _, _, cx| {
                         odeion.open_picker(cx);
                         cx.notify();
@@ -7943,7 +8160,7 @@ impl Odeion {
         };
         let keyboard_label = if self.vim() { "Keyboard: Vim" } else { "Keyboard: Mac" };
         body = body.child(title("Keys")).child(
-            row(("keyboard", 0), lit(folders.len() + 3), "keyboard", keyboard_label.into()).on_click(
+            row(("keyboard", 0), lit(rest + 2), "keyboard", keyboard_label.into()).on_click(
                 cx.listener(|odeion, _, _, cx| {
                     odeion.toggle_keyboard();
                     cx.notify();
@@ -7959,7 +8176,7 @@ impl Odeion {
         body = body.child(title("Output"));
         body = match prefs.choosing {
             None => body.child(
-                row(("output", 0), lit(folders.len() + 4), "headphones", output).on_click(cx.listener(|odeion, _, _, cx| {
+                row(("output", 0), lit(rest + 3), "headphones", output).on_click(cx.listener(|odeion, _, _, cx| {
                     odeion.open_outputs();
                     cx.notify();
                 })),
@@ -7982,14 +8199,14 @@ impl Odeion {
         let custom = custom_data_dir();
         let label = if custom { tilde(&data) } else { format!("The default, {}", tilde(&data)) };
         body = body.child(title("Data")).child(
-            row(("data", 0), lit(folders.len() + 5), "folder", label).on_click(cx.listener(|odeion, _, _, cx| {
+            row(("data", 0), lit(rest + 4), "folder", label).on_click(cx.listener(|odeion, _, _, cx| {
                 odeion.pick_data_dir(cx);
                 cx.notify();
             })),
         );
         if custom {
             body = body.child(
-                row(("data", 1), lit(folders.len() + 6), "x", "Back to the default folder".into()).on_click(
+                row(("data", 1), lit(rest + 5), "x", "Back to the default folder".into()).on_click(
                     cx.listener(|odeion, _, _, cx| odeion.switch_data_dir(None, cx)),
                 ),
             );
@@ -8281,18 +8498,24 @@ impl Odeion {
     fn render_empty(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let t = t();
         let scope = self.scope();
+        let backing = self.backing_shown();
+        // The folders of the list shown: the music's, or the backing tracks' in their view.
+        let shown = if backing { &self.settings.backing } else { &self.settings.folders };
+        let unreadable: Vec<(String, String)> =
+            self.unreadable.iter().filter(|(p, _)| shown.contains(p)).map(|(p, why)| (tilde(p), why.clone())).collect();
         let empty = empty::why(empty::List {
             rows: self.rows.len(),
             tracks: self.tracks.len(),
             folders: self.settings.folders.len(),
-            unreadable: self.unreadable.len(),
+            unreadable: unreadable.len(),
             scanning: self.scanning.is_some(),
             query: !self.query.trim().is_empty(),
             scoped: scope.is_some(),
             playlist: self.playlist_view.is_some() && self.album.is_none() && self.artist.is_none(),
+            backing,
+            backing_folders: self.settings.backing.len(),
         })?;
-        let folders: Vec<String> = self.settings.folders.iter().map(|f| tilde(f)).collect();
-        let unreadable: Vec<(String, String)> = self.unreadable.iter().map(|(p, why)| (tilde(p), why.clone())).collect();
+        let folders: Vec<String> = shown.iter().map(|f| tilde(f)).collect();
         let formats = scan::formats();
         let library = keys::Mode::Library;
         let said = empty::said(
@@ -8312,13 +8535,16 @@ impl Odeion {
             },
         );
         let icon = match empty {
-            empty::Empty::NoFolder | empty::Empty::Looking | empty::Empty::Unreadable | empty::Empty::NoSongs => "folder",
+            empty::Empty::NoFolder | empty::Empty::Looking { backing: false } | empty::Empty::Unreadable | empty::Empty::NoSongs => "folder",
+            empty::Empty::Looking { backing: true } => "audio-lines",
             empty::Empty::NoMatch { .. } => "search",
             empty::Empty::EmptyPlaylist => "list-music",
+            empty::Empty::NoBacking { .. } => "audio-lines",
         };
         let button = said.button.map(|(button, label)| {
             let (icon, tip, keys): (&str, &str, &[Action]) = match button {
                 empty::Button::AddFolder => ("folder", "Add music folder", &[Action::Play]),
+                empty::Button::AddBacking => ("audio-lines", "Add a folder of backing tracks", &[Action::Play]),
                 empty::Button::Settings => ("settings-2", "Settings", &[Action::Settings]),
                 empty::Button::SearchEverything => ("search", "Search all your music", &[]),
             };
@@ -8340,6 +8566,7 @@ impl Odeion {
                 .on_click(cx.listener(move |odeion, _, _, cx| {
                     match button {
                         empty::Button::AddFolder => odeion.pick_folders(cx),
+                        empty::Button::AddBacking => odeion.pick_backing(cx),
                         empty::Button::Settings => odeion.act(Action::Settings, cx),
                         empty::Button::SearchEverything => odeion.widen_search(),
                     }
@@ -8566,6 +8793,9 @@ impl Render for Odeion {
                                             .and_then(|i| self.render_playlist(i, cx))
                                             .map(|h| h.into_any_element()),
                                     )
+                                    .when(self.backing_view && self.album.is_none() && self.artist.is_none(), |d| {
+                                        d.child(self.render_backing())
+                                    })
                                     // Its column headers, once it has songs to sort.
                                     .when(
                                         self.playlist_view.is_some()

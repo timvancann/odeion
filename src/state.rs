@@ -121,6 +121,9 @@ pub fn choose_data_dir(default: &Path, dir: Option<&Path>) -> std::io::Result<()
 #[serde(default)]
 pub struct Settings {
     pub folders: Vec<PathBuf>,
+    /// Folders of backing tracks: scanned with the music, listed apart from it (under
+    /// Backing tracks), never in the library.
+    pub backing: Vec<PathBuf>,
     /// Odeion's own Light or Dark, or Auto. Files from before it get Dark, what they showed.
     #[serde(default = "crate::theme::Appearance::before")]
     pub appearance: crate::theme::Appearance,
@@ -175,6 +178,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             folders: Vec::new(),
+            backing: Vec::new(),
             appearance: crate::theme::Appearance::Auto,
             theme: crate::theme::T3.to_string(),
             window: None,
@@ -192,16 +196,37 @@ impl Default for Settings {
     }
 }
 
-impl Settings {
-    /// Adds folders not listed yet. Returns whether any were new.
-    pub fn add_folders(&mut self, folders: Vec<PathBuf>) -> bool {
-        let before = self.folders.len();
-        for folder in folders {
-            if !self.folders.contains(&folder) {
-                self.folders.push(folder);
-            }
+/// Adds `folders` to `list`, each once and none that `other` lists. Returns whether any
+/// were new, and those `other` lists.
+fn add(list: &mut Vec<PathBuf>, other: &[PathBuf], folders: Vec<PathBuf>) -> (bool, Vec<PathBuf>) {
+    let before = list.len();
+    let mut elsewhere = Vec::new();
+    for folder in folders {
+        if other.contains(&folder) {
+            elsewhere.push(folder);
+        } else if !list.contains(&folder) {
+            list.push(folder);
         }
-        self.folders.len() != before
+    }
+    (list.len() != before, elsewhere)
+}
+
+impl Settings {
+    /// Adds music folders not listed yet. Returns whether any were new, and those left
+    /// out because they're backing-track folders (a folder is one or the other).
+    pub fn add_folders(&mut self, folders: Vec<PathBuf>) -> (bool, Vec<PathBuf>) {
+        add(&mut self.folders, &self.backing, folders)
+    }
+
+    /// Adds backing-track folders not listed yet. Returns whether any were new, and those
+    /// left out because they're music folders.
+    pub fn add_backing(&mut self, folders: Vec<PathBuf>) -> (bool, Vec<PathBuf>) {
+        add(&mut self.backing, &self.folders, folders)
+    }
+
+    /// Every folder a scan walks: the music's and the backing tracks'.
+    pub fn roots(&self) -> Vec<PathBuf> {
+        self.folders.iter().chain(&self.backing).cloned().collect()
     }
 
     /// The settings file, or the defaults when there is none or it can't be read (then
@@ -331,9 +356,15 @@ mod tests {
     #[test]
     fn adding_a_listed_folder_changes_nothing() {
         let mut s = Settings { folders: vec!["/a".into()], ..Settings::default() };
-        assert!(!s.add_folders(vec!["/a".into()]));
-        assert!(s.add_folders(vec!["/b".into(), "/a".into(), "/b".into()]));
+        assert_eq!(s.add_folders(vec!["/a".into()]), (false, vec![]));
+        assert_eq!(s.add_folders(vec!["/b".into(), "/a".into(), "/b".into()]), (true, vec![]));
         assert_eq!(s.folders, [PathBuf::from("/a"), PathBuf::from("/b")]);
+        // A folder is music or backing tracks, never both: the other list says which.
+        assert_eq!(s.add_backing(vec!["/a".into()]), (false, vec![PathBuf::from("/a")]));
+        assert_eq!(s.add_backing(vec!["/a/backing".into(), "/a/backing".into()]), (true, vec![]));
+        assert_eq!(s.backing, [PathBuf::from("/a/backing")]);
+        assert_eq!(s.add_folders(vec!["/a/backing".into()]), (false, vec![PathBuf::from("/a/backing")]));
+        assert_eq!(s.roots(), [PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/a/backing")]);
     }
 
     #[test]
@@ -341,6 +372,7 @@ mod tests {
         let file = std::env::temp_dir().join(format!("odeion-settings-{}.json", std::process::id()));
         let s = Settings {
             folders: vec!["/music".into(), "/more".into()],
+            backing: vec!["/music/Backing".into()],
             appearance: crate::theme::Appearance::Light,
             theme: "Tokyo Night".into(),
             window: Some(Placement { display: "abc".into(), x: 10., y: 20., width: 900., height: 800. }),

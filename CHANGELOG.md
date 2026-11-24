@@ -5,6 +5,18 @@ release's notes on GitHub.
 
 ## Unreleased
 
+## 0.8.0 (2026-11-24)
+
+Jam along without cluttering your library: backing tracks get a place of their own.
+
+**New**
+
+- Backing tracks that aren't songs, like jam tracks you bought or downloaded, get a place
+  of their own. Add their folder under Backing tracks in settings: they stay out of the
+  library, show under Backing tracks in the sidebar, and play and practise like any
+  song. A search lists them after the songs. They can't be favourites, since the
+  favourites head your library.
+
 ## 0.7.0 (2026-11-17)
 
 Smoother practice: loops that no longer click, slow-down without the gap, and stems

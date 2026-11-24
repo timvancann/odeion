@@ -53,10 +53,12 @@ and draws:
   and files below it that can't be opened are passed over without a message. Either
   way the songs known there stay listed as they were (`Walked::missed`), never taken
   for deleted: a Drive folder that didn't answer once would otherwise lose its songs'
-  tags and covers to a slow re-read.
+  tags and covers to a slow re-read. Which files are backing tracks (`is_backing`):
+  those whose deepest listed folder is a backing-track one.
 - `empty.rs`: what Odeion says where there is nothing to show, each case in its own
   words: the empty list (no folder, first scan with a live count, unreadable folders,
-  no songs with the formats Odeion plays, a search finding nothing, an empty playlist;
+  no songs with the formats Odeion plays, a search finding nothing, an empty playlist,
+  no backing tracks (no folder for them, or none found);
   `empty::why` picks which), the practice view before a waveform, no loop, the
   now-playing card before the first song, and the can't-read and can't-play messages.
   Keys come in from `keys::keys_for`, never written there.
@@ -159,6 +161,21 @@ none at first: the empty list asks for one (a button, or Enter). A track's Artis
 path is read from the deepest listed folder holding it. Tags and embedded covers win
 over the path. A listed folder a scan can't open shows an error ("can't read
 ~/Music: ...") and "can't read" beside it in settings.
+
+**Backing tracks** (Tim, 2026-11-24: bought or YouTube jam tracks that aren't songs
+shouldn't fill the licensed music list) have folders of their own in settings
+(`backing`, under "Backing tracks"), scanned with the music. A file belongs to the
+deepest listed folder holding it, so a backing-track folder inside the music folder
+works, and the reverse. They never show in the full list, the letter rail, or a song's
+album or artist view (a backing track's album or artist shows only backing tracks); they
+have one place in the sidebar, Backing tracks, a view like a playlist's (grouped like
+the full list, Esc back, kept in the session), and a search over everything lists them
+after the songs under their own header. A playlist may still hold one; the favourites
+can't (Tim, 2026-11-24: they head the library), so a backing track has no star or
+Favourite entry, and one favourited before isn't listed. A folder is music or backing
+tracks, never both: adding it to the other list says where it is. A backing track
+linked to a song as its variation plays from the song and isn't listed, as in the
+library; a backing track for a song in the library is a variation, as before.
 
 Tim's library, the one Odeion is tested on, is a Google Drive folder laid out
 `Artist/Album/NN Title.ext`, about 2,700 tracks of mp3, flac, wav and aiff, with
@@ -422,7 +439,9 @@ add a key to both or they fail.
   check compares device ids only (about 35 µs). Never list devices with
   `output_devices()` on a timer: cpal asks every device which formats it plays, about
   half a second here, and doing that every second made playback drop out.
-- **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker),
+- **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), then
+  the backing tracks' folders with their own "Add backing-track folder…" (row numbers
+  after them start at `Odeion::prefs_rest`),
   Appearance (Enter or a click cycles Auto, Light, Dark; it means Odeion's own theme, so
   from an editor theme the first press goes back to Odeion's own), the
   theme picker (T3 and Gold first, then "Editor themes (experimental)"), which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
@@ -487,7 +506,7 @@ add a key to both or they fail.
   by any means, plays the queue first; previous from a queued song goes back to the
   list's song before it. The sidebar (open unless Tim collapsed it; ⌘B, ⌃⌘S or its own
   top-left button) lists places, Library (the mouse's way out of an album or artist
-  view, which show under it with an ×), Favourites and Playing, and the queue below
+  view, which show under it with an ×), Favourites, Backing tracks and Playing, and the queue below
   with covers: click to play now, hover for to-the-top and remove (drawn over the
   title's end, so titles keep the width; the row's tooltip says they're there). Its
   clear asks "clear all" once more. Collapsed, as in VS Code, only the icons

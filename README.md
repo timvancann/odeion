@@ -45,6 +45,8 @@ came to play it.</sub></p>
 - Slow down or change key without the other changing, plus a speed trainer.
 - Drop in stems ([Moises](https://moises.ai) or any splitter) or a backing track; Odeion
   lines them up. Mute or solo with one key.
+- Backing tracks that aren't songs (jam tracks you bought or downloaded) in a folder of
+  their own, listed apart from your music and practised like any song.
 - Beats found from the recording, so loops snap to them even on records that drift.
 - Name sections and drop a marker. Every song comes back as you left it.
 - Export a loop or a section as MP3 or Ogg, slowed and shifted as you play it or as
@@ -82,7 +84,9 @@ just run       # run from source
 just install   # build Odeion.app into ~/Applications
 ```
 
-On first start Odeion asks for the folder your music is in. Add more in settings (`⌘,`).
+On first start Odeion asks for the folder your music is in. Add more in settings (`⌘,`),
+and there too the folders of backing tracks, which stay out of the library and show under
+Backing tracks in the sidebar.
 
 Your music stays where it is: Odeion never writes next to your songs. Its cache, loops,
 sections, playlists and settings live in `~/Library/Application Support/odeion/`, or in
