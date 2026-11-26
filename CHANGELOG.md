@@ -5,6 +5,18 @@ release's notes on GitHub.
 
 ## Unreleased
 
+**New**
+
+- Drag a song from the list onto a playlist in the sidebar to add it.
+
+**Fixed**
+
+- With backing tracks found but no songs yet, the library says why it's empty (still
+  looking, a folder it can't read, no songs found) instead of showing nothing.
+- Moving a song up or down in a playlist always moves it past the song you see next to
+  it. With a song from the playlist gone from your library, it could swap places with
+  that hidden song, so the move seemed to do nothing.
+
 ## 0.8.0 (2026-11-24)
 
 Jam along without cluttering your library: backing tracks get a place of their own.

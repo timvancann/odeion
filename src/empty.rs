@@ -30,6 +30,7 @@ pub enum Empty {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct List {
     pub rows: usize,
+    /// The songs known, backing tracks left out.
     pub tracks: usize,
     pub folders: usize,
     /// The shown list's folders that couldn't be opened (music, or backing tracks in

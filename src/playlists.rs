@@ -96,18 +96,22 @@ impl Playlists {
         }
     }
 
-    /// Moves `song` one place up (towards the start) or down. Returns whether it moved.
-    pub fn shift(&mut self, i: usize, song: &Path, up: bool) -> bool {
+    /// Moves `song` past the next song up (towards the start) or down that is `listed`.
+    /// Songs not listed (gone from the library, kept in the file, or hidden by a search)
+    /// are stepped over: swapping with one looked like nothing happened. Returns whether
+    /// it moved.
+    pub fn shift(&mut self, i: usize, song: &Path, up: bool, listed: impl Fn(&Path) -> bool) -> bool {
         let Some(p) = self.0.get_mut(i) else { return false };
         let Some(at) = p.songs.iter().position(|s| s == song) else { return false };
-        let to = if up { at.checked_sub(1) } else { Some(at + 1).filter(|&t| t < p.songs.len()) };
-        match to {
-            Some(to) => {
-                p.songs.swap(at, to);
-                true
-            }
-            None => false,
-        }
+        let to = if up {
+            (0..at).rev().find(|&t| listed(&p.songs[t]))
+        } else {
+            (at + 1..p.songs.len()).find(|&t| listed(&p.songs[t]))
+        };
+        let Some(to) = to else { return false };
+        let moved = p.songs.remove(at);
+        p.songs.insert(to, moved);
+        true
     }
 
     /// Moves `song` into `onto`'s place in playlist `i`, as dropping a dragged song does:
@@ -187,12 +191,33 @@ mod tests {
         assert!(!p.add(0, Path::new("b")));
         assert!(!p.add(7, Path::new("b")));
         assert!(p.has(0, Path::new("c")));
-        assert!(p.shift(0, Path::new("c"), true));
+        let all = |_: &Path| true;
+        assert!(p.shift(0, Path::new("c"), true, all));
         assert_eq!(songs(&p, 0), ["a", "c", "b"]);
-        assert!(!p.shift(0, Path::new("a"), true));
-        assert!(!p.shift(0, Path::new("b"), false));
+        assert!(!p.shift(0, Path::new("a"), true, all));
+        assert!(!p.shift(0, Path::new("b"), false, all));
         p.remove(0, Path::new("a"));
         assert_eq!(songs(&p, 0), ["c", "b"]);
+    }
+
+    #[test]
+    fn moving_a_song_steps_over_the_unlisted() {
+        let mut p = Playlists::default();
+        p.create("Gig").unwrap();
+        for s in ["a", "gone", "b", "c"] {
+            assert!(p.add(0, Path::new(s)));
+        }
+        let listed = |s: &Path| s != Path::new("gone");
+        assert!(p.shift(0, Path::new("b"), true, listed));
+        assert_eq!(songs(&p, 0), ["b", "a", "gone", "c"]);
+        assert!(p.shift(0, Path::new("a"), false, listed));
+        assert_eq!(songs(&p, 0), ["b", "gone", "c", "a"]);
+        // Already first, or only unlisted songs past it: nowhere to go.
+        p.remove(0, Path::new("c"));
+        assert!(!p.shift(0, Path::new("b"), true, listed));
+        assert!(p.shift(0, Path::new("a"), true, listed));
+        assert_eq!(songs(&p, 0), ["a", "b", "gone"]);
+        assert!(!p.shift(0, Path::new("b"), false, listed));
     }
 
     #[test]

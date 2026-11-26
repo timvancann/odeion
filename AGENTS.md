@@ -410,7 +410,9 @@ add a key to both or they fail.
 - **Playlists** (plan 03): `+` or ⌘N adds the highlighted song (the playing one in
   practice) through a picker (each playlist, a check where the song is already, and
   "New playlist…" named in place); the song menu has "Add to playlist…" too, and the
-  now-playing card a button doing as `+` does. The
+  now-playing card a button doing as `+` does. Any song row also drags onto a playlist
+  in the sidebar, which lights up under it and adds the song on a drop (Tim,
+  2026-11-26). The
   sidebar lists them; a click opens one in the list under a header (rename in place,
   delete asks "for good"). Names typed in place (a new playlist, a rename, an EQ
   preset) have Save and Cancel buttons beside them, and a click elsewhere cancels. In its view ⌫ (Vim `x` too) removes a song, ⇧↑ ⇧↓ (Vim `K J` too) move it,

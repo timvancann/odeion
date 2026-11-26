@@ -152,7 +152,8 @@ impl Strip {
     }
 }
 
-/// A song in a playlist's view, dragged to another place in it.
+/// A song dragged from the list: onto a playlist in the sidebar, or in a playlist's view
+/// to another place in it.
 struct DraggedSong {
     song: PathBuf,
     /// Its row, so the row under the pointer can show which side it will land on.
@@ -3100,7 +3101,8 @@ impl Odeion {
                     self.message = Some((how.into(), false));
                     return;
                 }
-                if self.playlists.shift(i, &song, up) {
+                let listed = |p: &std::path::Path| self.rows.iter().any(|r| matches!(r, Row::Track(t) if self.tracks[*t].path == p));
+                if self.playlists.shift(i, &song, up, listed) {
                     self.store_playlists();
                     self.reindex(Some(song));
                     self.scroll.scroll_to_item(self.selected, ScrollStrategy::Center);
@@ -4579,17 +4581,21 @@ impl Odeion {
                             cx.notify();
                         })
                     })
-                    // In a playlist's view a song drags to another place: the row under
-                    // the pointer shows a line on the side it lands, and a drop puts it
-                    // in that row's place (`Playlists::place`). Only in the playlist's
-                    // own order: in a sorted view the line wouldn't say where it lands.
-                    .when(in_playlist && self.playlist_sort.is_none(), |d| {
-                        let (song, title) = (track.path.clone(), gpui::SharedString::from(track.title.clone()));
-                        d.on_drag(DraggedSong { song, row: ix }, move |_, at, _, cx| {
+                    // Every song drags onto a playlist in the sidebar, which adds it.
+                    .on_drag(DraggedSong { song: track.path.clone(), row: ix }, {
+                        let title = gpui::SharedString::from(track.title.clone());
+                        move |_, at, _, cx| {
                             let title = title.clone();
                             cx.new(|_| SongGhost { title, at })
-                        })
-                        .drag_over::<DraggedSong>(move |style, dragged, _, _| {
+                        }
+                    })
+                    // In a playlist's view a song also drags to another place: the row
+                    // under the pointer shows a line on the side it lands, and a drop
+                    // puts it in that row's place (`Playlists::place`). Only in the
+                    // playlist's own order: in a sorted view the line wouldn't say where
+                    // it lands.
+                    .when(in_playlist && self.playlist_sort.is_none(), |d| {
+                        d.drag_over::<DraggedSong>(move |style, dragged, _, _| {
                             let line = rgb(t().focus);
                             match dragged.row.cmp(&ix) {
                                 std::cmp::Ordering::Less => style.border_b_2().border_color(line),
@@ -6406,6 +6412,12 @@ impl Odeion {
         }
         let songs = std::mem::take(&mut picker.songs);
         self.add_to = None;
+        self.add_songs(at, &songs);
+    }
+
+    /// Adds `songs` to playlist `at` (from the picker, or dropped on it in the sidebar),
+    /// saying how many went in or that they were there already.
+    fn add_songs(&mut self, at: usize, songs: &[PathBuf]) {
         let name = self.playlists.get(at).map(|p| p.name.clone()).unwrap_or_default();
         let added = songs.iter().filter(|song| self.playlists.add(at, song)).count();
         if added > 0 {
@@ -7677,9 +7689,15 @@ impl Odeion {
                     .child(ui::icon("list-music", 14., if on { t.accent } else { t.text_dim }))
                     .child(div().flex_1().min_w_0().truncate().child(p.name.clone()))
                     .child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(count.to_string()))
-                    .slow_tooltip(self.tip("Open it; right-click to play, rename or delete it", &[]))
+                    .slow_tooltip(self.tip("Open it, or drop songs on it to add them; right-click to play, rename or delete it", &[]))
                     .on_click(cx.listener(move |odeion, _, _, cx| {
                         odeion.open_playlist(i);
+                        cx.notify();
+                    }))
+                    // A song dragged from the list and dropped here goes in.
+                    .drag_over::<DraggedSong>(move |style, _, _, _| style.bg(rgb(t.accent_soft)).border_1().border_color(rgb(t.focus)))
+                    .on_drop(cx.listener(move |odeion, dragged: &DraggedSong, _, cx| {
+                        odeion.add_songs(i, std::slice::from_ref(&dragged.song));
                         cx.notify();
                     }))
                     .on_mouse_down(MouseButton::Right, opens_menu(move || Menu::playlist(i), cx))
@@ -8505,7 +8523,9 @@ impl Odeion {
             self.unreadable.iter().filter(|(p, _)| shown.contains(p)).map(|(p, why)| (tilde(p), why.clone())).collect();
         let empty = empty::why(empty::List {
             rows: self.rows.len(),
-            tracks: self.tracks.len(),
+            // Songs only: with backing tracks found and no songs, the list said nothing.
+            // Counted only when the list is empty, since this draws every frame.
+            tracks: if self.rows.is_empty() { self.tracks.iter().filter(|t| !self.is_backing(&t.path)).count() } else { 0 },
             folders: self.settings.folders.len(),
             unreadable: unreadable.len(),
             scanning: self.scanning.is_some(),
