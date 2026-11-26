@@ -5,6 +5,11 @@ release's notes on GitHub.
 
 ## Unreleased
 
+## 0.9.0 (2026-11-26)
+
+Quieter jumps and easier playlists: seeking no longer clicks, and songs drag straight
+onto a playlist.
+
 **New**
 
 - Playlists changed outside Odeion while it runs (by a script editing `playlists.json`,
