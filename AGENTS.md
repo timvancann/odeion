@@ -74,7 +74,11 @@ and draws:
   album, favourites, search results or library; the run of rows between headers),
   with the queue first: while a queued song plays the list stays where it was.
 - `playlists.rs`: playlists, named lists filled song by song, kept in
-  `playlists.json` (gone songs stay in the file, unlisted).
+  `playlists.json` (gone songs stay in the file, unlisted). Another program may write
+  that file while Odeion runs (Tim, 2026-11-26, for his script that puts a rehearsal's
+  songs on top): its modified time is checked every second and a change is taken up
+  (`Odeion::reload_playlists`), the open playlist kept by name. A file that doesn't
+  parse is skipped and tried again, never set aside as `load` would.
 - `queue.rs`: the queue, songs to play next (`q` to the end, `Q` to the top, each song
   once), kept in `session.json`.
 - `keys.rs`: the keymap per mode and the ⌘? sheet, see Keyboard.

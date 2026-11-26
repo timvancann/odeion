@@ -7,6 +7,8 @@ release's notes on GitHub.
 
 **New**
 
+- Playlists changed outside Odeion while it runs (by a script editing `playlists.json`,
+  say) show up within a second, instead of being overwritten by Odeion's next save.
 - Drag a song from the list onto a playlist in the sidebar to add it.
 
 **Fixed**

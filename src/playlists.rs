@@ -146,6 +146,18 @@ impl Playlists {
         crate::state::load_json(file)
     }
 
+    /// Reads `file` again after another program changed it (a script reordering a
+    /// playlist): `None` when it can't be read or parsed, half written say, so what
+    /// Odeion holds stays as it was. Unlike `load` it never sets the file aside.
+    pub fn reload(file: &Path) -> Option<Playlists> {
+        serde_json::from_slice(&std::fs::read(file).ok()?).ok()
+    }
+
+    /// When `file` last changed, to notice another program writing it.
+    pub fn stamp(file: &Path) -> Option<std::time::SystemTime> {
+        std::fs::metadata(file).and_then(|m| m.modified()).ok()
+    }
+
     /// Saves through a temp file and a rename, so a crash can't leave half a file.
     pub fn store(&self, file: &Path) -> std::io::Result<()> {
         if let Some(dir) = file.parent() {
@@ -266,5 +278,22 @@ mod tests {
         assert_eq!(Playlists::load(&file), p);
         let _ = std::fs::remove_file(&file);
         assert_eq!(Playlists::load(&file), Playlists::default());
+    }
+
+    #[test]
+    fn a_reload_takes_what_another_program_wrote_and_leaves_a_broken_file_alone() {
+        let file = std::env::temp_dir().join(format!("odeion-reload-{}.json", std::process::id()));
+        assert_eq!(Playlists::reload(&file), None);
+        let mut p = Playlists::default();
+        p.create("MDR").unwrap();
+        p.add(0, Path::new("/m/a.mp3"));
+        p.store(&file).unwrap();
+        assert!(Playlists::stamp(&file).is_some());
+        assert_eq!(Playlists::reload(&file), Some(p));
+        std::fs::write(&file, b"[{\"name\": \"MDR\", \"so").unwrap();
+        assert_eq!(Playlists::reload(&file), None);
+        // Still there for the next try, not set aside as `load` would.
+        assert!(file.exists());
+        let _ = std::fs::remove_file(&file);
     }
 }

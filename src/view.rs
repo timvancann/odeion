@@ -492,6 +492,9 @@ pub struct Odeion {
     /// The highlighted song in the queue, while the keyboard is in it (`Mode::Queue`).
     queue_at: Option<usize>,
     playlists: Playlists,
+    /// When `playlists.json` last changed as Odeion knows it (read or saved): another
+    /// time on disk means another program wrote it (`reload_playlists`).
+    playlists_stamp: Option<std::time::SystemTime>,
     /// The playlist shown in the list, by its place.
     playlist_view: Option<usize>,
     /// The backing tracks are shown in the list, as a playlist would be.
@@ -718,6 +721,7 @@ impl Odeion {
             sections_collapsed: false,
             queue_at: None,
             playlists: Playlists::load(&playlists_file()),
+            playlists_stamp: Playlists::stamp(&playlists_file()),
             playlist_view: None,
             backing_view: false,
             playlist_sort: None,
@@ -1303,6 +1307,8 @@ impl Odeion {
                 self.message = Some((format!("playing through {name}"), false));
                 changed = true;
             }
+            // And the playlists, for another program writing them.
+            changed |= self.reload_playlists();
         }
         if self.scrolled_at.is_some_and(|at| at.elapsed() > SCROLLBAR_LINGERS) {
             self.scrolled_at = None;
@@ -6322,9 +6328,48 @@ impl Odeion {
 
     /// One trainer setting up or down a notch, kept in settings.
     fn store_playlists(&mut self) {
-        if let Err(e) = self.playlists.store(&playlists_file()) {
-            self.message = Some((format!("couldn't save the playlists: {e}"), true));
+        let file = playlists_file();
+        match self.playlists.store(&file) {
+            Ok(()) => self.playlists_stamp = Playlists::stamp(&file),
+            Err(e) => self.message = Some((format!("couldn't save the playlists: {e}"), true)),
         }
+    }
+
+    /// Takes up `playlists.json` when another program changed it (a script putting a
+    /// rehearsal's songs on top, say): read only at start, Odeion's next save wrote over
+    /// the change. Checked every second by the file's time; a file that can't be read
+    /// yet is tried again. The open playlist stays open by name. Returns whether the
+    /// playlists changed.
+    fn reload_playlists(&mut self) -> bool {
+        let file = playlists_file();
+        let stamp = Playlists::stamp(&file);
+        if stamp == self.playlists_stamp {
+            return false;
+        }
+        let Some(read) = Playlists::reload(&file) else { return false };
+        self.playlists_stamp = stamp;
+        if read == self.playlists {
+            return false;
+        }
+        let open = self.playlist_view.and_then(|i| self.playlists.get(i)).map(|p| p.name.clone());
+        // The picker's highlight is a place too: keep it on the same playlist, or on
+        // "New playlist…" (just past the last).
+        let picked = self.add_to.as_ref().map(|a| self.playlists.get(a.at).map(|p| p.name.clone()));
+        self.playlists = read;
+        self.playlist_view = open.as_deref().and_then(|name| self.playlists.find(name));
+        if open.is_some() && self.playlist_view.is_none() {
+            self.leave_playlist();
+        }
+        if let (Some(picker), Some(picked)) = (&mut self.add_to, picked) {
+            let new = self.playlists.all().len();
+            picker.at = match picked {
+                Some(name) => self.playlists.find(&name).unwrap_or(new),
+                None => new,
+            };
+        }
+        let keep = self.selected_path();
+        self.reindex(keep);
+        true
     }
 
     /// Sorts playlist `i` once, saving the order: by artist as the library is (its
