@@ -12,6 +12,7 @@ use crate::keys::{self, Action, Keyboard};
 use crate::library::{self, Grouped, Kind, Track};
 use crate::media::Media;
 use crate::menu::{Menu, Outcome, Shown, Target};
+use crate::order::{self, Field, Order};
 use crate::playlist::Playlist;
 use crate::playlists::Playlists;
 use crate::queue::Queue;
@@ -21,6 +22,7 @@ use crate::resume::{Resume, Spot};
 use crate::variations::{self, Variation, Variations};
 use crate::scan;
 use crate::state::{self, Favorites, ListView, Settings};
+use crate::tags;
 use crate::theme::{self, Theme};
 use crate::ui::{self, *};
 use crate::wave::{self, Wave};
@@ -96,7 +98,14 @@ struct Prefs {
     choosing: Option<usize>,
     outputs: Vec<crate::audio::Output>,
     listing: Option<Receiver<Vec<crate::audio::Output>>>,
+    /// The highlighted field on the sort order's row: the order's fields, then those
+    /// that can be added.
+    chip: usize,
 }
+
+/// A field of the sort order dragged to another place, or onto the ones to add to take
+/// it out.
+struct DraggedField(Field);
 
 impl Prefs {
     fn new(chosen: Option<&str>) -> Prefs {
@@ -322,6 +331,16 @@ struct AddTo {
     naming: Option<String>,
 }
 
+/// Songs whose new info is being written into their files: each arrives read afresh, or
+/// as why it couldn't be saved.
+struct SavingInfo {
+    rx: Receiver<Result<Track, String>>,
+    /// How many songs are being saved, so a thread that stops early isn't taken for done.
+    songs: usize,
+    saved: usize,
+    failed: usize,
+}
+
 /// Where a sidebar entry takes the list.
 #[derive(Clone, Copy)]
 enum Place {
@@ -336,18 +355,31 @@ enum Row {
     Header(String),
     /// An artist and how many songs follow, in the list grouped by artist.
     Artist(String, usize),
-    /// An album and how many songs follow, in an artist's view when the list is grouped.
+    /// An album and how many songs follow, in an artist's view when the list is grouped,
+    /// or in the full list when the sort order starts with the album.
     Album(String, usize),
+    /// Another group heading the grouped list (a year, a genre), by the sort order's
+    /// first field, and how many songs follow.
+    Group(String, usize),
     Track(usize),
     /// A playlist whose name matches the search; Enter or a click opens it.
     Playlist(usize),
 }
 
+/// What a group's row in the list heads, for its click and its menu.
+#[derive(Clone, Copy)]
+enum Head {
+    Artist,
+    Album,
+    Other,
+}
+
 impl From<Grouped> for Row {
     fn from(g: Grouped) -> Row {
         match g {
-            Grouped::Artist(name, n) => Row::Artist(name, n),
-            Grouped::Album(name, n) => Row::Album(name, n),
+            Grouped::Group(Field::Artist, name, n) => Row::Artist(name, n),
+            Grouped::Group(Field::Album, name, n) | Grouped::Album(name, n) => Row::Album(name, n),
+            Grouped::Group(_, name, n) => Row::Group(name, n),
             Grouped::Track(i) => Row::Track(i),
         }
     }
@@ -505,6 +537,12 @@ pub struct Odeion {
     /// The playlist picker: the song to add and the highlighted row (the last is "New
     /// playlist…"), with the new playlist's name while it's typed.
     add_to: Option<AddTo>,
+    /// The Edit info sheet, while it's open.
+    info: Option<tags::Sheet>,
+    saving_info: Option<SavingInfo>,
+    /// The library's sort order, read from `settings.sort` (while it's typed in settings,
+    /// the last version that read).
+    order: Order,
     /// The open playlist's new name, while it's typed in its header.
     renaming_playlist: Option<String>,
     /// The open playlist's delete button has asked "for good?".
@@ -625,9 +663,10 @@ impl Odeion {
             .unwrap_or(true)
         });
 
-        let mut tracks = scan::load_cache(&cache_file());
-        library::sort(&mut tracks);
         let settings = Settings::load(&settings_file());
+        let order = Order::read(&settings.sort);
+        let mut tracks = scan::load_cache(&cache_file());
+        library::sort(&mut tracks, &order);
         let mut audio = Audio::new(settings.volume, settings.output.clone());
         audio.set_eq(settings.eq);
 
@@ -726,6 +765,9 @@ impl Odeion {
             backing_view: false,
             playlist_sort: None,
             add_to: None,
+            info: None,
+            saving_info: None,
+            order,
             renaming_playlist: None,
             deleting_playlist: false,
             clearing_queue: false,
@@ -1069,10 +1111,80 @@ impl Odeion {
     }
 
     /// The settings rows run: the music folders, "Add folder…", the backing-track folders,
-    /// "Add backing-track folder…", then from this row Appearance, the theme, the
-    /// keyboard, the output and the data folder.
+    /// "Add backing-track folder…", then from this row the sort order, Appearance, the
+    /// theme, the keyboard, the output and the data folder.
     fn prefs_rest(&self) -> usize {
         self.settings.folders.len() + self.settings.backing.len() + 2
+    }
+
+    /// Changes the sort order (by a drag, a click or a key on its settings row), keeps it
+    /// and re-sorts the library at once, the highlighted song staying highlighted. The
+    /// row's highlight goes to the field `change` returns.
+    fn change_order(&mut self, change: impl FnOnce(&mut Order) -> usize) {
+        let rest = self.prefs_rest();
+        let chip = change(&mut self.order);
+        if let Some(prefs) = &mut self.prefs {
+            (prefs.row, prefs.chip) = (rest, chip.min(order::Field::ALL.len() - 1));
+        }
+        let text = self.order.text();
+        if text != self.settings.sort {
+            self.settings.sort = text;
+            self.save_settings();
+            let keep = self.selected_path();
+            self.reindex(keep);
+        }
+    }
+
+    /// Keys on the sort order's row: ← → (Vim `h l`) pick a field, with ⇧ move it, Enter
+    /// or Space turns it the other way round or adds it, ⌫ (Vim `dd`) takes it out.
+    /// Returns whether the key was one of these.
+    fn sort_key(&mut self, k: &gpui::Keystroke, vim: bool, dd: bool) -> bool {
+        let Some(chip) = self.prefs.as_ref().map(|p| p.chip) else { return false };
+        let used = self.order.0.len();
+        let all = used + self.order.unused().len();
+        let shift = k.modifiers.shift;
+        let left = k.key == "left" || (vim && k.key == "h");
+        let right = k.key == "right" || (vim && k.key == "l");
+        match k.key.as_str() {
+            _ if left && shift && chip > 0 && chip < used => {
+                let field = self.order.0[chip].field;
+                self.change_order(|o| {
+                    o.place(field, chip - 1);
+                    chip - 1
+                });
+            }
+            _ if right && shift && chip + 1 < used => {
+                let field = self.order.0[chip].field;
+                self.change_order(|o| {
+                    o.place(field, chip + 1);
+                    chip + 1
+                });
+            }
+            _ if left || right => {
+                let chip = if left { chip.saturating_sub(1) } else { (chip + 1).min(all - 1) };
+                if let Some(prefs) = &mut self.prefs {
+                    prefs.chip = chip;
+                }
+            }
+            "enter" | "space" if chip < used => self.change_order(|o| {
+                o.reverse(chip);
+                chip
+            }),
+            "enter" | "space" => {
+                if let Some(&field) = self.order.unused().get(chip - used) {
+                    self.change_order(|o| {
+                        o.place(field, used);
+                        used
+                    });
+                }
+            }
+            _ if (dd || k.key == "backspace") && chip < used => self.change_order(|o| {
+                o.remove(chip);
+                chip.min(o.0.len() - 1)
+            }),
+            _ => return false,
+        }
+        true
     }
 
     /// Draws with the theme the settings choose: the editor theme when one is chosen and
@@ -1244,16 +1356,20 @@ impl Odeion {
             return;
         }
         let row = prefs.row;
+        if row == rest && !cmd && !ctrl && self.sort_key(k, vim, dd) {
+            return;
+        }
+        let Some(prefs) = &mut self.prefs else { return };
         match k.key.as_str() {
             "escape" => self.close_prefs(),
             _ if up => prefs.row = row.saturating_sub(1),
-            _ if down => prefs.row = (row + 1).min(rest + 4 + custom_data_dir() as usize),
+            _ if down => prefs.row = (row + 1).min(rest + 5 + custom_data_dir() as usize),
             // The row after a removed folder takes its place, or the Add row below.
             _ if dd || k.key == "backspace" => self.remove_folder_row(row),
-            "enter" | "space" if row == rest => self.next_appearance(cx),
-            "enter" | "space" if row == rest + 1 => self.open_picker(cx),
-            "enter" | "space" if row == rest + 2 => self.toggle_keyboard(),
-            "enter" | "space" if row == rest + 3 => self.open_outputs(),
+            "enter" | "space" if row == rest + 1 => self.next_appearance(cx),
+            "enter" | "space" if row == rest + 2 => self.open_picker(cx),
+            "enter" | "space" if row == rest + 3 => self.toggle_keyboard(),
+            "enter" | "space" if row == rest + 4 => self.open_outputs(),
             _ => {}
         }
     }
@@ -1437,6 +1553,7 @@ impl Odeion {
             scan::save_cache(&cache_file(), &self.tracks);
             changed = true;
         }
+        changed |= self.saved_info();
         if let Some(rx) = &self.tagging {
             let mut done = false;
             let mut tagged = Vec::new();
@@ -1489,7 +1606,7 @@ impl Odeion {
     /// Re-sorts, rebuilds the lookup and the rows, keeping `keep` selected. Take it before
     /// replacing the tracks: the selection is a row, which means nothing in a new list.
     fn reindex(&mut self, keep: Option<PathBuf>) {
-        library::sort(&mut self.tracks);
+        library::sort(&mut self.tracks, &self.order);
         self.by_path = self
             .tracks
             .iter()
@@ -1635,7 +1752,9 @@ impl Odeion {
     fn list_rows(&self, songs: &[usize]) -> Vec<Row> {
         match self.settings.list {
             ListView::Columns => songs.iter().map(|&i| Row::Track(i)).collect(),
-            ListView::Grouped => library::grouped(&self.tracks, songs).into_iter().map(Row::from).collect(),
+            ListView::Grouped => {
+                library::grouped(&self.tracks, songs, self.order.first().field).into_iter().map(Row::from).collect()
+            }
         }
     }
 
@@ -1664,7 +1783,7 @@ impl Odeion {
     fn selected_track(&self) -> Option<&Track> {
         match self.rows.get(self.selected)? {
             Row::Track(i) => self.tracks.get(*i),
-            Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Playlist(_) => None,
+            Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Group(..) | Row::Playlist(_) => None,
         }
     }
 
@@ -2098,7 +2217,7 @@ impl Odeion {
     /// The list's view, in the library's title bar: columns, or grouped by artist.
     fn list_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
-        let segment = |id: &'static str, icon: &'static str, what: &'static str, on: bool| {
+        let segment = |id: &'static str, icon: &'static str, what: String, on: bool| {
             div()
                 .id(id)
                 .h(px(HIT))
@@ -2122,8 +2241,8 @@ impl Odeion {
         pill()
             .p(px(2.))
             .mr_2()
-            .child(segment("list-columns", "columns-3", "Columns: artist, title, album", !grouped))
-            .child(segment("list-grouped", "list-tree", "Grouped by artist", grouped))
+            .child(segment("list-columns", "columns-3", "Columns: artist, title, album".into(), !grouped))
+            .child(segment("list-grouped", "list-tree", format!("Grouped by {}", self.order.first().field.name()), grouped))
     }
 
     /// An action from a click, done exactly as its key would do it.
@@ -2677,7 +2796,7 @@ impl Odeion {
             .take_while(is_track)
             .filter_map(|r| match self.rows[r] {
                 Row::Track(i) => Some(self.tracks[i].path.clone()),
-                Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Playlist(_) => None,
+                Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Group(..) | Row::Playlist(_) => None,
             })
             .collect()
     }
@@ -2903,16 +3022,17 @@ impl Odeion {
                 cx.notify();
                 return;
             }
-            Some(Action::Help) => {
+            // The Edit info sheet keeps its typing: nothing opens over it.
+            Some(Action::Help) if self.info.is_none() => {
                 self.help = !self.help;
                 cx.notify();
                 return;
             }
-            Some(Action::EqSheet) if !self.help && self.prefs.is_none() => {
+            Some(Action::EqSheet) if !self.help && self.prefs.is_none() && self.info.is_none() => {
                 self.toggle_eq_sheet();
                 return cx.notify();
             }
-            Some(Action::Settings) if !self.help => {
+            Some(Action::Settings) if !self.help && self.info.is_none() => {
                 if self.prefs.is_some() {
                     self.close_prefs();
                 } else {
@@ -2928,20 +3048,28 @@ impl Odeion {
             // folder" and the data folder's rows is here.
             let (add, rest) = (self.settings.folders.len(), self.prefs_rest());
             let enter = matches!(k.key.as_str(), "enter" | "space");
-            let row = self.prefs.as_ref().filter(|p| p.picker.is_none() && p.choosing.is_none()).map(|p| p.row);
+            let row = self
+                .prefs
+                .as_ref()
+                .filter(|p| p.picker.is_none() && p.choosing.is_none())
+                .map(|p| p.row);
             if enter && row == Some(add) {
                 self.pick_folders(cx);
             } else if enter && row == Some(rest - 1) {
                 self.pick_backing(cx);
-            } else if enter && row == Some(rest + 4) {
-                self.pick_data_dir(cx);
             } else if enter && row == Some(rest + 5) {
+                self.pick_data_dir(cx);
+            } else if enter && row == Some(rest + 6) {
                 self.switch_data_dir(None, cx);
             } else {
                 self.prefs_key(k, typed, cx);
             }
             cx.notify();
             return;
+        }
+        if self.info.is_some() {
+            self.info_key(k, press, typed, cx);
+            return cx.notify();
         }
         if self.add_to.is_some() {
             self.picker_key(k, typed);
@@ -3092,6 +3220,13 @@ impl Odeion {
                     self.add_to = Some(AddTo { songs: vec![song], at: 0, naming: None });
                 }
             }
+            Action::EditInfo => {
+                let song = match self.practice {
+                    true => self.now.as_ref().map(|n| n.path.clone()),
+                    false => self.selected_path(),
+                };
+                self.open_info(song.into_iter().collect());
+            }
             Action::PlaylistRemove => {
                 let (Some(i), Some(song)) = (self.playlist_view, self.selected_path()) else { return };
                 self.playlists.remove(i, &song);
@@ -3115,7 +3250,7 @@ impl Odeion {
                 }
             }
             // The songs listed: the open album, artist or playlist's, from its header.
-            Action::PlayAll | Action::ShuffleAll | Action::QueueAll | Action::AddAllToPlaylist => {
+            Action::PlayAll | Action::ShuffleAll | Action::QueueAll | Action::AddAllToPlaylist | Action::EditAllInfo => {
                 let songs = self.songs_for(Target::Shown);
                 self.songs_action(songs, action);
             }
@@ -3612,7 +3747,12 @@ impl Odeion {
             // A queued or the playing song, not the highlighted one.
             (
                 Target::Queued(_) | Target::Playing,
-                Action::Album | Action::Artist | Action::AddToPlaylist | Action::Favorite | Action::AddVariation,
+                Action::Album
+                | Action::Artist
+                | Action::AddToPlaylist
+                | Action::Favorite
+                | Action::AddVariation
+                | Action::EditInfo,
             ) => {
                 let song = match menu.target {
                     Target::Queued(i) => self.queue.songs().get(i).cloned(),
@@ -3634,8 +3774,12 @@ impl Odeion {
                 self.act(action, cx);
             }
             (
-                target @ (Target::Playlist(_) | Target::Favourites | Target::Artist(_) | Target::AlbumRow(_)),
-                Action::PlayAll | Action::ShuffleAll | Action::QueueAll | Action::AddAllToPlaylist,
+                target @ (Target::Playlist(_)
+                | Target::Favourites
+                | Target::Artist(_)
+                | Target::AlbumRow(_)
+                | Target::Group(_)),
+                Action::PlayAll | Action::ShuffleAll | Action::QueueAll | Action::AddAllToPlaylist | Action::EditAllInfo,
             ) => {
                 let songs = self.songs_for(target);
                 self.songs_action(songs, action);
@@ -3673,6 +3817,7 @@ impl Odeion {
                 }
             }
             Action::AddToPlaylist => self.add_to = Some(AddTo { songs: vec![song], at: 0, naming: None }),
+            Action::EditInfo => self.open_info(vec![song]),
             Action::Favorite if !self.can_favorite(&song) => self.message = Some((NO_BACKING_FAVOURITES.into(), false)),
             Action::Favorite => {
                 self.favorites.toggle(&song);
@@ -3699,8 +3844,162 @@ impl Odeion {
                 self.message = Some((said, false));
             }
             Action::AddAllToPlaylist if !songs.is_empty() => self.add_to = Some(AddTo { songs, at: 0, naming: None }),
+            Action::EditAllInfo => self.open_info(songs),
             _ => {}
         }
+    }
+
+    /// Opens the Edit info sheet on `songs`.
+    fn open_info(&mut self, songs: Vec<PathBuf>) {
+        let tracks: Vec<&Track> = songs.iter().filter_map(|s| self.by_path.get(s).map(|&i| &self.tracks[i])).collect();
+        if let Some(sheet) = tags::Sheet::new(&tracks) {
+            self.info = Some(sheet);
+        }
+    }
+
+    /// A key on the Edit info sheet: typing goes into the highlighted field, Tab ↑ ↓ move,
+    /// Enter or ⌘S saves (on the cover row Enter picks an image), Esc cancels.
+    fn info_key(&mut self, k: &gpui::Keystroke, press: keys::Press, typed: Option<String>, cx: &mut Context<Self>) {
+        let Some(sheet) = &mut self.info else { return };
+        match k.key.as_str() {
+            "escape" => self.info = None,
+            "enter" if sheet.on_cover() => self.pick_cover(cx),
+            "enter" => self.save_info(),
+            "s" if press.cmd => self.save_info(),
+            "tab" => sheet.step(!press.shift),
+            "down" => sheet.step(true),
+            "up" => sheet.step(false),
+            "backspace" => sheet.backspace(),
+            _ => {
+                if let Some(text) = typed {
+                    sheet.type_text(&text);
+                }
+            }
+        }
+    }
+
+    /// Asks for an image to become the cover on the Edit info sheet.
+    fn pick_cover(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use as cover".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(files))) = picked.await {
+                let _ = this.update(cx, |odeion, cx| {
+                    if let Some(sheet) = &mut odeion.info {
+                        sheet.cover = files.into_iter().next();
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Writes the sheet's changes into the songs' files in the background; each song
+    /// comes back read afresh (`poll`). Nothing changed just closes it.
+    fn save_info(&mut self) {
+        let Some(sheet) = self.info.take() else { return };
+        if !sheet.changes() {
+            return;
+        }
+        if self.saving_info.is_some() {
+            self.message = Some(("still saving the last change, a moment".into(), true));
+            self.info = Some(sheet);
+            return;
+        }
+        let (roots, covers) = (self.settings.roots(), state::data_dir().join("covers"));
+        let image = sheet.cover.clone();
+        let songs = sheet.songs.clone();
+        let sheet_songs = songs.len();
+        self.message = Some((
+            match songs.len() {
+                1 => "saving…".to_string(),
+                n => format!("saving {n} songs…"),
+            },
+            false,
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // A large image takes a moment to scale: here, not in the window.
+            let edit = match image.as_deref().map(tags::cover).transpose() {
+                Ok(cover) => sheet.edit(cover),
+                Err(e) => {
+                    let _ = tx.send(Err(format!("couldn't use that image: {e}")));
+                    return;
+                }
+            };
+            for song in songs {
+                let name = song.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                // A panic becomes a song that wasn't saved, not one reported as saved.
+                let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tags::write(&song, &edit)))
+                    .unwrap_or_else(|_| Err("writing crashed".into()));
+                let result = written
+                    .map(|()| scan::reread(&roots, &song, &covers))
+                    .map_err(|e| format!("couldn't save {name}: {e}"));
+                if tx.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+        self.saving_info = Some(SavingInfo { rx, songs: sheet_songs, saved: 0, failed: 0 });
+    }
+
+    /// Songs written by `save_info` take their place in the library as they arrive.
+    fn saved_info(&mut self) -> bool {
+        let Some(mut saving) = self.saving_info.take() else { return false };
+        let mut done = false;
+        let mut saved = Vec::new();
+        loop {
+            match saving.rx.try_recv() {
+                Ok(Ok(track)) => saved.push(track),
+                Ok(Err(e)) => {
+                    saving.failed += 1;
+                    self.message = Some((e, true));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        let last = saved.last().map(|t| t.title.clone());
+        let changed = !saved.is_empty() || done;
+        if !saved.is_empty() {
+            saving.saved += saved.len();
+            for track in saved {
+                if let Some(&i) = self.by_path.get(&track.path) {
+                    if self.now.as_ref().is_some_and(|n| n.path == track.path) {
+                        self.now = Some(track.clone());
+                    }
+                    self.tracks[i] = track;
+                }
+            }
+            self.reindex(self.selected_path());
+            scan::save_cache(&cache_file(), &self.tracks);
+        }
+        if !done {
+            self.saving_info = Some(saving);
+        } else if saving.failed == 0 && saving.saved < saving.songs {
+            // The thread ended without a word about some songs: it crashed outside the
+            // writing itself (reading a song back, say).
+            let said = format!("saving stopped after {} of {} songs", saving.saved, saving.songs);
+            self.message = Some((said, true));
+        } else if saving.failed == 0 {
+            let said = match (saving.saved, last) {
+                (1, Some(title)) => format!("saved {title}"),
+                (n, _) => format!("saved {n} songs"),
+            };
+            self.message = Some((said, false));
+        } else if saving.saved > 0 {
+            let why = self.message.take().map(|(e, _)| e).unwrap_or_default();
+            self.message = Some((format!("saved {}, but {why}", saving.saved), true));
+        }
+        changed
     }
 
     /// The songs a list's menu acts on: a playlist's, the favourites, an artist's (from
@@ -3729,6 +4028,11 @@ impl Odeion {
                 }
                 _ => Vec::new(),
             },
+            // The songs listed under it, up to the next group or section.
+            Target::Group(row) => self.rows[(row + 1).min(self.rows.len())..]
+                .iter()
+                .map_while(|r| if let Row::Track(i) = r { Some(path(*i)) } else { None })
+                .collect(),
             _ => self.rows.iter().filter_map(|r| if let Row::Track(i) = r { Some(path(*i)) } else { None }).collect(),
         }
     }
@@ -3891,13 +4195,17 @@ impl Odeion {
             && self.query.trim().is_empty()
     }
 
-    /// Where each letter's artists begin in the list, below the favourites.
+    /// Where each letter begins in the list, below the favourites: by the sort order's
+    /// first field (an artist by their sort name). None when that field is a number.
     fn rail_letters(&self) -> Vec<(char, usize)> {
         let from = self.rows.iter().position(|r| matches!(r, Row::Header(h) if h == "Library")).map_or(0, |h| h + 1);
-        library::letters((from..self.rows.len()).filter_map(|r| match self.rows[r] {
-            Row::Track(i) => Some((r, self.tracks[i].artist.as_str())),
-            Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Playlist(_) => None,
-        }))
+        let filed: Vec<(usize, String)> = (from..self.rows.len())
+            .filter_map(|r| match self.rows[r] {
+                Row::Track(i) => self.order.filing(&self.tracks[i]).map(|text| (r, text)),
+                Row::Header(_) | Row::Artist(..) | Row::Album(..) | Row::Group(..) | Row::Playlist(_) => None,
+            })
+            .collect();
+        library::letters(filed.iter().map(|(r, text)| (*r, text.as_str())))
     }
 
     /// The pointer at `y` on the rail: glides to that letter's first song and highlights it.
@@ -4377,19 +4685,22 @@ impl Odeion {
         }
     }
 
-    /// An artist over its songs in the grouped list, or an album in an artist's; also
-    /// pinned on top of the list. A click opens the artist's or the album's view.
+    /// An artist over its songs in the grouped list, or an album in an artist's, or what
+    /// else the sort order starts with (a year, a genre); also pinned on top of the list.
+    /// A click opens the artist's or the album's view, or highlights another group's
+    /// first song.
     fn render_group_row(
         &self,
         ix: usize,
         name: &str,
         songs: usize,
-        album: bool,
+        head: Head,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (action, tip) = match album {
-            true => (Action::Album, "Only this album; right-click to play or queue it"),
-            false => (Action::Artist, "Only this artist; right-click to play or queue them all"),
+        let (action, tip) = match head {
+            Head::Album => (Some(Action::Album), "Only this album; right-click to play or queue it"),
+            Head::Artist => (Some(Action::Artist), "Only this artist; right-click to play or queue them all"),
+            Head::Other => (None, "Right-click to play or queue these songs"),
         };
         div()
             .id(("group-row", ix))
@@ -4419,14 +4730,24 @@ impl Odeion {
                     .text_color(rgb(t().text_dim))
                     .child(if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") }),
             )
-            .slow_tooltip(self.tip(tip, &[action]))
+            .slow_tooltip(self.tip(tip, action.as_slice()))
             .on_click(cx.listener(move |odeion, _, _, cx| {
                 odeion.selected = ix + 1;
-                odeion.act(action, cx);
+                match action {
+                    Some(action) => odeion.act(action, cx),
+                    None => cx.notify(),
+                }
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                opens_menu(move || if album { Menu::album_row(ix) } else { Menu::artist(ix) }, cx),
+                opens_menu(
+                    move || match head {
+                        Head::Album => Menu::album_row(ix),
+                        Head::Artist => Menu::artist(ix),
+                        Head::Other => Menu::group(ix),
+                    },
+                    cx,
+                ),
             )
             .into_any_element()
     }
@@ -4443,14 +4764,15 @@ impl Odeion {
             .iter()
             .map(|r| match r {
                 Row::Header(_) | Row::Playlist(_) => Kind::Section,
-                Row::Artist(..) | Row::Album(..) => Kind::Artist,
+                Row::Artist(..) | Row::Album(..) | Row::Group(..) => Kind::Artist,
                 Row::Track(_) => Kind::Track,
             })
             .collect();
         let (head, push) = library::pinned(&kinds, -offset / row)?;
-        let (name, songs, album) = match &self.rows[head] {
-            Row::Artist(name, songs) => (name, *songs, false),
-            Row::Album(name, songs) => (name, *songs, true),
+        let (name, songs, kind) = match &self.rows[head] {
+            Row::Artist(name, songs) => (name, *songs, Head::Artist),
+            Row::Album(name, songs) => (name, *songs, Head::Album),
+            Row::Group(name, songs) => (name, *songs, Head::Other),
             _ => return None,
         };
         Some(
@@ -4459,7 +4781,7 @@ impl Odeion {
                 .top(-row * push)
                 .left_0()
                 .right(px(14.))
-                .child(self.render_group_row(head, name, songs, album, cx))
+                .child(self.render_group_row(head, name, songs, kind, cx))
                 .into_any_element(),
         )
     }
@@ -4478,8 +4800,9 @@ impl Odeion {
                 .text_color(rgb(t().text_dim))
                 .child(label.clone())
                 .into_any_element(),
-            Row::Artist(name, songs) => self.render_group_row(ix, name, *songs, false, cx),
-            Row::Album(name, songs) => self.render_group_row(ix, name, *songs, true, cx),
+            Row::Artist(name, songs) => self.render_group_row(ix, name, *songs, Head::Artist, cx),
+            Row::Album(name, songs) => self.render_group_row(ix, name, *songs, Head::Album, cx),
+            Row::Group(name, songs) => self.render_group_row(ix, name, *songs, Head::Other, cx),
             Row::Playlist(i) => {
                 let i = *i;
                 let selected = ix == self.selected;
@@ -6582,6 +6905,186 @@ impl Odeion {
         self.rebuild_rows();
     }
 
+    /// The Edit info sheet: a row per field, typed into in place, then the cover (an
+    /// image picked or dropped on the sheet), and Save and Cancel.
+    fn render_info_sheet(&self, sheet: &tags::Sheet, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        let tracks: Vec<Track> = sheet.songs.iter().filter_map(|s| self.track_at(s)).collect();
+        let title = match tracks.as_slice() {
+            [one] => one.title.clone(),
+            many => format!("{} songs", ui::count(many.len())),
+        };
+        let row = |id: (&'static str, usize), lit: bool| {
+            div()
+                .id(id)
+                .min_h(px(36.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_md()
+                .cursor_pointer()
+                .map(|d| selected_cues(d, lit))
+                .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
+        };
+        let label = |text: &'static str, changed: bool| {
+            div()
+                .w(px(56.))
+                .flex_none()
+                .text_sm()
+                .text_color(rgb(if changed { t.accent_text } else { t.text_dim }))
+                .child(text)
+        };
+        let fields: Vec<_> = sheet
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let lit = sheet.at == i;
+                let value = match (entry.value.is_empty(), entry.mixed()) {
+                    // Songs that differ here keep their own unless something is typed.
+                    (true, true) => div().text_color(rgb(t.text_dim)).child(if lit { "▏mixed, each keeps its own" } else { "mixed, each keeps its own" }),
+                    // Selected whole: typing replaces it.
+                    _ if lit && sheet.fresh => div().child(div().px_0p5().rounded_sm().bg(rgb(t.accent_soft)).child(entry.value.clone())),
+                    _ if lit => div().child(format!("{}▏", entry.value)),
+                    _ => div().child(entry.value.clone()),
+                };
+                row(("info-field", i), lit)
+                    .child(label(entry.field.label(), entry.changed()))
+                    .child(
+                        value
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(rgb(t.text))
+                            .when(entry.field.digits().is_some(), |d| d.font_family(MONO)),
+                    )
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        if let Some(sheet) = &mut odeion.info {
+                            sheet.select(i);
+                        }
+                        cx.notify();
+                    }))
+            })
+            .collect();
+        // The cover the songs share now, unless one was picked.
+        let first = tracks.first().and_then(|t| t.cover.clone());
+        let shared = tracks.iter().all(|t| t.cover == first);
+        let shown = sheet.cover.clone().or(if shared { first } else { None });
+        let what = match &sheet.cover {
+            Some(picked) => picked.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            None if shared => "Choose an image, or drop one here".to_string(),
+            None => "Each keeps its own; choose an image, or drop one here".to_string(),
+        };
+        let at_cover = sheet.on_cover();
+        let cover_row = row(("info-cover", 0), at_cover)
+            .py_2()
+            .child(label("Cover", sheet.cover.is_some()))
+            .child(cover(shown, 48.))
+            .child(div().flex_1().min_w_0().text_sm().text_color(rgb(t.text_dim)).child(what))
+            .child(
+                div()
+                    .id("info-choose")
+                    .flex_none()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .bg(rgb(t.raised))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .hover(|d| d.bg(rgb(t.hover)))
+                    .text_sm()
+                    .text_color(rgb(t.text))
+                    .child("Choose…")
+                    .when(at_cover, |d| d.child(div().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child("Enter")))
+                    .on_click(cx.listener(|odeion, _, _, cx| {
+                        cx.stop_propagation();
+                        odeion.pick_cover(cx);
+                    })),
+            )
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                if let Some(sheet) = &mut odeion.info {
+                    sheet.select(sheet.rows.len());
+                }
+                cx.notify();
+            }));
+        overlay("info-sheet")
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                odeion.info = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("info")
+                    .w(px(460.))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(t.surface))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    // An image dropped anywhere on the sheet becomes the cover.
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(rgb(t.focus)))
+                    .on_drop(cx.listener(|odeion, dropped: &ExternalPaths, _, cx| {
+                        if let Some(sheet) = &mut odeion.info {
+                            sheet.cover = dropped.paths().first().cloned();
+                            sheet.select(sheet.rows.len());
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .pb_2()
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_color(rgb(t.text)).child("Edit info"))
+                                    .child(div().truncate().text_sm().text_color(rgb(t.text_dim)).child(title)),
+                            )
+                            .child(self.button("info-close", "x", "Close", &[], false, cx, |odeion, _, _| odeion.info = None)),
+                    )
+                    .children(fields)
+                    .child(cover_row)
+                    .child(
+                        div()
+                            .pt_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(rgb(t.text_dim))
+                                    .child("Saved into the files, so other players see it too."),
+                            )
+                            .child(self.choice("info-cancel", "Cancel", "Esc", t.text, cx, |odeion| odeion.info = None))
+                            .child(self.choice("info-save", "Save", "⌘S", t.accent_text, cx, |odeion| odeion.save_info())),
+                    )
+                    .child(
+                        div()
+                            .pt_2()
+                            .font_family(MONO)
+                            .text_xs()
+                            .text_color(rgb(t.text_dim))
+                            .child("Tab ↑ ↓ move   type to change   Enter or ⌘S save   Esc cancels"),
+                    ),
+            )
+    }
+
     /// The playlist picker: every playlist (a check where the song is in it already)
     /// and "New playlist…", whose name is typed in place.
     fn render_picker(&self, picker: &AddTo, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8031,7 +8534,214 @@ impl Odeion {
             )
     }
 
+    /// The sort order's settings row: its fields as chips in order, each dragged to
+    /// another place, turned around by a click on its A–Z, taken out by its ×; below
+    /// them the fields to add, by a click or a drag into place (and a field dragged there
+    /// is taken out). Every change sorts the library at once and is kept.
+    fn render_sort_row(&self, prefs: &Prefs, lit: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = t();
+        let used = self.order.0.len();
+        let unused = self.order.unused();
+        let fields: Vec<Field> = self.order.0.iter().map(|k| k.field).collect();
+        let fields_now = fields.clone();
+        let (focus, soft) = (t.focus, t.accent_soft);
+        let picked = |chip: usize| lit && prefs.chip == chip;
+        let caption = |text: &'static str| {
+            div().w(px(56.)).flex_none().text_sm().text_color(rgb(t.text_dim)).child(text)
+        };
+        let chip = |id: (&'static str, usize), on: bool| {
+            div()
+                .id(id)
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .gap_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(if on { t.accent } else { t.border }))
+                .cursor(gpui::CursorStyle::OpenHand)
+        };
+        let chips = self.order.0.iter().enumerate().map(|(i, &key)| {
+            let fields = fields.clone();
+            chip(("sort-field", i), picked(i))
+                .pl_2()
+                .pr_1()
+                .bg(rgb(if picked(i) { t.accent_soft } else { t.raised }))
+                .child(div().text_sm().text_color(rgb(t.text)).child(key.field.label()))
+                .child(
+                    div()
+                        .id(("sort-way", i))
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(t.hover)))
+                        .font_family(MONO)
+                        .text_xs()
+                        .text_color(rgb(if key.reversed { t.accent_text } else { t.text_dim }))
+                        .child(key.way())
+                        .slow_tooltip(self.tip(format!("{}; click to turn it around", key.way_in_words()), &[]))
+                        .on_click(cx.listener(move |odeion, _, _, cx| {
+                            cx.stop_propagation();
+                            odeion.change_order(|o| {
+                                o.reverse(i);
+                                i
+                            });
+                            cx.notify();
+                        })),
+                )
+                .when(used > 1, |d| {
+                    d.child(
+                        div()
+                            .id(("sort-remove", i))
+                            .size(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(t.hover)))
+                            .child(ui::icon("x", 12., t.text_dim))
+                            .slow_tooltip(self.tip("Stop sorting by this", &[]))
+                            .on_click(cx.listener(move |odeion, _, _, cx| {
+                                cx.stop_propagation();
+                                odeion.change_order(|o| {
+                                    o.remove(i);
+                                    i.min(o.0.len() - 1)
+                                });
+                                cx.notify();
+                            })),
+                    )
+                })
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    let rest = odeion.prefs_rest();
+                    if let Some(prefs) = &mut odeion.prefs {
+                        (prefs.row, prefs.chip) = (rest, i);
+                    }
+                    cx.notify();
+                }))
+                .on_drag(DraggedField(key.field), move |_, at, _, cx| {
+                    cx.new(|_| SongGhost { title: key.field.label().into(), at })
+                })
+                // A line on the side it lands: after this field when it comes from the
+                // left, before it otherwise.
+                .drag_over::<DraggedField>(move |style, dragged, _, _| {
+                    let line = rgb(focus);
+                    match fields.iter().position(|f| *f == dragged.0) {
+                        Some(from) if from == i => style,
+                        Some(from) if from < i => style.border_r_2().border_color(line),
+                        _ => style.border_l_2().border_color(line),
+                    }
+                })
+                .on_drop(cx.listener(move |odeion, dragged: &DraggedField, _, cx| {
+                    cx.stop_propagation();
+                    let field = dragged.0;
+                    odeion.change_order(|o| {
+                        o.place(field, i);
+                        i
+                    });
+                    cx.notify();
+                }))
+        });
+        let adds = unused.iter().enumerate().map(|(j, &field)| {
+            let at = used + j;
+            chip(("sort-add", j), picked(at))
+                .px_2()
+                .when(picked(at), |d| d.bg(rgb(t.accent_soft)))
+                .hover(|d| d.bg(rgb(t.hover)))
+                .child(ui::icon("plus", 12., t.text_dim))
+                .child(div().text_sm().text_color(rgb(t.text_dim)).child(field.label()))
+                .slow_tooltip(self.tip("Sort by this too: click, or drag it into place", &[]))
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    odeion.change_order(|o| {
+                        o.place(field, usize::MAX);
+                        o.0.len() - 1
+                    });
+                    cx.notify();
+                }))
+                .on_drag(DraggedField(field), move |_, at, _, cx| cx.new(|_| SongGhost { title: field.label().into(), at }))
+        });
+        let order_line = div()
+            .id("sort-fields")
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1p5()
+            .children(chips)
+            // Dropped beside the fields rather than on one: last.
+            .on_drop(cx.listener(|odeion, dragged: &DraggedField, _, cx| {
+                let field = dragged.0;
+                odeion.change_order(|o| {
+                    o.place(field, usize::MAX);
+                    o.0.len() - 1
+                });
+                cx.notify();
+            }));
+        let add_line = div()
+            .id("sort-unused")
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded_md()
+            .child(caption("Add"))
+            .child(div().flex_1().min_w_0().flex().flex_wrap().items_center().gap_1p5().children(adds))
+            .drag_over::<DraggedField>(move |style, dragged, _, _| match used > 1 && fields_now.contains(&dragged.0) {
+                true => style.bg(rgb(soft)),
+                false => style,
+            })
+            // A field of the order dropped here is taken out.
+            .on_drop(cx.listener(|odeion, dragged: &DraggedField, _, cx| {
+                let field = dragged.0;
+                odeion.change_order(|o| {
+                    if let Some(i) = o.0.iter().position(|k| k.field == field) {
+                        o.remove(i);
+                    }
+                    0
+                });
+                cx.notify();
+            }));
+        div()
+            .id("sort")
+            .px_2()
+            .py_1p5()
+            .flex()
+            .items_start()
+            .gap_3()
+            .rounded_md()
+            .map(|d| selected_cues(d, lit))
+            .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
+            .child(div().pt(px(6.)).child(ui::icon("arrow-down-wide-narrow", 16., if lit { t.accent } else { t.text_dim })))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().flex().items_center().gap_3().child(caption("Sort by")).child(order_line))
+                    .when(!unused.is_empty(), |d| d.child(add_line)),
+            )
+            .when(self.order != Order::default(), |d| {
+                d.child(self.choice("sort-default", "Default", "", t.text, cx, |odeion| {
+                    odeion.change_order(|o| {
+                        *o = Order::default();
+                        0
+                    })
+                }))
+            })
+            .on_click(cx.listener(|odeion, _, _, cx| {
+                let rest = odeion.prefs_rest();
+                if let Some(prefs) = &mut odeion.prefs {
+                    prefs.row = rest;
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     /// The ⌘, sheet: the folders to scan and the theme. Esc, ⌘, or a click outside closes it.
+
     fn render_prefs(&self, prefs: &Prefs, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
         let folders = &self.settings.folders;
@@ -8149,9 +8859,11 @@ impl Odeion {
         let rest = self.prefs_rest();
         body = body
             .child(add_row(rest - 1, 1, "Add backing-track folder…", true, cx))
+            .child(title("Library"))
+            .child(self.render_sort_row(prefs, lit(rest), cx))
             .child(title("Theme"))
             .child(
-                row(("appearance", 0), lit(rest), "palette", match theme::is_own(&self.settings.theme) {
+                row(("appearance", 0), lit(rest + 1), "palette", match theme::is_own(&self.settings.theme) {
                     true => format!("Appearance: {}", self.settings.appearance.label()),
                     false => format!("Appearance: from the editor theme; Enter for Odeion's {}", self.settings.appearance.label()),
                 })
@@ -8167,7 +8879,7 @@ impl Odeion {
         };
         body = match &prefs.picker {
             None => body.child(
-                row(("theme", 0), lit(rest + 1), "palette", theme_label)
+                row(("theme", 0), lit(rest + 2), "palette", theme_label)
                     .on_click(cx.listener(|odeion, _, _, cx| {
                         odeion.open_picker(cx);
                         cx.notify();
@@ -8236,7 +8948,7 @@ impl Odeion {
         };
         let keyboard_label = if self.vim() { "Keyboard: Vim" } else { "Keyboard: Mac" };
         body = body.child(title("Keys")).child(
-            row(("keyboard", 0), lit(rest + 2), "keyboard", keyboard_label.into()).on_click(
+            row(("keyboard", 0), lit(rest + 3), "keyboard", keyboard_label.into()).on_click(
                 cx.listener(|odeion, _, _, cx| {
                     odeion.toggle_keyboard();
                     cx.notify();
@@ -8252,7 +8964,7 @@ impl Odeion {
         body = body.child(title("Output"));
         body = match prefs.choosing {
             None => body.child(
-                row(("output", 0), lit(rest + 3), "headphones", output).on_click(cx.listener(|odeion, _, _, cx| {
+                row(("output", 0), lit(rest + 4), "headphones", output).on_click(cx.listener(|odeion, _, _, cx| {
                     odeion.open_outputs();
                     cx.notify();
                 })),
@@ -8275,20 +8987,26 @@ impl Odeion {
         let custom = custom_data_dir();
         let label = if custom { tilde(&data) } else { format!("The default, {}", tilde(&data)) };
         body = body.child(title("Data")).child(
-            row(("data", 0), lit(rest + 4), "folder", label).on_click(cx.listener(|odeion, _, _, cx| {
+            row(("data", 0), lit(rest + 5), "folder", label).on_click(cx.listener(|odeion, _, _, cx| {
                 odeion.pick_data_dir(cx);
                 cx.notify();
             })),
         );
         if custom {
             body = body.child(
-                row(("data", 1), lit(rest + 5), "x", "Back to the default folder".into()).on_click(
+                row(("data", 1), lit(rest + 6), "x", "Back to the default folder".into()).on_click(
                     cx.listener(|odeion, _, _, cx| odeion.switch_data_dir(None, cx)),
                 ),
             );
         }
         let hint = match (prefs.picker.is_some(), self.vim()) {
             _ if prefs.choosing.is_some() => "↑↓ move   Enter or a click plays through it   Esc closes",
+            _ if prefs.picker.is_none() && prefs.row == self.prefs_rest() && self.vim() => {
+                "h l pick   H L move   Enter turns it around or adds it   dd takes it out   drag to reorder"
+            }
+            _ if prefs.picker.is_none() && prefs.row == self.prefs_rest() => {
+                "← → pick   ⇧← ⇧→ move   Enter turns it around or adds it   ⌫ takes it out   drag to reorder"
+            }
             (true, _) => "↑↓ or scroll to preview   Enter or a click keeps   Esc restores",
             (false, true) => "j k move   Enter or a click chooses   dd remove folder   Esc close",
             (false, false) => "↑↓ move   Enter or a click chooses   ⌫ remove folder   Esc close",
@@ -8303,7 +9021,7 @@ impl Odeion {
             .child(
                 div()
                     .id("prefs-sheet")
-                    .w(px(520.))
+                    .w(px(680.))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -8912,7 +9630,9 @@ impl Render for Odeion {
                                                     .child(self.render_scrollbar(cx))
                                                     .children(self.render_empty(cx)),
                                             )
-                                            .when(self.browsing(), |d| d.child(self.render_rail(cx)))
+                                            .when(self.browsing() && !self.order.first().field.is_number(), |d| {
+                                                d.child(self.render_rail(cx))
+                                            })
                                             // The letter being dragged to, large, while the list glides.
                                             .children(self.scrubbing.map(|letter| {
                                                 div().absolute().size_full().flex().items_center().justify_center().child(
@@ -8943,6 +9663,7 @@ impl Render for Odeion {
             .children(self.export_sheet.as_ref().map(|sheet| self.render_export_sheet(sheet, cx)))
             .children(self.eq_sheet.map(|at| self.render_eq_sheet(at, cx)))
             .children(self.add_to.as_ref().map(|p| self.render_picker(p, cx)))
+            .children(self.info.as_ref().map(|sheet| self.render_info_sheet(sheet, cx)))
             .children(self.render_menu(cx))
     }
 }

@@ -145,6 +145,8 @@ pub struct Settings {
     pub trainer: crate::trainer::Trainer,
     /// How the list shows songs.
     pub list: ListView,
+    /// The library's sort order as typed (`order.rs`).
+    pub sort: String,
     /// The global EQ, and the presets the user saved.
     pub eq: crate::eq::Eq,
     pub eq_presets: Vec<crate::eq::Preset>,
@@ -188,6 +190,7 @@ impl Default for Settings {
             output: None,
             trainer: Default::default(),
             list: ListView::Columns,
+            sort: crate::order::DEFAULT.to_string(),
             eq: Default::default(),
             eq_presets: Vec::new(),
             export: Default::default(),
@@ -382,6 +385,7 @@ mod tests {
             output: Some("coreaudio:headphones".into()),
             trainer: crate::trainer::Trainer { from: 60, to: 95, step: 5, every: 4 },
             list: ListView::Grouped,
+            sort: "artist -year album".into(),
             eq: crate::eq::Eq { on: true, preamp: -2, bands: [3, 2, 0, 0, 0, 0, 0, 1, 2, 3] },
             eq_presets: vec![crate::eq::Preset { name: "Desk".into(), preamp: 0, bands: [1; 10] }],
             export: crate::export::Choices { speed: false, format: crate::export::Format::Ogg, ..Default::default() },
@@ -395,6 +399,8 @@ mod tests {
         // Settings from before volume and output play at full, through the system's.
         assert_eq!(Settings::load(&file).volume, 1.0);
         assert_eq!(Settings::load(&file).output, None);
+        // And sort as they always did.
+        assert_eq!(Settings::load(&file).sort, crate::order::DEFAULT);
         assert_eq!(Settings::load(&file).list, ListView::Columns);
         assert!(Settings::load(&file).eq.flat());
         let _ = std::fs::remove_file(&file);

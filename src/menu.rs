@@ -44,6 +44,9 @@ pub enum Target {
     Artist(usize),
     /// An album's row in an artist's grouped view, by its row.
     AlbumRow(usize),
+    /// Another group's row in the grouped list (a year's, a genre's), by its row: the
+    /// songs under it.
+    Group(usize),
 }
 
 pub struct Menu {
@@ -160,6 +163,7 @@ impl Menu {
                     ("Only this artist", Action::Artist),
                     ("Add to playlist…", Action::AddToPlaylist),
                     ("Add a variation…", Action::AddVariation),
+                    ("Edit info…", Action::EditInfo),
                 ])
                 .collect(),
         )
@@ -202,9 +206,10 @@ impl Menu {
                 ("Add all to playlist…", Action::AddAllToPlaylist),
             ],
         );
+        let edit = ("Edit info of all…", Action::EditAllInfo);
         match of {
-            Shown::Album => menu.then([("Back from the album", Action::Album)]),
-            Shown::Artist => menu.then([("Back from the artist", Action::Artist)]),
+            Shown::Album => menu.then([edit, ("Back from the album", Action::Album)]),
+            Shown::Artist => menu.then([edit, ("Back from the artist", Action::Artist)]),
             Shown::Playlist => {
                 menu.then(SORT).then([("Rename…", Action::RenamePlaylist), ("Delete…", Action::DeletePlaylist)])
             }
@@ -221,6 +226,7 @@ impl Menu {
                 ("Shuffle", Action::ShuffleAll),
                 ("Queue all", Action::QueueAll),
                 ("Add all to playlist…", Action::AddAllToPlaylist),
+                ("Edit info of all…", Action::EditAllInfo),
             ],
         )
     }
@@ -231,6 +237,20 @@ impl Menu {
             Target::Artist(row),
             vec![
                 ("Only this artist", Action::Artist),
+                ("Play", Action::PlayAll),
+                ("Shuffle", Action::ShuffleAll),
+                ("Queue all", Action::QueueAll),
+                ("Add all to playlist…", Action::AddAllToPlaylist),
+                ("Edit info of all…", Action::EditAllInfo),
+            ],
+        )
+    }
+
+    /// On another group's row in the grouped list (a year's, a genre's), `row`.
+    pub fn group(row: usize) -> Menu {
+        Menu::new(
+            Target::Group(row),
+            vec![
                 ("Play", Action::PlayAll),
                 ("Shuffle", Action::ShuffleAll),
                 ("Queue all", Action::QueueAll),
@@ -276,6 +296,7 @@ impl Menu {
             ("Queue next", Action::Queue(true)),
             ("Add to playlist…", Action::AddToPlaylist),
             ("Add a variation…", Action::AddVariation),
+            ("Edit info…", Action::EditInfo),
         ])
         .then(listed.into_iter().filter(|_| in_playlist))
     }
@@ -290,6 +311,7 @@ impl Menu {
             ("Only this album", Action::Album),
             ("Only this artist", Action::Artist),
             ("Add to playlist…", Action::AddToPlaylist),
+            ("Edit info…", Action::EditInfo),
         ])
     }
 
@@ -407,8 +429,8 @@ mod tests {
 
     #[test]
     fn groups_are_set_apart_and_empty_ones_leave_no_line() {
-        // Favourite, album and artist; the queue and playlists; the playlist's own.
-        assert_eq!(Menu::song(0, Some(false), false, false, true).breaks, [3, 7]);
+        // Favourite, album and artist; the queue, playlists and info; the playlist's own.
+        assert_eq!(Menu::song(0, Some(false), false, false, true).breaks, [3, 8]);
         assert_eq!(Menu::song(0, Some(false), false, false, false).breaks, [3]);
         assert!(Menu::waveform(Duration::ZERO, false).breaks.is_empty());
         let inside = Menu::waveform(Duration::ZERO, true);
@@ -440,7 +462,8 @@ mod tests {
         let bare = Menu::playing(Some(true), false, false, false);
         assert_eq!(bare.target, Target::Playing);
         assert_eq!(bare.entries[0].0, "Not a favourite");
-        assert_eq!(bare.entries.len(), 5);
+        assert_eq!(bare.entries.len(), 6);
+        assert!(labels(&bare).contains(&"Edit info…"));
         let marked = labels(&Menu::playing(Some(false), false, false, true));
         assert!(marked.contains(&"Play from the marker") && marked.contains(&"Clear the marker"));
         assert!(!marked.contains(&"Clear the loop"));

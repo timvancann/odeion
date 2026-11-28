@@ -175,6 +175,12 @@ pub enum Action {
     QueueAll,
     /// Add every song listed, or those a menu was opened on, to a playlist. No key.
     AddAllToPlaylist,
+    /// Edit a song's info (title, artist, album, numbers, cover), written into its file:
+    /// the highlighted one, or the playing one in practice.
+    EditInfo,
+    /// Edit the info every song listed shares (an album's or artist's), or those a menu
+    /// was opened on. No key.
+    EditAllInfo,
     /// Open the highlighted playlist, or the one a menu was opened on. No key.
     OpenPlaylist,
     /// Rename or delete (asking first) the open playlist, or the one a menu was opened
@@ -335,6 +341,7 @@ fn list(p: Press) -> Option<Action> {
         ("enter", false, false, false) if !p.shift => Play,
         ("l", true, false, false) => ToPlaying,
         ("n", true, false, false) => AddToPlaylist,
+        ("i", true, false, false) => EditInfo,
         ("backspace", true, false, false) => ClearSearch,
         _ => return None,
     })
@@ -459,6 +466,7 @@ fn practice(p: Press) -> Option<Action> {
             ("l", false) => Some(Follow),
             ("l", true) => Some(LoopSwitch),
             ("n", false) => Some(AddToPlaylist),
+            ("i", false) => Some(EditInfo),
             _ => None,
         };
     }
@@ -696,6 +704,7 @@ pub const SHEET: &[Group] = &[
             ("⇧⌘A", "A", "", "only this artist, again to leave"),
             ("⌥Enter ⇧⌥Enter", "q Q", "", "queue it, or at the top"),
             ("+ ⌘N", "", "", "add it to a playlist"),
+            ("⌘I", "", "", "edit its title, artist, album or cover"),
             ("⌘O", "", "", "add a variation to the playing song"),
         ],
     },
@@ -787,6 +796,7 @@ pub const SHEET: &[Group] = &[
             ("⌘D", "", "", "favourite or not"),
             ("⌘A", "", "", "only this album"),
             ("⇧⌘A", "", "", "only this artist"),
+            ("⌘I", "", "", "edit the song's title, artist, album or cover"),
         ],
     },
     Group {
@@ -1012,6 +1022,9 @@ mod tests {
             assert_eq!(resolve("⌘0", Practice, keyboard), Some(Action::ZoomFit));
             assert_eq!(resolve("⌘N", Library, keyboard), Some(Action::AddToPlaylist));
             assert_eq!(resolve("⌘N", Practice, keyboard), Some(Action::AddToPlaylist));
+            for mode in [Library, Search, Practice] {
+                assert_eq!(resolve("⌘I", mode, keyboard), Some(Action::EditInfo), "{mode:?}");
+            }
             for mode in [Library, Search] {
                 assert_eq!(resolve("⌥Enter", mode, keyboard), Some(Action::Queue(false)));
                 assert_eq!(resolve("⇧⌥Enter", mode, keyboard), Some(Action::Queue(true)));

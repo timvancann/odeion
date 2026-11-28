@@ -5,6 +5,22 @@ release's notes on GitHub.
 
 ## Unreleased
 
+**New**
+
+- Edit a song's info: its title, artist, album, track and disc number, year and cover.
+  Right-click the song and choose Edit info, or press `⌘I`; an album's or artist's
+  header edits what all its songs share at once. A cover is an image you pick or drop
+  on the sheet. It's saved into the files' own tags, so other players see it too, and
+  the audio stays exactly as it was.
+- Choose how the library sorts: Sort by in settings shows the fields it sorts by
+  (artist, year, album, disc, track, title, as before). Drag them into another order,
+  click a field's A–Z to turn it around (newest album first), take one out with its ×,
+  or add genre, length, file name or folder. The list re-sorts as you go. Numbers sort
+  as numbers, empty fields go last, an album stays together, and the sort names taggers
+  write put "The Beatles" under B. Grouped, the list groups by the first field: by
+  year, say, or by genre.
+- The settings sheet is wider.
+
 ## 0.9.0 (2026-11-26)
 
 Quieter jumps and easier playlists: seeking no longer clicks, and songs drag straight

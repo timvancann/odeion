@@ -1,8 +1,8 @@
 //! The library: what a track is, how one is read from its path before its tags are
 //! known, the order tracks are listed in, and search. Pure; no I/O.
 
+use crate::order::{self, Field, Order};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,6 +27,16 @@ pub struct Track {
     pub year: Option<u32>,
     #[serde(default)]
     pub disc: Option<u32>,
+    /// The genre, and the names taggers file the artist, album and title under ("Beatles,
+    /// The"), from the tags, for the sort order.
+    #[serde(default)]
+    pub genre: Option<String>,
+    #[serde(default)]
+    pub sort_artist: Option<String>,
+    #[serde(default)]
+    pub sort_album: Option<String>,
+    #[serde(default)]
+    pub sort_title: Option<String>,
     /// Which version of the tag reader read this track (`scan::READER`).
     #[serde(default)]
     pub reader: u32,
@@ -61,6 +71,10 @@ impl Track {
             seconds: None,
             year: None,
             disc: None,
+            genre: None,
+            sort_artist: None,
+            sort_album: None,
+            sort_title: None,
             reader: 0,
         }
     }
@@ -82,32 +96,15 @@ fn split_number(stem: &str) -> (Option<u32>, String) {
     }
 }
 
-/// Artist, then album, then track number, then title, ignoring case.
-pub fn sort(tracks: &mut [Track]) {
-    // An album's year is its earliest track's, so a remastered bonus track can't split it.
-    let mut years: HashMap<(Option<PathBuf>, String), u32> = HashMap::new();
-    for t in tracks.iter() {
-        if let Some(year) = t.year {
-            let key = (t.path.parent().map(Path::to_path_buf), fold(&t.album));
-            let entry = years.entry(key).or_insert(year);
-            *entry = (*entry).min(year);
-        }
-    }
-    tracks.sort_by_cached_key(|t| {
-        let album = fold(&t.album);
-        let year = years
-            .get(&(t.path.parent().map(Path::to_path_buf), album.clone()))
-            .copied()
-            .unwrap_or(u32::MAX);
-        (
-            fold(&t.artist),
-            year,
-            album,
-            t.disc.unwrap_or(0),
-            t.number.unwrap_or(u32::MAX),
-            fold(&t.title),
-        )
-    });
+/// Into library order: by `order`'s fields (`order.rs`), then by path, so equal songs
+/// keep one order.
+pub fn sort(tracks: &mut Vec<Track>, order: &Order) {
+    let years = order::years(tracks);
+    let values: Vec<_> = tracks.iter().map(|t| order.values(t, &years)).collect();
+    let mut at: Vec<usize> = (0..tracks.len()).collect();
+    at.sort_by(|&a, &b| order.compare(&values[a], &values[b]).then_with(|| tracks[a].path.cmp(&tracks[b].path)));
+    let mut old: Vec<Option<Track>> = std::mem::take(tracks).into_iter().map(Some).collect();
+    *tracks = at.into_iter().filter_map(|i| old[i].take()).collect();
 }
 
 /// Lowercase, without accents, with curly apostrophes made straight, so "jamies cryin"
@@ -301,19 +298,26 @@ pub fn album(tracks: &[Track], of: &Track) -> Vec<usize> {
     hits
 }
 
-/// One row of a grouped list: the artist (or, in an artist's view, the album), said once
-/// with how many songs follow, or a song.
+/// One row of a grouped list: what the songs below share (the sort order's first field;
+/// in an artist's view, the album), said once with how many songs follow, or a song.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Grouped {
-    Artist(String, usize),
+    Group(Field, String, usize),
     Album(String, usize),
     Track(usize),
 }
 
-/// `songs` (in library order) with each run by one artist under a row naming it.
-/// Names match ignoring case and accents; the first song's spelling is shown.
-pub fn grouped(tracks: &[Track], songs: &[usize]) -> Vec<Grouped> {
-    runs(tracks, songs, |t| (None, fold(&t.artist)), |t| Grouped::Artist(t.artist.clone(), 0))
+/// `songs` (in library order) with each run of the same `field` (the order's first)
+/// under a row naming it. Names match ignoring case and accents; the first song's
+/// spelling is shown.
+pub fn grouped(tracks: &[Track], songs: &[usize], field: Field) -> Vec<Grouped> {
+    let years = order::years(tracks);
+    runs(
+        tracks,
+        songs,
+        |t| (None, order::group(t, field, &years).0),
+        |t| Grouped::Group(field, order::group(t, field, &years).1, 0),
+    )
 }
 
 /// An artist's `songs` (in library order) with each album's run under a row naming it.
@@ -339,7 +343,7 @@ fn runs<'t>(
             rows.push(head(&tracks[i]));
             last = Some(this);
         }
-        if let Grouped::Artist(_, n) | Grouped::Album(_, n) = &mut rows[at] {
+        if let Grouped::Group(_, _, n) | Grouped::Album(_, n) = &mut rows[at] {
             *n += 1;
         }
         rows.push(Grouped::Track(i));
@@ -392,6 +396,10 @@ mod tests {
             seconds: None,
             year: None,
             disc: None,
+            genre: None,
+            sort_artist: None,
+            sort_album: None,
+            sort_title: None,
             reader: 0,
         }
     }
@@ -407,7 +415,7 @@ mod tests {
         tracks[0].seconds = Some(200);
         tracks[1].seconds = Some(310);
         tracks[3].seconds = Some(317);
-        sort(&mut tracks);
+        sort(&mut tracks, &Order::default());
         let titles = |songs: &[usize]| songs.iter().map(|&i| tracks[i].title.as_str()).collect::<Vec<_>>();
         // Added in this order to the playlist.
         let added = [2, 3, 0, 1];
@@ -475,7 +483,7 @@ mod tests {
             track("A", "y", 2, "a"),
             track("a", "y", 1, "b"),
         ];
-        sort(&mut tracks);
+        sort(&mut tracks, &Order::default());
         let titles: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["b", "a", "z"]);
     }
@@ -494,7 +502,7 @@ mod tests {
             dated("Moving Pictures", Some(2011), 2),
             dated("Moving Pictures", Some(1981), 1),
         ];
-        sort(&mut tracks);
+        sort(&mut tracks, &Order::default());
         let titles: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(
             titles,
@@ -509,7 +517,7 @@ mod tests {
         let mut two = track("A", "Double", 1, "two");
         two.disc = Some(2);
         let mut tracks = vec![two, one];
-        sort(&mut tracks);
+        sort(&mut tracks, &Order::default());
         assert_eq!(tracks[0].title, "one");
         assert_eq!(album(&tracks, &tracks[0]), [0, 1]);
     }
@@ -597,7 +605,7 @@ mod tests {
             track("Rush", "Moving Pictures", 1, "Tom Sawyer"),
         ];
         tracks[1].year = Some(1978);
-        sort(&mut tracks);
+        sort(&mut tracks, &Order::default());
         let titles: Vec<&str> =
             artist(&tracks, &tracks[1]).into_iter().map(|i| tracks[i].title.as_str()).collect();
         assert!(titles.iter().all(|t| *t != "Down to the Waterline"));
@@ -625,16 +633,46 @@ mod tests {
             track("Iron Maiden", "Powerslave", 1, "Aces High"),
         ];
         assert_eq!(
-            grouped(&tracks, &[0, 1, 2]),
+            grouped(&tracks, &[0, 1, 2], Field::Artist),
             vec![
-                Grouped::Artist("Dio".into(), 2),
+                Grouped::Group(Field::Artist, "Dio".into(), 2),
                 Grouped::Track(0),
                 Grouped::Track(1),
-                Grouped::Artist("Iron Maiden".into(), 1),
+                Grouped::Group(Field::Artist, "Iron Maiden".into(), 1),
                 Grouped::Track(2),
             ]
         );
-        assert!(grouped(&tracks, &[]).is_empty());
+        assert!(grouped(&tracks, &[], Field::Artist).is_empty());
+    }
+
+    #[test]
+    fn sorted_by_year_first_the_list_groups_under_each_year() {
+        let dated = |artist: &str, album: &str, year: Option<u32>| {
+            let mut t = track(artist, album, 1, album);
+            t.year = year;
+            t
+        };
+        let mut tracks = vec![
+            dated("Rush", "Signals", Some(1982)),
+            dated("Dio", "Holy Diver", Some(1983)),
+            dated("Iron Maiden", "The Number of the Beast", Some(1982)),
+            dated("Rush", "Archives", None),
+        ];
+        let order = Order::read("year artist album");
+        sort(&mut tracks, &order);
+        let all: Vec<usize> = (0..tracks.len()).collect();
+        let heads: Vec<String> = grouped(&tracks, &all, order.first().field)
+            .into_iter()
+            .map(|g| match g {
+                Grouped::Group(Field::Year, name, n) => format!("{name} ({n})"),
+                Grouped::Track(i) => tracks[i].title.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            ["1982 (2)", "The Number of the Beast", "Signals", "1983 (1)", "Holy Diver", "No year (1)", "Archives"]
+        );
     }
 
     #[test]

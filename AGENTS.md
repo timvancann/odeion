@@ -44,6 +44,9 @@ too:
 Pure, tested modules hold the decisions; `view.rs` only maps keys and clicks onto them
 and draws:
 
+- `order.rs`: the sort order set in settings (see the list views below): moving,
+  adding, turning and taking out its fields, comparing tracks by it, what the grouped
+  view and the letter rail file a track under.
 - `library.rs`: what a track is, reading one from its path, sort order, search, albums,
   and the grouped list view: grouping under artists (`grouped`) and which artist
   stays pinned on top (`pinned`).
@@ -132,6 +135,24 @@ and draws:
   which one is current, next and previous, removal.
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
   app that last reported a song, not as key presses, so this is the only way in.
+- `tags.rs`: Edit info (plan 04; Tim, 2026-11-27, "into the files of course"): the
+  sheet's rules (a field per row, typing replaces a field selected whole, number fields
+  digits only, songs that differ keep their own unless something is typed) and writing
+  title, artist, album, track, disc, year and front cover into the files. Each format
+  through its own tag (ID3v2.4 for MP3, AIFF and WAV, plus an MP3's old ID3v1 and the
+  WAV and AIFF text chunks when there; Vorbis comments and FLAC picture blocks; MP4
+  atoms), never lofty's generic tag, which drops what it can't hold; written as 2.3, ID3
+  lost the sort-order frames taggers put in. lofty's ID3 `set_date` adds a second TDRC
+  beside one read from the file (the old year kept winning), so `set_id3` removes TDRC
+  first. The tags go into a hidden copy beside the file (`.<name>.odeion`, no audio
+  extension, so a scan skips it), read back and checked (`check`: same audio
+  properties, every edited field as asked, every other item and picture of the main
+  tag still there, or nothing is written), then renamed over the file: a failure leaves
+  the song as it was and a playing song plays on from the old file. Checked on copies
+  of Tim's songs (FLAC, Ogg, AIFF, WAV, three MP3s): audio bytes and every other tag
+  unchanged. Symphonia decodes an AIFF's last frame from the chunk after the audio, so
+  a decoded AIFF can differ there by a frame while its bytes don't. The view writes on
+  a thread and re-reads each song (`scan::reread`) into the library.
 - `state.rs`: paths, settings, favourites, and the data folder: the default, or one
   chosen in settings, named by a `data-folder` note in the default folder and read once
   per run. The default is each system's usual place (`odeion` in Application Support,
@@ -164,7 +185,8 @@ New behaviour gets its rule and tests in one of these, not in `view.rs`.
 Odeion scans the folders listed in ⌘, settings (`settings.json` in the data folder below),
 none at first: the empty list asks for one (a button, or Enter). A track's Artist/Album
 path is read from the deepest listed folder holding it. Tags and embedded covers win
-over the path. A listed folder a scan can't open shows an error ("can't read
+over the path; Edit info (⌘I, a song's menu, "Edit info of all…" on an album or artist)
+changes them in the files themselves, the only time Odeion writes to a song. A listed folder a scan can't open shows an error ("can't read
 ~/Music: ...") and "can't read" beside it in settings.
 
 **Backing tracks** (Tim, 2026-11-24: bought or YouTube jam tracks that aren't songs
@@ -254,7 +276,8 @@ add a key to both or they fail.
   ⌘D favourite, ⌘A album, ⇧⌘A artist (in practice all three take the playing song, and
   ⌘A ⇧⌘A leave practice for its album or artist, as the card's menu does), ⌘S shuffle, ⌘L to the playing song (in
   practice, Follow), ⌘← ⌘→ previous and next, ⌘H hides Odeion (`cx.hide()`), ⌘1 ⌘2
-  library or practice, ⌘O add a variation, ⌘N add to a playlist, ⌘E or ⌥⌘E the EQ,
+  library or practice, ⌘O add a variation, ⌘N add to a playlist, ⌘I edit info (the
+  highlighted song, in practice the playing one), ⌘E or ⌥⌘E the EQ,
   ⌘B or ⌃⌘S the sidebar, ⌘, settings, ⌘? keys, ⌘Q. In the library and search, arrows
   and ⌃J ⌃K move, Home End or ⌘↑ ⌘↓ go to the top or bottom, ⌥Enter queues and
   ⇧⌥Enter queues at the top.
@@ -278,16 +301,17 @@ add a key to both or they fail.
   waveform or the progress bar (loop starts or ends here, marker here, all at the
   moment clicked; inside the loop also save it as a section and clear it; on the
   marker's flag, play from it and clear it), a section (loop it, export, rename, delete), a
-  song row (favourite, album, artist, queue, add to a playlist, add a variation, and
-  in a playlist remove and move; the row is highlighted), a queued song (play now, to
-  the top, remove, album, artist, add to a playlist), the now-playing card (the
+  song row (favourite, album, artist, queue, add to a playlist, add a variation, edit
+  info, and in a playlist remove and move; the row is highlighted), a queued song (play
+  now, to the top, remove, album, artist, add to a playlist, edit info), the now-playing card (the
   playing song's entries, then its loop and marker while it has them), the loop bar
   (on or off, replay, save, export, clear; without a loop, its edges at the playhead), a
   playlist in the sidebar or the search results (open, play, shuffle, queue all,
   sort by artist or title, rename, delete), Favourites in the sidebar, an artist's row in
   the grouped list (or an album's, in an artist's view), and
   the album, artist and playlist headers (play, shuffle, queue all, add all to a
-  playlist, back, or rename and delete). Rename and delete open the playlist, whose
+  playlist, edit info of all for an album or artist (and their rows), back, or rename
+  and delete). Rename and delete open the playlist, whose
   header asks for the name or "for good". Thin lines set groups apart (`Menu::then`).
   Each entry is an `Action` showing its keys, done on what was clicked rather than at
   the playhead. They open at the pointer, take `j k` / ↑ ↓ and Enter, and close on Esc
@@ -449,7 +473,8 @@ add a key to both or they fail.
   half a second here, and doing that every second made playback drop out.
 - **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), then
   the backing tracks' folders with their own "Add backing-track folder…" (row numbers
-  after them start at `Odeion::prefs_rest`),
+  after them start at `Odeion::prefs_rest`), Sort by (the sort order's fields, dragged
+  into order),
   Appearance (Enter or a click cycles Auto, Light, Dark; it means Odeion's own theme, so
   from an editor theme the first press goes back to Odeion's own), the
   theme picker (T3 and Gold first, then "Editor themes (experimental)"), which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
@@ -493,13 +518,37 @@ add a key to both or they fail.
 - **The letter rail** beside the full library (not in search, album or artist views):
   click or drag along `# A–Z` and the list glides (220 ms, eased, by setting the scroll
   offset each frame) to that letter's first artist below the favourites, highlighting
-  it. Letters follow the sort (`library::initial`), so a jump never lands out of order.
+  it. Letters follow the sort: the sort order's first field, an artist by their sort
+  name (`Order::filing`, `library::initial`), so a jump never lands out of order. With a
+  number first (`year`), there's no rail.
+- **The sort order** (plan 05; Tim, 2026-11-28, after Winamp's `%artist - %year`
+  strings, "but it's 2026": no text field, drag the order): Sort by in settings, one
+  order (Tim chose that over saved orders). It only sorts, nothing is shown from it.
+  Its fields are chips in a row (`Odeion::render_sort_row`): drag one onto another to
+  take its place (a line shows the side it lands), click its A–Z or 1–9 to turn it
+  around, × takes it out (never the last), and the fields not used sit below under Add,
+  a click or a drag bringing one in, a used one dragged there going out. Keys on the
+  row: ← → (Vim `h l`) pick, ⇧← ⇧→ (Vim `H L`) move, Enter or Space turns around or
+  adds, ⌫ (Vim `dd`) takes out. Every change is kept and re-sorts at once
+  (`Odeion::change_order`). Kept in `settings.json` as a line, `artist -year album`
+  (`Order::read`, `Order::text`). The default, `artist year album disc track title`, is
+  exactly the order before it (checked on Tim's library: only duplicate files and songs
+  without an artist moved). Numbers compare as numbers, empty values go last either way
+  round, `year` is the album's (its earliest song's, so a remaster's bonus track can't
+  split it), and artist, album and title sort by the file's sort-name tags when there
+  are some (TSOP and the like, read since `scan::READER` 3, with the genre). Library
+  order is everywhere it was (the full list, favourites, an artist's view, what plays
+  next); albums stay in track order, playlists their own, search best match first. The
+  settings sheet went from 520 to 680 px for it.
 - **Two list views**, switched in the library's title bar and kept in settings (no
   key yet): *columns* (cover, title, artist, album on one 44 px line, artist and
   album alike in the dim small type, by Tim's choice) and
   *grouped* (the full list and favourites under a row per artist with its song count,
   songs indented with their covers, without the artist; the top artist stays pinned until the next one
-  pushes it up, Tim's condition for this view). An artist's view, grouped, puts its songs
+  pushes it up, Tim's condition for this view). The rows are the sort order's first
+  field (Tim, 2026-11-28): artist rows act as before, album rows as an artist's album
+  rows, anything else (a year, a genre) is a `Row::Group` whose click highlights its
+  first song and whose menu plays, shuffles or queues the songs under it. An artist's view, grouped, puts its songs
   under a row per album (`library::by_album`; Tim, 2026-11-10: the switch did nothing
   there), pinned the same way; a click opens the album. Search, album and playlist views
   aren't grouped; album and artist views drop the columns their header (or album row)
@@ -576,7 +625,8 @@ volume, speed, pitch, undo, loop extras, bars and notes) is the current directio
 2 (the queue and sidebar) and 4 (the EQ) are built; 3 (band filters) remains. Steps 1
 (modes, keymap, right-click menus), 2 (volume, stem levels, output), 3 (speed and the
 trainer) and 4 (pitch) are built; step 7 (bars) was dropped by Tim's choice; 5 (undo),
-6 (lead-in and channel) and 8 (notes) remain.
+6 (lead-in and channel) and 8 (notes) remain. **Plan 04** (Edit info, tags written into
+the files) and **plan 05** (the sort order) are built.
 
 ## Possible features
 
@@ -594,11 +644,10 @@ Ideas Tim liked but hasn't asked for yet. Check with him before building one.
 - **Tags and covers from MusicBrainz** (Tim, 2026-11-08, on the README's roadmap): look
   up songs or an album with missing tags or no cover on MusicBrainz and the Cover Art
   Archive (by the MusicBrainz IDs already in the tags when there are some), show the
-  match, and write it into the files only after the user confirms. It breaks the
-  README's "Odeion never writes next to your songs" and is network access, so both lines
-  change with it. Tags in FLAC are Vorbis comments with a PICTURE block, not ID3; the
-  audio must stay byte-identical (FLAC's stored MD5 checks that). MusicBrainz asks for a
-  descriptive User-Agent and at most one request a second.
+  match, and write it into the files only after the user confirms. The writing is
+  `tags::write`, built for Edit info: a match can fill the Edit info sheet. It is network
+  access, so the network lines here and in the README change with it. MusicBrainz asks
+  for a descriptive User-Agent and at most one request a second.
 - **Stems from Moises, in Odeion** (Tim, 2026-11-07, waiting on API access): split a
   song into stems through the Moises developer API (now Music.AI) and add them as a
   variation. Bring your own key: each user's key in the macOS Keychain, never in

@@ -36,6 +36,12 @@ came to play it.</sub></p>
 
 - Your own music folder, opened instantly, even with thousands of songs.
 - Search as you type, albums, artists, favourites, a queue and playlists.
+- Fix a song's title, artist, album, track and disc number, year or cover from its
+  right-click menu (`⌘I`), or a whole album's at once. It's saved into the files, so
+  other players see it too.
+- Sort the library your way by dragging its fields into order: each artist's newest
+  album first, or everything by genre, then artist. Numbers sort as numbers, and
+  taggers' sort names file "The Beatles" under B.
 
 ![The library](docs/screenshots/library.png)
 
@@ -88,7 +94,8 @@ On first start Odeion asks for the folder your music is in. Add more in settings
 and there too the folders of backing tracks, which stay out of the library and show under
 Backing tracks in the sidebar.
 
-Your music stays where it is: Odeion never writes next to your songs. Its cache, loops,
+Your music stays where it is. Odeion writes to a song only when you edit its info, and
+then only its tags: the audio stays exactly as it was. Its cache, loops,
 sections, playlists and settings live in `~/Library/Application Support/odeion/`, or in
 another folder you choose in settings. Odeion only goes online when you choose Check for
 Updates in its menu, to ask GitHub for the latest release, and when you then choose
@@ -118,7 +125,8 @@ Odeion stands on these projects:
   [Symphonia](https://github.com/pdeljanov/Symphonia) for decoding.
 - [Signalsmith Stretch](https://signalsmith-audio.co.uk/code/stretch/) for changing
   speed and pitch.
-- [Lofty](https://github.com/Serial-ATA/lofty-rs) for tags and covers.
+- [Lofty](https://github.com/Serial-ATA/lofty-rs) for reading and writing tags and
+  covers.
 - [LAME](https://lame.sourceforge.io) for exporting MP3, through
   [mp3lame-encoder](https://github.com/DoumanAsh/mp3lame-encoder), and
   [libvorbis](https://xiph.org/vorbis/) with the aoTuV patches for exporting Ogg, through

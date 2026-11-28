@@ -18,8 +18,9 @@ use std::time::UNIX_EPOCH;
 const AUDIO: &[&str] = &["mp3", "flac", "wav", "aif", "aiff", "m4a", "ogg"];
 const READERS: usize = 4;
 /// The tag reader's version. Raise it when `read_tags` learns something new, and every
-/// track is read once more. 1 added the length, 2 the year and disc.
-pub const READER: u32 = 2;
+/// track is read once more. 1 added the length, 2 the year and disc, 3 the genre and
+/// sort names.
+pub const READER: u32 = 3;
 const COVER_SIZE: u32 = 256;
 
 /// An audio file on disk: path, size and modification time in seconds.
@@ -249,6 +250,19 @@ pub fn tag_in_background(todo: Vec<Track>, covers: PathBuf) -> Receiver<Track> {
     rx
 }
 
+/// A file read afresh, after Odeion wrote its tags: what its path says under the deepest
+/// of `roots` holding it, then its tags, with its new size and time so a scan doesn't
+/// read it again.
+pub fn reread(roots: &[PathBuf], path: &Path, covers: &Path) -> Track {
+    let meta = std::fs::metadata(path).ok();
+    let size = meta.as_ref().map_or(0, |m| m.len());
+    let modified = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    read_tags(Track::from_path(root_of(roots, path), path, size, modified), covers)
+}
+
 /// The track with what its tags say. A file that can't be read keeps what its path said,
 /// and is marked read so it isn't tried again until it changes.
 fn read_tags(mut track: Track, covers: &Path) -> Track {
@@ -276,6 +290,11 @@ fn read_tags(mut track: Track, covers: &Path) -> Track {
     }
     track.year = tag.date().map(|d| u32::from(d.year)).filter(|&y| y > 0);
     track.disc = tag.disk();
+    track.genre = text(tag.genre());
+    let sort = |key: ItemKey| text(tag.get_string(key).map(std::borrow::Cow::Borrowed));
+    track.sort_artist = sort(ItemKey::TrackArtistSortOrder);
+    track.sort_album = sort(ItemKey::AlbumTitleSortOrder);
+    track.sort_title = sort(ItemKey::TrackTitleSortOrder);
     let pictures = tag.pictures();
     let picture = pictures
         .iter()
@@ -370,6 +389,34 @@ mod tests {
         let titles: Vec<&str> = tracks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["X", "Y"]);
         assert_eq!(todo.len(), 2);
+    }
+
+    #[test]
+    fn reads_the_genre_and_the_names_taggers_sort_by() {
+        use lofty::config::WriteOptions;
+        use lofty::tag::Tag;
+        let dir = std::env::temp_dir().join(format!("odeion-scan-sort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.mp3");
+        let tone = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.3).collect();
+        let mp3 = crate::export::encode(&crate::export::Rendered { channels: 1, rate: 44_100, samples: tone }, crate::export::Format::Mp3);
+        std::fs::write(&path, mp3.unwrap()).unwrap();
+        let mut file = Probe::open(&path).unwrap().read().unwrap();
+        let mut tag = Tag::new(file.primary_tag_type());
+        tag.set_artist("The Beatles".into());
+        tag.set_genre("Rock".into());
+        tag.insert_text(ItemKey::TrackArtistSortOrder, "Beatles, The".into());
+        tag.insert_text(ItemKey::AlbumTitleSortOrder, "Help".into());
+        file.insert_tag(tag);
+        file.save_to_path(&path, WriteOptions::default()).unwrap();
+        let t = reread(std::slice::from_ref(&dir), &path, &dir.join("covers"));
+        assert_eq!(t.artist, "The Beatles");
+        assert_eq!(t.genre.as_deref(), Some("Rock"));
+        assert_eq!(t.sort_artist.as_deref(), Some("Beatles, The"));
+        assert_eq!(t.sort_album.as_deref(), Some("Help"));
+        assert_eq!(t.sort_title, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
