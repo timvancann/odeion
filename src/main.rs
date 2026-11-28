@@ -13,6 +13,7 @@ mod media;
 mod order;
 mod playlist;
 mod playlists;
+mod prefs;
 mod queue;
 mod regions;
 mod resume;

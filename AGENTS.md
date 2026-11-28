@@ -47,6 +47,10 @@ and draws:
 - `order.rs`: the sort order set in settings (see the list views below): moving,
   adding, turning and taking out its fields, comparing tracks by it, what the grouped
   view and the letter rail file a track under.
+- `prefs.rs`: what the settings page holds and where (plan 06): its sections, each
+  a page of groups of rows, and each row's name and the line saying what it does. The
+  highlighted row is an index into `prefs::rows` of the open section; never count rows
+  in the view (`Odeion::pref_at`, `pref_go`).
 - `library.rs`: what a track is, reading one from its path, sort order, search, albums,
   and the grouped list view: grouping under artists (`grouped`) and which artist
   stays pinned on top (`pinned`).
@@ -471,19 +475,29 @@ add a key to both or they fail.
   check compares device ids only (about 35 µs). Never list devices with
   `output_devices()` on a timer: cpal asks every device which formats it plays, about
   half a second here, and doing that every second made playback drop out.
-- **⌘, opens settings**: folders (Enter on "Add folder…" opens the macOS picker), then
-  the backing tracks' folders with their own "Add backing-track folder…" (row numbers
-  after them start at `Odeion::prefs_rest`), Sort by (the sort order's fields, dragged
-  into order),
+- **⌘, opens settings** (plan 06; Tim, 2026-11-28, after T3 Code's settings, from a
+  mockup he approved): a page in place of the sidebar and the list, the title bar and
+  the now-playing card staying (a sheet over the list first; Tim wanted what was behind
+  it blurred, GPUI can't blur, so it became a page as in T3 Code). Esc, ⌘,, the ×, the
+  title bar's settings button or its Library / Practice switch leave it (the lit mode
+  too, back to it). A rail of four
+  sections on the left (Library, Playback, Look, Keys & data; a click, ⌘1 to ⌘4, or Tab
+  and ⇧Tab round them: on the settings page those keys pick sections, not library and
+  practice), the open one's page on the right: a heading per group, a card
+  of rows under it (at most 760 px wide, centred), each row its name and a line about
+  it on the left and its value on the right, the page scrolling when it's long. ↑ ↓
+  (Vim `j k`) move through the page's rows. Library: the music folders (Enter on "Add folder…" opens the macOS
+  picker), the backing tracks' folders with their own "Add backing-track folder…", and
+  Sort by (the sort order's fields, dragged into order). Look:
   Appearance (Enter or a click cycles Auto, Light, Dark; it means Odeion's own theme, so
   from an editor theme the first press goes back to Odeion's own), the
   theme picker (T3 and Gold first, then "Editor themes (experimental)"), which works like Jasmijn's (type to filter, ↑↓ previews, Enter keeps,
   Esc restores; it shows 8 themes, so the wheel over them moves the highlight too, and
-  a click keeps one), the keyboard (Mac or Vim; Enter, Space or a click switches), and
-  the output: Enter or a click opens a picker
-  (the system's output, then each device, listed on a thread when it opens), ↑↓ or
-  `j k` move, Enter or a click plays through it, Esc closes.
-  Last, the data folder (for Tim's demos, kept apart from his own data): pick another
+  a click keeps one). Playback: the output: Enter or a click opens a picker under
+  its row (the system's output, then each device, listed on a thread when it opens),
+  ↑↓ or `j k` move, Enter or a click plays through it, Esc closes. Keys & data: the
+  keyboard (Mac or Vim; Enter, Space or a click switches), and
+  the data folder (for Tim's demos, kept apart from his own data): pick another
   folder or go back to the default, and Odeion saves where everything is, then reopens
   from the new folder (`open -n` on the bundle, or the binary again from source).
 - **Every action has a button too**, built with `Odeion::tool` (an icon, a tooltip and
@@ -539,7 +553,7 @@ add a key to both or they fail.
   are some (TSOP and the like, read since `scan::READER` 3, with the genre). Library
   order is everywhere it was (the full list, favourites, an artist's view, what plays
   next); albums stay in track order, playlists their own, search best match first. The
-  settings sheet went from 520 to 680 px for it.
+  sort row was cramped in the old one-column settings sheet, which led to plan 06.
 - **Two list views**, switched in the library's title bar and kept in settings (no
   key yet): *columns* (cover, title, artist, album on one 44 px line, artist and
   album alike in the dim small type, by Tim's choice) and
@@ -626,7 +640,8 @@ volume, speed, pitch, undo, loop extras, bars and notes) is the current directio
 (modes, keymap, right-click menus), 2 (volume, stem levels, output), 3 (speed and the
 trainer) and 4 (pitch) are built; step 7 (bars) was dropped by Tim's choice; 5 (undo),
 6 (lead-in and channel) and 8 (notes) remain. **Plan 04** (Edit info, tags written into
-the files) and **plan 05** (the sort order) are built.
+the files), **plan 05** (the sort order) and **plan 06** (settings in sections) are
+built.
 
 ## Possible features
 

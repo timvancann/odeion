@@ -19,7 +19,13 @@ release's notes on GitHub.
   as numbers, empty fields go last, an album stays together, and the sort names taggers
   write put "The Beatles" under B. Grouped, the list groups by the first field: by
   year, say, or by genre.
-- The settings sheet is wider.
+
+**Changed**
+
+- Settings open as a page of their own, in place of the library, laid out in four
+  sections: Library, Playback, Look, and Keys & data, picked in a rail on the left (or
+  with `⌘1` to `⌘4`, or Tab). Each setting says in a line what it does. The song keeps
+  playing in the card below; Esc goes back.
 
 ## 0.9.0 (2026-11-26)
 

@@ -13,6 +13,7 @@ use crate::library::{self, Grouped, Kind, Track};
 use crate::media::Media;
 use crate::menu::{Menu, Outcome, Shown, Target};
 use crate::order::{self, Field, Order};
+use crate::prefs::{self, Row as Pref, Section};
 use crate::playlist::Playlist;
 use crate::playlists::Playlists;
 use crate::queue::Queue;
@@ -80,10 +81,11 @@ const PICKER_ROWS: usize = 8;
 const SAVE_EVERY: usize = 250;
 
 
-/// The ⌘, sheet: the highlighted row (each folder, then "add folder", the theme, the
-/// keyboard, the output), and the theme picker when it is open.
+/// The ⌘, page: the open section and its highlighted row (an index into
+/// `prefs::rows`), and the theme or output picker when one is open.
 #[derive(Default)]
 struct Prefs {
+    section: prefs::Section,
     row: usize,
     picker: Option<Picker>,
     /// The first `d` of `dd` was pressed.
@@ -416,7 +418,7 @@ pub struct Odeion {
     /// What's typed on the ⌘? sheet, to find keys by.
     help_query: String,
     settings: Settings,
-    /// The ⌘, sheet, when open.
+    /// The ⌘, page, when open.
     prefs: Option<Prefs>,
     /// The first key of a two-key vim command (`gg`, `zz`, `dd`).
     pending: Option<char>,
@@ -1099,32 +1101,73 @@ impl Odeion {
         }
     }
 
-    /// Removes the folder on settings row `row`, a music or a backing-track folder; any
-    /// other row is left alone.
-    fn remove_folder_row(&mut self, row: usize) {
-        let (music, backing) = (self.settings.folders.len(), self.settings.backing.len());
-        if row < music {
-            self.remove_folder(row);
-        } else if row > music && row <= music + backing {
-            self.remove_backing(row - music - 1);
+    /// Removes the folder `row` lists, a music or a backing-track folder; any other row is
+    /// left alone. The highlight stays on the row now in its place.
+    fn remove_folder_row(&mut self, row: Pref) {
+        match row {
+            Pref::Folder(i) => self.remove_folder(i),
+            Pref::Backing(i) => self.remove_backing(i),
+            _ => return,
+        }
+        let last = self.pref_rows().len().saturating_sub(1);
+        if let Some(prefs) = &mut self.prefs {
+            prefs.row = prefs.row.min(last);
         }
     }
 
-    /// The settings rows run: the music folders, "Add folder…", the backing-track folders,
-    /// "Add backing-track folder…", then from this row the sort order, Appearance, the
-    /// theme, the keyboard, the output and the data folder.
-    fn prefs_rest(&self) -> usize {
-        self.settings.folders.len() + self.settings.backing.len() + 2
+    /// What decides the settings' rows now.
+    fn pref_layout(&self) -> prefs::Layout {
+        prefs::Layout {
+            folders: self.settings.folders.len(),
+            backing: self.settings.backing.len(),
+            custom_data: custom_data_dir(),
+        }
+    }
+
+    /// The open section's rows.
+    fn pref_rows(&self) -> Vec<Pref> {
+        let section = self.prefs.as_ref().map(|p| p.section).unwrap_or_default();
+        prefs::rows(section, self.pref_layout())
+    }
+
+    /// The highlighted settings row, while no picker is open over it.
+    fn pref_at(&self) -> Option<Pref> {
+        let prefs = self.prefs.as_ref().filter(|p| p.picker.is_none() && p.choosing.is_none())?;
+        self.pref_rows().get(prefs.row).copied()
+    }
+
+    /// Opens `section` of the settings at its first row, closing a theme picker (back to
+    /// the saved theme) or output picker left open on the page before.
+    fn pref_section(&mut self, section: Section) {
+        let Some(prefs) = &mut self.prefs else { return };
+        if let Some(picker) = prefs.picker.take()
+            && let Some(t) = picker.themes.into_iter().find(|t| t.saved() == self.settings.theme)
+        {
+            theme::set_active(t);
+        }
+        (prefs.choosing, prefs.section, prefs.row) = (None, section, 0);
+    }
+
+    /// Highlights `row` in the settings, opening its section.
+    fn pref_go(&mut self, row: Pref) {
+        let section = prefs::Section::ALL
+            .into_iter()
+            .find(|&s| prefs::rows(s, self.pref_layout()).contains(&row))
+            .unwrap_or_default();
+        let at = prefs::rows(section, self.pref_layout()).iter().position(|&r| r == row).unwrap_or(0);
+        if let Some(prefs) = &mut self.prefs {
+            (prefs.section, prefs.row) = (section, at);
+        }
     }
 
     /// Changes the sort order (by a drag, a click or a key on its settings row), keeps it
     /// and re-sorts the library at once, the highlighted song staying highlighted. The
     /// row's highlight goes to the field `change` returns.
     fn change_order(&mut self, change: impl FnOnce(&mut Order) -> usize) {
-        let rest = self.prefs_rest();
         let chip = change(&mut self.order);
+        self.pref_go(Pref::Sort);
         if let Some(prefs) = &mut self.prefs {
-            (prefs.row, prefs.chip) = (rest, chip.min(order::Field::ALL.len() - 1));
+            prefs.chip = chip.min(order::Field::ALL.len() - 1);
         }
         let text = self.order.text();
         if text != self.settings.sort {
@@ -1246,7 +1289,7 @@ impl Odeion {
         }
     }
 
-    /// Closes the ⌘, sheet, dropping a theme that was only being previewed.
+    /// Closes the ⌘, page, dropping a theme that was only being previewed.
     fn close_prefs(&mut self) {
         if let Some(Prefs { picker: Some(picker), .. }) = self.prefs.take()
             && let Some(t) = picker.themes.into_iter().find(|t| t.saved() == self.settings.theme)
@@ -1297,10 +1340,11 @@ impl Odeion {
         self.settings.keyboard == Keyboard::Vim
     }
 
-    /// Keys while the ⌘, sheet is open. `typed` is what the key types in the theme filter.
+    /// Keys while the ⌘, page is open. `typed` is what the key types in the theme filter.
+    /// ⌘1 to ⌘4 and Tab pick its sections here, not library and practice.
     fn prefs_key(&mut self, k: &gpui::Keystroke, typed: Option<String>, cx: &gpui::App) {
         let (cmd, ctrl) = keys::command_keys(k.modifiers.platform, k.modifiers.control);
-        let (vim, rest) = (self.vim(), self.prefs_rest());
+        let vim = self.vim();
         let Some(prefs) = &mut self.prefs else { return };
         let vim = vim && prefs.picker.is_none() && !cmd && !ctrl;
         let up = k.key == "up" || (ctrl && k.key == "k") || (vim && k.key == "k");
@@ -1355,21 +1399,32 @@ impl Odeion {
             }
             return;
         }
-        let row = prefs.row;
-        if row == rest && !cmd && !ctrl && self.sort_key(k, vim, dd) {
+        // ⌘1 to ⌘4 open a section, Tab and ⇧Tab go round them.
+        let section = match k.key.as_str() {
+            digit if cmd => Section::numbered(digit),
+            "tab" => Some(prefs.section.step(!k.modifiers.shift)),
+            _ => None,
+        };
+        if let Some(section) = section {
+            (prefs.section, prefs.row) = (section, 0);
+            return;
+        }
+        let (row, last) = (prefs.row, self.pref_rows().len().saturating_sub(1));
+        let at = self.pref_at();
+        if at == Some(Pref::Sort) && !cmd && !ctrl && self.sort_key(k, vim, dd) {
             return;
         }
         let Some(prefs) = &mut self.prefs else { return };
-        match k.key.as_str() {
-            "escape" => self.close_prefs(),
+        match (k.key.as_str(), at) {
+            ("escape", _) => self.close_prefs(),
             _ if up => prefs.row = row.saturating_sub(1),
-            _ if down => prefs.row = (row + 1).min(rest + 5 + custom_data_dir() as usize),
+            _ if down => prefs.row = (row + 1).min(last),
             // The row after a removed folder takes its place, or the Add row below.
-            _ if dd || k.key == "backspace" => self.remove_folder_row(row),
-            "enter" | "space" if row == rest + 1 => self.next_appearance(cx),
-            "enter" | "space" if row == rest + 2 => self.open_picker(cx),
-            "enter" | "space" if row == rest + 3 => self.toggle_keyboard(),
-            "enter" | "space" if row == rest + 4 => self.open_outputs(),
+            (_, Some(at)) if dd || k.key == "backspace" => self.remove_folder_row(at),
+            ("enter" | "space", Some(Pref::Appearance)) => self.next_appearance(cx),
+            ("enter" | "space", Some(Pref::Theme)) => self.open_picker(cx),
+            ("enter" | "space", Some(Pref::Keyboard)) => self.toggle_keyboard(),
+            ("enter" | "space", Some(Pref::Output)) => self.open_outputs(),
             _ => {}
         }
     }
@@ -2182,6 +2237,7 @@ impl Odeion {
     /// the current mode filled with the accent: they are two different places.
     fn mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
+        let in_prefs = self.prefs.is_some();
         let segment = |id: &'static str, icon: &'static str, label: &'static str, on: bool| {
             div()
                 .id(id)
@@ -2203,9 +2259,19 @@ impl Odeion {
                         |odeion, _, _, cx| {
                             // Not also a click on the title bar.
                             cx.stop_propagation();
+                            // Out of the settings page too, into the mode clicked.
+                            odeion.close_prefs();
                             odeion.act(Action::Practice, cx);
                         },
                     ))
+                })
+                // On the settings page the lit mode is the way back to it.
+                .when(on && in_prefs, |d| {
+                    d.cursor_pointer().on_click(cx.listener(|odeion, _, _, cx| {
+                        cx.stop_propagation();
+                        odeion.close_prefs();
+                        cx.notify();
+                    }))
                 })
         };
         pill()
@@ -3046,23 +3112,13 @@ impl Odeion {
         if self.prefs.is_some() {
             // Opening a folder dialog or reopening odeion needs the context, so Enter on "add
             // folder" and the data folder's rows is here.
-            let (add, rest) = (self.settings.folders.len(), self.prefs_rest());
             let enter = matches!(k.key.as_str(), "enter" | "space");
-            let row = self
-                .prefs
-                .as_ref()
-                .filter(|p| p.picker.is_none() && p.choosing.is_none())
-                .map(|p| p.row);
-            if enter && row == Some(add) {
-                self.pick_folders(cx);
-            } else if enter && row == Some(rest - 1) {
-                self.pick_backing(cx);
-            } else if enter && row == Some(rest + 5) {
-                self.pick_data_dir(cx);
-            } else if enter && row == Some(rest + 6) {
-                self.switch_data_dir(None, cx);
-            } else {
-                self.prefs_key(k, typed, cx);
+            match self.pref_at() {
+                Some(Pref::AddFolder) if enter => self.pick_folders(cx),
+                Some(Pref::AddBacking) if enter => self.pick_backing(cx),
+                Some(Pref::DataFolder) if enter => self.pick_data_dir(cx),
+                Some(Pref::DefaultDataFolder) if enter => self.switch_data_dir(None, cx),
+                _ => self.prefs_key(k, typed, cx),
             }
             cx.notify();
             return;
@@ -8546,9 +8602,7 @@ impl Odeion {
         let fields_now = fields.clone();
         let (focus, soft) = (t.focus, t.accent_soft);
         let picked = |chip: usize| lit && prefs.chip == chip;
-        let caption = |text: &'static str| {
-            div().w(px(56.)).flex_none().text_sm().text_color(rgb(t.text_dim)).child(text)
-        };
+        let caption = |text: &'static str| div().flex_none().text_xs().text_color(rgb(t.text_dim)).child(text);
         let chip = |id: (&'static str, usize), on: bool| {
             div()
                 .id(id)
@@ -8613,9 +8667,9 @@ impl Odeion {
                     )
                 })
                 .on_click(cx.listener(move |odeion, _, _, cx| {
-                    let rest = odeion.prefs_rest();
+                    odeion.pref_go(Pref::Sort);
                     if let Some(prefs) = &mut odeion.prefs {
-                        (prefs.row, prefs.chip) = (rest, i);
+                        prefs.chip = i;
                     }
                     cx.notify();
                 }))
@@ -8662,8 +8716,7 @@ impl Odeion {
         });
         let order_line = div()
             .id("sort-fields")
-            .flex_1()
-            .min_w_0()
+            .w_full()
             .flex()
             .flex_wrap()
             .items_center()
@@ -8680,6 +8733,7 @@ impl Odeion {
             }));
         let add_line = div()
             .id("sort-unused")
+            .w_full()
             .flex()
             .items_center()
             .gap_3()
@@ -8701,214 +8755,401 @@ impl Odeion {
                 });
                 cx.notify();
             }));
-        div()
-            .id("sort")
-            .px_2()
-            .py_1p5()
-            .flex()
+        pref_row("pref-sort", lit)
+            .flex_col()
             .items_start()
             .gap_3()
-            .rounded_md()
-            .map(|d| selected_cues(d, lit))
-            .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
-            .child(div().pt(px(6.)).child(ui::icon("arrow-down-wide-narrow", 16., if lit { t.accent } else { t.text_dim })))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .w_full()
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().flex().items_center().gap_3().child(caption("Sort by")).child(order_line))
-                    .when(!unused.is_empty(), |d| d.child(add_line)),
+                    .items_start()
+                    .gap_3()
+                    .child(pref_words(Pref::Sort, lit))
+                    .when(self.order != Order::default(), |d| {
+                        d.child(self.choice("sort-default", "Default", "", t.text, cx, |odeion| {
+                            odeion.change_order(|o| {
+                                *o = Order::default();
+                                0
+                            })
+                        }))
+                    }),
             )
-            .when(self.order != Order::default(), |d| {
-                d.child(self.choice("sort-default", "Default", "", t.text, cx, |odeion| {
-                    odeion.change_order(|o| {
-                        *o = Order::default();
-                        0
-                    })
-                }))
-            })
+            .child(order_line)
+            .when(!unused.is_empty(), |d| d.child(add_line))
             .on_click(cx.listener(|odeion, _, _, cx| {
-                let rest = odeion.prefs_rest();
-                if let Some(prefs) = &mut odeion.prefs {
-                    prefs.row = rest;
-                }
+                odeion.pref_go(Pref::Sort);
                 cx.notify();
             }))
             .into_any_element()
     }
 
-    /// The ⌘, sheet: the folders to scan and the theme. Esc, ⌘, or a click outside closes it.
-
+    /// The ⌘, page, in place of the sidebar and the list: a rail of sections beside the
+    /// open one's page, a card of rows per group, each row its name and a line about it
+    /// with its control on the right (`prefs.rs` says what's where). Esc or ⌘, leaves it.
     fn render_prefs(&self, prefs: &Prefs, cx: &mut Context<Self>) -> impl IntoElement {
         let t = t();
-        let folders = &self.settings.folders;
-        let title = |text: &str| {
-            div()
-                .pt_2()
-                .pb_1()
-                .font_family(MONO)
-                .text_xs()
-                .text_color(rgb(t.text_dim))
-                .child(text.to_string())
-        };
-        let row = |id: (&'static str, usize), lit: bool, icon: &str, label: String| {
-            div()
-                .id(id)
-                .h(px(34.))
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_3()
-                .rounded_md()
-                .map(|d| selected_cues(d, lit))
-                .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
-                .cursor_pointer()
-                .child(ui::icon(icon, 16., if lit { t.accent } else { t.text_dim }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                        .text_color(rgb(t.text))
-                        .child(label),
-                )
-        };
-        let lit = |r: usize| prefs.picker.is_none() && prefs.row == r;
-
-        // The music folders, then the backing tracks' (a song counts for the deepest folder
-        // holding it, so a backing-track folder inside the music folder takes its own).
-        let roots = self.settings.roots();
-        let counts = scan::per_root(&roots, &self.tracks);
-        let add_row = |r: usize, id: usize, label: &str, backing: bool, cx: &mut Context<Self>| {
-            row(("add", id), lit(r), "plus", label.into()).on_click(cx.listener(move |odeion, _, _, cx| {
-                if backing {
-                    odeion.pick_backing(cx);
-                } else {
-                    odeion.pick_folders(cx);
-                }
-                cx.notify();
-            }))
-        };
-        let mut body = div().flex().flex_col().child(title("Folders"));
-        for (k, folder) in roots.iter().enumerate() {
-            let backing = k >= folders.len();
-            if k == folders.len() {
-                body = body
-                    .child(add_row(k, 0, "Add folder…", false, cx))
-                    .child(title("Backing tracks, kept out of the library"));
+        let rows = self.pref_rows();
+        let picked = rows.get(prefs.row).copied().filter(|_| prefs.picker.is_none() && prefs.choosing.is_none());
+        // A song counts for the deepest folder holding it, so a backing-track folder
+        // inside the music folder takes its own.
+        let counts = scan::per_root(&self.settings.roots(), &self.tracks);
+        let mut page: Vec<gpui::AnyElement> = Vec::new();
+        let mut n = 0;
+        for group in prefs::groups(prefs.section, self.pref_layout()) {
+            let mut card = div().flex().flex_col().rounded_lg().border_1().border_color(rgb(t.border)).overflow_hidden();
+            for (r, &row) in group.rows.iter().enumerate() {
+                let el = self.render_pref(row, n, picked == Some(row), prefs, &counts, cx);
+                card = card.child(div().when(r > 0, |d| d.border_t_1().border_color(rgb(t.border))).child(el));
+                n += 1;
             }
-            // Its settings row: the backing tracks' come after "Add folder…".
-            let i = if backing { k + 1 } else { k };
-            // A folder the last scan couldn't open says so, and why on hover.
-            let unreadable = self.unreadable.iter().find(|(p, _)| p == folder).map(|(_, why)| why.clone());
-            body = body.child(
-                row(("folder", k), lit(i), if backing { "audio-lines" } else { "folder" }, tilde(folder))
-                    .child(match unreadable {
-                        Some(why) => div()
-                            .id(("unreadable", k))
-                            .flex_none()
-                            .font_family(MONO)
-                            .text_xs()
-                            .text_color(rgb(t.danger))
-                            .slow_tooltip(self.tip(format!("Can't read it: {why}"), &[]))
-                            .child("can't read"),
-                        None => div()
-                            .id(("songs", k))
-                            .flex_none()
+            page.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(t.text))
+                                    .child(group.heading),
+                            )
+                            .when(!group.about.is_empty(), |d| {
+                                d.child(div().text_xs().text_color(rgb(t.text_dim)).child(group.about))
+                            }),
+                    )
+                    .child(card)
+                    .into_any_element(),
+            );
+        }
+        let rail = div()
+            .w(px(184.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .p_3()
+            .bg(rgb(t.bg))
+            .border_r_1()
+            .border_color(rgb(t.border))
+            .child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .pb_3()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(t.text))
+                    .child("Settings"),
+            )
+            .children(Section::ALL.iter().enumerate().map(|(i, &section)| {
+                let on = section == prefs.section;
+                div()
+                    .id(("pref-section", i))
+                    .h(px(32.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(rgb(t.raised)))
+                    .when(!on, |d| d.hover(|d| d.bg(rgb(t.hover))))
+                    .child(ui::icon(section.icon(), 14., if on { t.accent } else { t.text_dim }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                            .text_color(rgb(if on { t.text } else { t.text_dim }))
+                            .child(section.label()),
+                    )
+                    .child(
+                        div()
                             .font_family(MONO)
                             .text_xs()
                             .text_color(rgb(t.text_dim))
-                            .child(format!("{} {}", ui::count(counts[k]), if backing { "tracks" } else { "songs" })),
-                    })
+                            .child(keys::on_this_system(&format!("⌘{}", i + 1)).into_owned()),
+                    )
                     .on_click(cx.listener(move |odeion, _, _, cx| {
-                        if let Some(prefs) = &mut odeion.prefs {
-                            prefs.row = i;
-                        }
+                        odeion.pref_section(section);
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .id(("remove", k))
-                            .size(px(HIT))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .slow_tooltip(self.tip("Remove this folder", &[]))
-                            .hover(|d| d.bg(rgb(t.hover)))
-                            .child(ui::icon("x", 14., t.text_dim))
-                            .on_click(cx.listener(move |odeion, _, _, cx| {
-                                cx.stop_propagation();
-                                odeion.remove_folder_row(i);
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
-        if self.settings.backing.is_empty() {
-            body = body
-                .child(add_row(folders.len(), 0, "Add folder…", false, cx))
-                .child(title("Backing tracks, kept out of the library"));
-        }
-        let rest = self.prefs_rest();
-        body = body
-            .child(add_row(rest - 1, 1, "Add backing-track folder…", true, cx))
-            .child(title("Library"))
-            .child(self.render_sort_row(prefs, lit(rest), cx))
-            .child(title("Theme"))
-            .child(
-                row(("appearance", 0), lit(rest + 1), "palette", match theme::is_own(&self.settings.theme) {
-                    true => format!("Appearance: {}", self.settings.appearance.label()),
-                    false => format!("Appearance: from the editor theme; Enter for Odeion's {}", self.settings.appearance.label()),
-                })
-                    .on_click(cx.listener(|odeion, _, _, cx| {
-                        odeion.next_appearance(cx);
-                        cx.notify();
-                    })),
-            );
-        let theme_label = match self.settings.theme.as_str() {
-            "" => format!("Theme: {}", theme::OWN),
-            name if theme::is_own(name) => format!("Theme: {name}"),
-            name => format!("Theme: {name} (editor theme)"),
+            }));
+        let vim = self.vim();
+        let hint = match picked {
+            _ if prefs.choosing.is_some() => "↑↓ move   Enter or a click plays through it   Esc closes",
+            _ if prefs.picker.is_some() => "type to filter   ↑↓ or scroll to preview   Enter or a click keeps   Esc restores",
+            Some(Pref::Sort) if vim => "h l pick   H L move   Enter turns around or adds   dd takes out   drag to reorder",
+            Some(Pref::Sort) => "← → pick   ⇧← ⇧→ move   Enter turns around or adds   ⌫ takes out   drag to reorder",
+            Some(row) if row.is_folder() && vim => "j k move   dd removes the folder   Tab or ⌘1–4 sections   Esc close",
+            Some(row) if row.is_folder() => "↑↓ move   ⌫ removes the folder   Tab or ⌘1–4 sections   Esc close",
+            _ if vim => "j k move   Enter or a click chooses   Tab or ⌘1–4 sections   Esc close",
+            _ => "↑↓ move   Enter or a click chooses   Tab or ⌘1–4 sections   Esc close",
         };
-        body = match &prefs.picker {
-            None => body.child(
-                row(("theme", 0), lit(rest + 2), "palette", theme_label)
-                    .on_click(cx.listener(|odeion, _, _, cx| {
-                        odeion.open_picker(cx);
-                        cx.notify();
-                    })),
-            ),
-            Some(picker) => {
-                let shown = picker.shown();
-                let editors: Vec<bool> = shown.iter().map(|t| t.editor).collect();
-                let first = picker.selected.saturating_sub(PICKER_ROWS - 1);
-                body.child(
+        let hint = keys::on_this_system(hint).into_owned();
+        let main = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_5()
+                    .pt_4()
+                    .pb_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_color(rgb(t.text_dim)).child("Settings /"))
+                    .child(div().flex_1().text_color(rgb(t.text)).child(prefs.section.label()))
+                    .child(self.tool("prefs-close", "x", "Close", Action::Settings, false, cx)),
+            )
+            // The groups keep a readable width in a wide window, centred as in T3 Code.
+            .child(
+                div()
+                    .id("prefs-page")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_5()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_5()
+                    .children(page.into_iter().map(|group| div().w_full().max_w(px(760.)).child(group))),
+            )
+            .child(div().px_5().py_3().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(hint));
+        div()
+            .id("prefs")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(rgb(t.surface))
+            .border_1()
+            .border_color(rgb(t.border))
+            .child(rail)
+            .child(main)
+    }
+
+    /// Settings row `row`, the `n`th of its page.
+    fn render_pref(&self, row: Pref, n: usize, lit: bool, prefs: &Prefs, counts: &[usize], cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = t();
+        let select = move |odeion: &mut Odeion| odeion.pref_go(row);
+        let folder = match row {
+            Pref::Folder(i) => self.settings.folders.get(i).map(|f| (f, i, false)),
+            Pref::Backing(i) => self.settings.backing.get(i).map(|f| (f, self.settings.folders.len() + i, true)),
+            _ => None,
+        };
+        if let Some((folder, k, backing)) = folder {
+            // A folder the last scan couldn't open says so, and why on hover.
+            let unreadable = self.unreadable.iter().find(|(p, _)| p == folder).map(|(_, why)| why.clone());
+            return pref_row(("pref-row", n), lit)
+                .py_2()
+                .child(ui::icon(if backing { "audio-lines" } else { "folder" }, 14., t.text_dim))
+                .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_sm().text_color(rgb(t.text)).child(tilde(folder)))
+                .child(match unreadable {
+                    Some(why) => div()
+                        .id(("unreadable", k))
+                        .flex_none()
+                        .font_family(MONO)
+                        .text_xs()
+                        .text_color(rgb(t.danger))
+                        .slow_tooltip(self.tip(format!("Can't read it: {why}"), &[]))
+                        .child("can't read"),
+                    None => div()
+                        .id(("songs", k))
+                        .flex_none()
+                        .font_family(MONO)
+                        .text_xs()
+                        .text_color(rgb(t.text_dim))
+                        .child(format!("{} {}", ui::count(counts.get(k).copied().unwrap_or(0)), if backing { "tracks" } else { "songs" })),
+                })
+                .child(
                     div()
-                        .h(px(34.))
-                        .px_2()
+                        .id(("remove", k))
+                        .size(px(HIT))
+                        .flex_none()
                         .flex()
                         .items_center()
-                        .gap_3()
-                        .rounded_md()
-                        .bg(rgb(t.bg))
-                        .child(ui::icon("search", 14., t.accent))
-                        .child(if picker.query.is_empty() {
-                            div().text_sm().text_color(rgb(t.text_dim)).child("type to filter")
-                        } else {
-                            div()
-                                .font_family(MONO)
-                                .text_sm()
-                                .text_color(rgb(t.text))
-                                .child(picker.query.clone())
-                        }),
+                        .justify_center()
+                        .rounded_sm()
+                        .slow_tooltip(self.tip("Remove this folder", &[]))
+                        .hover(|d| d.bg(rgb(t.hover)))
+                        .child(ui::icon("x", 14., t.text_dim))
+                        .on_click(cx.listener(move |odeion, _, _, cx| {
+                            cx.stop_propagation();
+                            odeion.pref_go(row);
+                            odeion.remove_folder_row(row);
+                            cx.notify();
+                        })),
                 )
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    select(odeion);
+                    cx.notify();
+                }))
+                .into_any_element();
+        }
+        let value = |text: String| {
+            div()
+                .flex_none()
+                .max_w(px(280.))
+                .h(px(28.))
+                .px_3()
+                .flex()
+                .items_center()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(t.border))
+                .bg(rgb(t.raised))
+                .text_sm()
+                .text_color(rgb(t.text))
+                .child(div().truncate().child(text))
+        };
+        let setting = |shown: String| pref_row(("pref-row", n), lit).child(pref_words(row, lit)).child(value(shown));
+        let system = prefs.system.as_ref().map_or("none".to_string(), |o| o.name.clone());
+        match row {
+            Pref::AddFolder | Pref::AddBacking => pref_row(("pref-row", n), lit)
+                .py_2()
+                .child(ui::icon("plus", 14., t.text_dim))
+                .child(div().flex_1().text_sm().text_color(rgb(t.text_dim)).child(row.title()))
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    select(odeion);
+                    if row == Pref::AddBacking {
+                        odeion.pick_backing(cx);
+                    } else {
+                        odeion.pick_folders(cx);
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+            Pref::Sort => self.render_sort_row(prefs, lit, cx),
+            Pref::Appearance => setting(match theme::is_own(&self.settings.theme) {
+                true => self.settings.appearance.label().to_string(),
+                false => "From the editor theme".to_string(),
+            })
+            .on_click(cx.listener(move |odeion, _, _, cx| {
+                select(odeion);
+                odeion.next_appearance(cx);
+                cx.notify();
+            }))
+            .into_any_element(),
+            Pref::Theme => {
+                let name = match self.settings.theme.as_str() {
+                    "" => theme::OWN.to_string(),
+                    name if theme::is_own(name) => name.to_string(),
+                    name => format!("{name} (editor theme)"),
+                };
+                let head = setting(name).on_click(cx.listener(move |odeion, _, _, cx| {
+                    select(odeion);
+                    odeion.open_picker(cx);
+                    cx.notify();
+                }));
+                match &prefs.picker {
+                    None => head.into_any_element(),
+                    Some(picker) => div()
+                        .flex()
+                        .flex_col()
+                        .child(head)
+                        .child(self.render_theme_picker(picker, cx))
+                        .into_any_element(),
+                }
+            }
+            Pref::Keyboard => setting(if self.vim() { "Vim".to_string() } else { "Mac".to_string() })
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    select(odeion);
+                    odeion.toggle_keyboard();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            Pref::Output => {
+                let output = match (&self.settings.output, &prefs.chosen) {
+                    (None, _) => format!("The system's, now {system}"),
+                    (Some(_), Some(name)) => name.clone(),
+                    (Some(_), None) => format!("Not connected; playing through {system}"),
+                };
+                let head = setting(output).on_click(cx.listener(move |odeion, _, _, cx| {
+                    select(odeion);
+                    odeion.open_outputs();
+                    cx.notify();
+                }));
+                let list = match prefs.choosing {
+                    None => None,
+                    Some(_) if prefs.listing.is_some() => {
+                        Some(div().px_4().pb_3().text_sm().text_color(rgb(t.text_dim)).child("Listing devices…"))
+                    }
+                    Some(at) => {
+                        let entries = std::iter::once((format!("The system's output, now {system}"), None))
+                            .chain(prefs.outputs.iter().map(|o| (o.name.clone(), Some(o.id.clone()))));
+                        Some(div().px_2().pb_2().flex().flex_col().children(entries.enumerate().map(|(i, (name, id))| {
+                            pick_item(("pick-output", i), i == at, "headphones", name)
+                                .children((id == self.settings.output).then(|| ui::icon("check", 14., t.text_dim)))
+                                .on_click(cx.listener(move |odeion, _, _, cx| {
+                                    odeion.choose_output(i);
+                                    cx.notify();
+                                }))
+                        })))
+                    }
+                };
+                div().flex().flex_col().child(head).children(list).into_any_element()
+            }
+            Pref::DataFolder => {
+                let data = state::data_dir();
+                setting(if custom_data_dir() { tilde(&data) } else { format!("The default, {}", tilde(&data)) })
+                    .on_click(cx.listener(move |odeion, _, _, cx| {
+                        select(odeion);
+                        odeion.pick_data_dir(cx);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+            Pref::DefaultDataFolder => pref_row(("pref-row", n), lit)
+                .child(pref_words(row, lit))
+                .on_click(cx.listener(move |odeion, _, _, cx| {
+                    select(odeion);
+                    odeion.switch_data_dir(None, cx);
+                }))
+                .into_any_element(),
+            Pref::Folder(_) | Pref::Backing(_) => div().into_any_element(),
+        }
+    }
+
+    /// The theme picker open under its row: a filter, then the themes, Odeion's own first.
+    fn render_theme_picker(&self, picker: &Picker, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = t();
+        let shown = picker.shown();
+        let editors: Vec<bool> = shown.iter().map(|t| t.editor).collect();
+        let first = picker.selected.saturating_sub(PICKER_ROWS - 1);
+        let heading = |text: &'static str| div().px_2().pt_2().pb_1().font_family(MONO).text_xs().text_color(rgb(t.text_dim)).child(text);
+        div()
+            .px_2()
+            .pb_2()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(34.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded_md()
+                    .bg(rgb(t.bg))
+                    .child(ui::icon("search", 14., t.accent))
+                    .child(if picker.query.is_empty() {
+                        div().text_sm().text_color(rgb(t.text_dim)).child("type to filter")
+                    } else {
+                        div().font_family(MONO).text_sm().text_color(rgb(t.text)).child(picker.query.clone())
+                    }),
+            )
                 // The wheel moves the highlight, previewing as ↑↓ do, so every theme
                 // can be reached with the mouse; a click keeps one.
                 .child(
@@ -8933,8 +9174,8 @@ impl Odeion {
                             let chosen = theme.clone();
                             // Odeion's own first, the editor themes under a heading of their own.
                             let heading = (theme.editor && (i == first || !editors[i - 1]))
-                                .then(|| title("Editor themes (experimental)").into_any_element());
-                            let row = row(("pick", i), i == picker.selected, "palette", theme.name.clone())
+                                .then(|| heading("Editor themes (experimental)").into_any_element());
+                            let row = pick_item(("pick", i), i == picker.selected, "palette", theme.name.clone())
                                 .children((theme.saved() == self.settings.theme).then(|| ui::icon("check", 14., t.text_dim)))
                                 .on_click(cx.listener(move |odeion, _, _, cx| {
                                     odeion.keep_theme(chosen.clone(), cx);
@@ -8944,106 +9185,62 @@ impl Odeion {
                             heading.into_iter().chain([row])
                         })),
                 )
-            }
-        };
-        let keyboard_label = if self.vim() { "Keyboard: Vim" } else { "Keyboard: Mac" };
-        body = body.child(title("Keys")).child(
-            row(("keyboard", 0), lit(rest + 3), "keyboard", keyboard_label.into()).on_click(
-                cx.listener(|odeion, _, _, cx| {
-                    odeion.toggle_keyboard();
-                    cx.notify();
-                }),
-            ),
-        );
-        let system = prefs.system.as_ref().map_or("none".to_string(), |o| o.name.clone());
-        let output = match (&self.settings.output, &prefs.chosen) {
-            (None, _) => format!("The system's output, now {system}"),
-            (Some(_), Some(name)) => name.clone(),
-            (Some(_), None) => format!("A device not connected now; playing through {system}"),
-        };
-        body = body.child(title("Output"));
-        body = match prefs.choosing {
-            None => body.child(
-                row(("output", 0), lit(rest + 4), "headphones", output).on_click(cx.listener(|odeion, _, _, cx| {
-                    odeion.open_outputs();
-                    cx.notify();
-                })),
-            ),
-            Some(_) if prefs.listing.is_some() => body.child(row(("output", 0), false, "headphones", "Listing devices…".into())),
-            Some(at) => {
-                let entries = std::iter::once((format!("The system's output, now {system}"), None))
-                    .chain(prefs.outputs.iter().map(|o| (o.name.clone(), Some(o.id.clone()))));
-                body.children(entries.enumerate().map(|(i, (name, id))| {
-                    row(("pick-output", i), i == at, "headphones", name)
-                        .children((id == self.settings.output).then(|| ui::icon("check", 14., t.text_dim)))
-                        .on_click(cx.listener(move |odeion, _, _, cx| {
-                            odeion.choose_output(i);
-                            cx.notify();
-                        }))
-                }))
-            }
-        };
-        let data = state::data_dir();
-        let custom = custom_data_dir();
-        let label = if custom { tilde(&data) } else { format!("The default, {}", tilde(&data)) };
-        body = body.child(title("Data")).child(
-            row(("data", 0), lit(rest + 5), "folder", label).on_click(cx.listener(|odeion, _, _, cx| {
-                odeion.pick_data_dir(cx);
-                cx.notify();
-            })),
-        );
-        if custom {
-            body = body.child(
-                row(("data", 1), lit(rest + 6), "x", "Back to the default folder".into()).on_click(
-                    cx.listener(|odeion, _, _, cx| odeion.switch_data_dir(None, cx)),
-                ),
-            );
-        }
-        let hint = match (prefs.picker.is_some(), self.vim()) {
-            _ if prefs.choosing.is_some() => "↑↓ move   Enter or a click plays through it   Esc closes",
-            _ if prefs.picker.is_none() && prefs.row == self.prefs_rest() && self.vim() => {
-                "h l pick   H L move   Enter turns it around or adds it   dd takes it out   drag to reorder"
-            }
-            _ if prefs.picker.is_none() && prefs.row == self.prefs_rest() => {
-                "← → pick   ⇧← ⇧→ move   Enter turns it around or adds it   ⌫ takes it out   drag to reorder"
-            }
-            (true, _) => "↑↓ or scroll to preview   Enter or a click keeps   Esc restores",
-            (false, true) => "j k move   Enter or a click chooses   dd remove folder   Esc close",
-            (false, false) => "↑↓ move   Enter or a click chooses   ⌫ remove folder   Esc close",
-        };
-        let hint = keys::on_this_system(hint).into_owned();
-
-        overlay("prefs")
-            .on_click(cx.listener(|odeion, _, _, cx| {
-                odeion.close_prefs();
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .id("prefs-sheet")
-                    .w(px(680.))
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .p_5()
-                    .rounded_lg()
-                    .bg(rgb(t.surface))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    // A click inside the sheet is not a click outside it.
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(self.sheet_header("settings-2", "Settings", self.tool("prefs-close", "x", "Close", Action::Settings, false, cx)))
-                    .child(body)
-                    .child(
-                        div()
-                            .pt_2()
-                            .font_family(MONO)
-                            .text_xs()
-                            .text_color(rgb(t.text_dim))
-                            .child(hint),
-                    ),
-            )
+                .into_any_element()
     }
+}
+
+/// A row of a settings card, lit while it's the highlighted one; its words and control
+/// go in it.
+fn pref_row(id: impl Into<gpui::ElementId>, lit: bool) -> Stateful<Div> {
+    let t = t();
+    div()
+        .id(id)
+        .w_full()
+        .px_4()
+        .py_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .cursor_pointer()
+        .when(lit, |d| d.bg(rgb(t.selection)))
+        .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
+}
+
+/// A setting's name and the line saying what it does, on the left of its row.
+fn pref_words(row: Pref, lit: bool) -> Div {
+    let t = t();
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .child(
+            div()
+                .text_sm()
+                .when(lit, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                .text_color(rgb(t.text))
+                .child(row.title()),
+        )
+        .when(!row.about().is_empty(), |d| d.child(div().text_xs().text_color(rgb(t.text_dim)).child(row.about())))
+}
+
+/// An entry of a picker open under its settings row (a theme, an output).
+fn pick_item(id: (&'static str, usize), lit: bool, icon: &str, label: String) -> Stateful<Div> {
+    let t = t();
+    div()
+        .id(id)
+        .h(px(32.))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded_md()
+        .cursor_pointer()
+        .map(|d| selected_cues(d, lit))
+        .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
+        .child(ui::icon(icon, 14., if lit { t.accent } else { t.text_dim }))
+        .child(div().flex_1().min_w_0().truncate().text_sm().text_color(rgb(t.text)).child(label))
 }
 
 /// What a waveform strip draws: `from` to `to` of the song as RMS, the playhead and
@@ -9565,7 +9762,10 @@ impl Render for Odeion {
             )
             .font_family(UI)
             .text_color(rgb(t().text))
-            .child(
+            // Settings are a page in place of the sidebar and the list, the title bar and
+            // the now-playing card staying (plan 06).
+            .when_some(self.prefs.as_ref(), |d, prefs| d.child(self.render_prefs(prefs, cx)))
+            .when(self.prefs.is_none(), |d| d.child(
                 div()
                     .flex_1()
                     .min_h_0()
@@ -9654,11 +9854,10 @@ impl Render for Odeion {
                                     )
                             })
                     ),
-            )
+            ))
             .child(self.render_now(cx))
             .when(self.help, |d| d.child(self.render_help(cx)))
             .children(self.naming.clone().map(|name| self.render_naming(name, cx)))
-            .children(self.prefs.as_ref().map(|p| self.render_prefs(p, cx)))
             .children(self.trainer_sheet.map(|at| self.render_trainer_sheet(at, cx)))
             .children(self.export_sheet.as_ref().map(|sheet| self.render_export_sheet(sheet, cx)))
             .children(self.eq_sheet.map(|at| self.render_eq_sheet(at, cx)))
