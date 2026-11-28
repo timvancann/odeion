@@ -5,6 +5,11 @@ release's notes on GitHub.
 
 ## Unreleased
 
+## 0.10.0 (2026-11-28)
+
+Your library your way: fix a song's info right in its files, sort the library by
+dragging its fields, and settings in sections of their own.
+
 **New**
 
 - Edit a song's info: its title, artist, album, track and disc number, year and cover.
