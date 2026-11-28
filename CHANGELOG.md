@@ -5,6 +5,10 @@ release's notes on GitHub.
 
 ## Unreleased
 
+## 0.10.1 (2026-11-28)
+
+Edit info, fixed: a cleared field stays cleared, and Enter edits instead of saving.
+
 **Changed**
 
 - In Edit info, Enter edits the highlighted field, as in a spreadsheet, and Enter
