@@ -3918,10 +3918,20 @@ impl Odeion {
     fn info_key(&mut self, k: &gpui::Keystroke, press: keys::Press, typed: Option<String>, cx: &mut Context<Self>) {
         let Some(sheet) = &mut self.info else { return };
         match k.key.as_str() {
-            "escape" => self.info = None,
+            // Esc puts back the field being edited, and only then closes the sheet.
+            "escape" => {
+                if !sheet.cancel() {
+                    self.info = None;
+                }
+            }
+            "s" | "enter" if press.cmd => self.save_info(),
             "enter" if sheet.on_cover() => self.pick_cover(cx),
-            "enter" => self.save_info(),
-            "s" if press.cmd => self.save_info(),
+            // Enter edits the field, as in a spreadsheet; again, it's done.
+            "enter" => {
+                if !sheet.finish() {
+                    sheet.start();
+                }
+            }
             "tab" => sheet.step(!press.shift),
             "down" => sheet.step(true),
             "up" => sheet.step(false),
@@ -6973,52 +6983,71 @@ impl Odeion {
         let row = |id: (&'static str, usize), lit: bool| {
             div()
                 .id(id)
-                .min_h(px(36.))
+                .min_h(px(44.))
                 .px_3()
+                .py_1p5()
                 .flex()
                 .items_center()
-                .gap_3()
+                .gap_4()
                 .rounded_md()
                 .cursor_pointer()
-                .map(|d| selected_cues(d, lit))
+                .when(lit, |d| d.bg(rgb(t.selection)))
                 .when(!lit, |d| d.hover(|d| d.bg(rgb(t.hover))))
         };
         let label = |text: &'static str, changed: bool| {
             div()
-                .w(px(56.))
+                .w(px(72.))
                 .flex_none()
                 .text_sm()
                 .text_color(rgb(if changed { t.accent_text } else { t.text_dim }))
                 .child(text)
         };
+        let editing = sheet.editing.is_some();
         let fields: Vec<_> = sheet
             .rows
             .iter()
             .enumerate()
             .map(|(i, entry)| {
                 let lit = sheet.at == i;
-                let value = match (entry.value.is_empty(), entry.mixed()) {
+                let being_edited = lit && editing;
+                let shown = match (entry.value.is_empty(), entry.mixed()) {
                     // Songs that differ here keep their own unless something is typed.
-                    (true, true) => div().text_color(rgb(t.text_dim)).child(if lit { "▏mixed, each keeps its own" } else { "mixed, each keeps its own" }),
-                    // Selected whole: typing replaces it.
-                    _ if lit && sheet.fresh => div().child(div().px_0p5().rounded_sm().bg(rgb(t.accent_soft)).child(entry.value.clone())),
-                    _ if lit => div().child(format!("{}▏", entry.value)),
+                    (true, true) => div().text_color(rgb(t.text_dim)).child("mixed, each keeps its own"),
+                    // Being edited: the caret at the end.
+                    _ if being_edited => div().flex().child(entry.value.clone()).child(div().text_color(rgb(t.accent)).child("▏")),
+                    // Highlighted, not edited: selected whole, so typing replaces it.
+                    _ if lit && !entry.value.is_empty() => {
+                        div().child(div().px_0p5().rounded_sm().bg(rgb(t.accent_soft)).child(entry.value.clone()))
+                    }
                     _ => div().child(entry.value.clone()),
                 };
+                // A field drawn as one, so it reads as editable; lit while being edited.
+                let field = div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(32.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if being_edited { t.focus } else { t.border }))
+                    .bg(rgb(t.bg))
+                    .text_sm()
+                    .text_color(rgb(t.text))
+                    .when(entry.field.digits().is_some(), |d| d.max_w(px(120.)).font_family(MONO))
+                    .child(shown.truncate());
                 row(("info-field", i), lit)
                     .child(label(entry.field.label(), entry.changed()))
-                    .child(
-                        value
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(rgb(t.text))
-                            .when(entry.field.digits().is_some(), |d| d.font_family(MONO)),
-                    )
+                    .child(field)
                     .on_click(cx.listener(move |odeion, _, _, cx| {
+                        // A click on the highlighted field edits it, as Enter does.
                         if let Some(sheet) = &mut odeion.info {
-                            sheet.select(i);
+                            if sheet.at == i && sheet.editing.is_none() {
+                                sheet.start();
+                            } else if sheet.at != i {
+                                sheet.select(i);
+                            }
                         }
                         cx.notify();
                     }))
@@ -7076,11 +7105,11 @@ impl Odeion {
             .child(
                 div()
                     .id("info")
-                    .w(px(460.))
+                    .w(px(640.))
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .p_4()
+                    .p_5()
                     .rounded_lg()
                     .bg(rgb(t.surface))
                     .border_1()
@@ -7116,27 +7145,39 @@ impl Odeion {
                     .child(cover_row)
                     .child(
                         div()
-                            .pt_3()
+                            .pt_4()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap_3()
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .text_xs()
                                     .text_color(rgb(t.text_dim))
                                     .child("Saved into the files, so other players see it too."),
                             )
-                            .child(self.choice("info-cancel", "Cancel", "Esc", t.text, cx, |odeion| odeion.info = None))
+                            .child(self.choice("info-cancel", "Cancel", "", t.text, cx, |odeion| odeion.info = None))
                             .child(self.choice("info-save", "Save", "⌘S", t.accent_text, cx, |odeion| odeion.save_info())),
                     )
                     .child(
                         div()
-                            .pt_2()
+                            .pt_3()
+                            .flex()
+                            .flex_wrap()
+                            .gap_x_4()
+                            .gap_y_1()
                             .font_family(MONO)
                             .text_xs()
                             .text_color(rgb(t.text_dim))
-                            .child("Tab ↑ ↓ move   type to change   Enter or ⌘S save   Esc cancels"),
+                            .children(
+                                match editing {
+                                    true => ["Enter done", "Esc puts it back", "Tab next field", "⌘S save"],
+                                    false if at_cover => ["Enter choose an image", "↑ ↓ move", "⌘S save", "Esc close"],
+                                    false => ["Enter edit", "type to replace", "↑ ↓ Tab move", "⌘S save"],
+                                }
+                                .map(|hint| div().child(keys::on_this_system(hint).into_owned())),
+                            ),
                     ),
             )
     }

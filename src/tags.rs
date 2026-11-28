@@ -103,9 +103,11 @@ pub struct Sheet {
     pub rows: Vec<Entry>,
     /// The highlighted row: a field, or `rows.len()` for the cover.
     pub at: usize,
-    /// The highlighted field is selected whole, as a text field is when tabbed into:
-    /// typing replaces it, ⌫ clears it.
-    pub fresh: bool,
+    /// While the highlighted field is being edited, what it held before, for Esc. Not
+    /// editing, the field is selected whole, as a spreadsheet's cell: typing replaces
+    /// it, ⌫ clears it, Enter edits it from its end (Tim, 2026-11-28: Enter saving the
+    /// sheet was confusing, "Enter usually means start editing").
+    pub editing: Option<String>,
     /// An image chosen to become the cover.
     pub cover: Option<PathBuf>,
 }
@@ -131,7 +133,7 @@ impl Sheet {
             songs: tracks.iter().map(|t| t.path.clone()).collect(),
             rows,
             at: 0,
-            fresh: true,
+            editing: None,
             cover: None,
         })
     }
@@ -140,10 +142,32 @@ impl Sheet {
         self.at == self.rows.len()
     }
 
-    /// Highlights row `at` (the cover is the last), its field selected whole.
+    /// Highlights row `at` (the cover is the last), its field selected whole; a field
+    /// being edited keeps what was typed.
     pub fn select(&mut self, at: usize) {
         self.at = at.min(self.rows.len());
-        self.fresh = true;
+        self.editing = None;
+    }
+
+    /// Enter: edits the highlighted field from its end. Not on the cover.
+    pub fn start(&mut self) {
+        if let Some(entry) = self.rows.get(self.at) {
+            self.editing = Some(entry.value.clone());
+        }
+    }
+
+    /// Enter while editing: keeps what was typed. Whether a field was being edited.
+    pub fn finish(&mut self) -> bool {
+        self.editing.take().is_some()
+    }
+
+    /// Esc while editing: puts back what the field held. Whether a field was being edited.
+    pub fn cancel(&mut self) -> bool {
+        let Some(was) = self.editing.take() else { return false };
+        if let Some(entry) = self.rows.get_mut(self.at) {
+            entry.value = was;
+        }
+        true
     }
 
     /// The next row, or the previous; Tab and ⇧Tab, ↓ and ↑.
@@ -164,8 +188,8 @@ impl Sheet {
         if text.is_empty() {
             return;
         }
-        if std::mem::replace(&mut self.fresh, false) {
-            entry.value.clear();
+        if self.editing.is_none() {
+            self.editing = Some(std::mem::take(&mut entry.value));
         }
         match entry.field.digits() {
             Some(most) => {
@@ -176,14 +200,15 @@ impl Sheet {
         }
     }
 
-    /// ⌫: clears a field selected whole, otherwise its last character.
+    /// ⌫: clears a field selected whole (editing it, so Esc brings it back), otherwise
+    /// takes its last character.
     pub fn backspace(&mut self) {
-        let fresh = std::mem::replace(&mut self.fresh, false);
         let Some(entry) = self.rows.get_mut(self.at) else { return };
-        if fresh {
-            entry.value.clear();
-        } else {
-            entry.value.pop();
+        match self.editing {
+            None => self.editing = Some(std::mem::take(&mut entry.value)),
+            Some(_) => {
+                entry.value.pop();
+            }
         }
     }
 
@@ -462,7 +487,10 @@ fn check(original: &Path, copy: &Path, kind: FileType, edit: &Edit) -> Result<()
         let what = item.split('=').next().unwrap_or_default();
         return Err(format!("writing would have lost or changed a tag Odeion doesn't edit ({what})"));
     }
-    let tag = after.primary_tag().ok_or("the tags didn't read back")?;
+    // An edit that only takes things out of a file without other tags leaves none at
+    // all: every field then reads back empty, as asked.
+    let empty = lofty::tag::Tag::new(after.primary_tag_type());
+    let tag = after.primary_tag().unwrap_or(&empty);
     let text = |asked: &Option<String>, got: Option<std::borrow::Cow<str>>| match asked {
         Some(v) => got.map(|g| g.trim().to_string()).unwrap_or_default() == *v,
         None => true,
@@ -536,6 +564,37 @@ mod tests {
         sheet.backspace();
         assert_eq!(sheet.rows[1].value, "", "⌫ clears a field selected whole");
         assert_eq!(sheet.edit(None), Edit { title: Some("Gypsy".into()), artist: Some(String::new()), ..Edit::default() });
+    }
+
+    #[test]
+    fn enter_edits_a_field_from_its_end_and_esc_puts_it_back() {
+        let a = track("Holy Diver", "Holy Diver", 2);
+        let mut sheet = Sheet::new(&[&a]).unwrap();
+        sheet.start();
+        sheet.type_text(" (live)");
+        assert_eq!(sheet.rows[0].value, "Holy Diver (live)", "Enter keeps the field, typing adds to it");
+        assert!(sheet.finish());
+        assert!(!sheet.finish(), "done editing");
+        // Typing replaces again once done; Esc brings back what was there.
+        sheet.type_text("Gypsy");
+        assert!(sheet.cancel());
+        assert_eq!(sheet.rows[0].value, "Holy Diver (live)");
+        assert!(!sheet.cancel(), "Esc with nothing being edited is the sheet's");
+        // A cleared field comes back with Esc too.
+        sheet.backspace();
+        assert_eq!(sheet.rows[0].value, "");
+        sheet.cancel();
+        assert_eq!(sheet.rows[0].value, "Holy Diver (live)");
+        // Moving on keeps what was typed, as Tab in a spreadsheet does.
+        sheet.start();
+        sheet.type_text("!");
+        sheet.step(true);
+        assert_eq!(sheet.rows[0].value, "Holy Diver (live)!");
+        assert!(!sheet.cancel(), "nothing being edited on the next row");
+        // On the cover row there's nothing to edit.
+        sheet.select(sheet.rows.len());
+        sheet.start();
+        assert!(sheet.editing.is_none());
     }
 
     #[test]
@@ -716,6 +775,29 @@ mod tests {
         let audio = noise(16_000);
         round_trip("song.wav", wav(&audio), Some(&audio));
         round_trip("song.flac", flac(&audio), Some(&audio));
+    }
+
+    #[test]
+    fn a_field_cleared_stays_cleared() {
+        let dir = scratch("cleared");
+        let song = dir.join("Dio").join("Holy Diver");
+        std::fs::create_dir_all(&song).unwrap();
+        let path = song.join("1. Rainbow in the Dark.wav");
+        std::fs::write(&path, wav(&noise(16_000))).unwrap();
+        let read = || crate::scan::reread(std::slice::from_ref(&dir), &path, &dir.join("covers"));
+        // Without tags, the folders and the file name say what they can.
+        let t = read();
+        assert_eq!((t.title.as_str(), t.artist.as_str(), t.album.as_str(), t.number), ("Rainbow in the Dark", "Dio", "Holy Diver", Some(1)));
+        // Taking out what isn't there, from a file with no tags: it reads back empty.
+        write(&path, &Edit { track: Some(None), ..Edit::default() }).unwrap();
+        // With a tag, the folders and the file name no longer fill in what was cleared.
+        write(&path, &Edit { title: Some("Rainbow".into()), artist: Some(String::new()), track: Some(None), ..Edit::default() }).unwrap();
+        let t = read();
+        assert_eq!((t.title.as_str(), t.artist.as_str(), t.album.as_str(), t.number), ("Rainbow", "", "", None));
+        // A title taken out still has a name to show: the file's.
+        write(&path, &Edit { title: Some(String::new()), ..Edit::default() }).unwrap();
+        assert_eq!(read().title, "Rainbow in the Dark");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

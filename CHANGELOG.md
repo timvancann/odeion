@@ -5,6 +5,19 @@ release's notes on GitHub.
 
 ## Unreleased
 
+**Changed**
+
+- In Edit info, Enter edits the highlighted field, as in a spreadsheet, and Enter
+  again is done with it; Esc puts back what it held. Typing still replaces the field.
+  Saving is `⌘S` or the Save button. The sheet is wider, and its fields look like
+  fields.
+
+**Fixed**
+
+- A field cleared in Edit info stays cleared. Saving a file that had no tags failed,
+  and an artist, album or track number taken out came back from the folder or file
+  name. The folders and file name now only stand in for files without any tags.
+
 ## 0.10.0 (2026-11-28)
 
 Your library your way: fix a song's info right in its files, sort the library by

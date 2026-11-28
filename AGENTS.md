@@ -140,7 +140,11 @@ and draws:
 - `media.rs`: the media keys and Now Playing via souvlaki. macOS sends media keys to the
   app that last reported a song, not as key presses, so this is the only way in.
 - `tags.rs`: Edit info (plan 04; Tim, 2026-11-27, "into the files of course"): the
-  sheet's rules (a field per row, typing replaces a field selected whole, number fields
+  sheet's rules (a field per row, worked as a spreadsheet's cells: a highlighted field
+  is selected whole, typing replaces it and ⌫ clears it, Enter or a click on it edits
+  it from its end, Enter again is done, Esc puts it back, and only then closes the
+  sheet; Tim, 2026-11-28: Enter used to save, "Enter usually means start editing", so
+  saving is ⌘S, ⌘Enter or the Save button; number fields
   digits only, songs that differ keep their own unless something is typed) and writing
   title, artist, album, track, disc, year and front cover into the files. Each format
   through its own tag (ID3v2.4 for MP3, AIFF and WAV, plus an MP3's old ID3v1 and the
@@ -189,7 +193,9 @@ New behaviour gets its rule and tests in one of these, not in `view.rs`.
 Odeion scans the folders listed in ⌘, settings (`settings.json` in the data folder below),
 none at first: the empty list asks for one (a button, or Enter). A track's Artist/Album
 path is read from the deepest listed folder holding it. Tags and embedded covers win
-over the path; Edit info (⌘I, a song's menu, "Edit info of all…" on an album or artist)
+over the path, and a file with tags is only what they say (Tim, 2026-11-28: an artist,
+album or track number cleared in Edit info came back from the folders): the path
+stands in for files without any tags, and for a missing title; Edit info (⌘I, a song's menu, "Edit info of all…" on an album or artist)
 changes them in the files themselves, the only time Odeion writes to a song. A listed folder a scan can't open shows an error ("can't read
 ~/Music: ...") and "can't read" beside it in settings.
 

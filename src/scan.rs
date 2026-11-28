@@ -19,8 +19,8 @@ const AUDIO: &[&str] = &["mp3", "flac", "wav", "aif", "aiff", "m4a", "ogg"];
 const READERS: usize = 4;
 /// The tag reader's version. Raise it when `read_tags` learns something new, and every
 /// track is read once more. 1 added the length, 2 the year and disc, 3 the genre and
-/// sort names.
-pub const READER: u32 = 3;
+/// sort names, 4 stopped filling a tagged file's empty fields from its path.
+pub const READER: u32 = 4;
 const COVER_SIZE: u32 = 256;
 
 /// An audio file on disk: path, size and modification time in seconds.
@@ -276,18 +276,15 @@ fn read_tags(mut track: Track, covers: &Path) -> Track {
         return track;
     };
     let text = |s: Option<std::borrow::Cow<str>>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    // A file with tags is what they say: the folders and the file name only stand in for
+    // files without any, or a field cleared in Edit info would come straight back. A
+    // song always has a title, though: without one it's the file's name.
     if let Some(title) = text(tag.title()) {
         track.title = title;
     }
-    if let Some(artist) = text(tag.artist()) {
-        track.artist = artist;
-    }
-    if let Some(album) = text(tag.album()) {
-        track.album = album;
-    }
-    if let Some(number) = tag.track() {
-        track.number = Some(number);
-    }
+    track.artist = text(tag.artist()).unwrap_or_default();
+    track.album = text(tag.album()).unwrap_or_default();
+    track.number = tag.track();
     track.year = tag.date().map(|d| u32::from(d.year)).filter(|&y| y > 0);
     track.disc = tag.disk();
     track.genre = text(tag.genre());
